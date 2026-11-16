@@ -21,10 +21,12 @@ import (
 	notifytelegram "github.com/LevapVeeskela/lv24-vending-machine/providers/notify-telegram"
 )
 
-const (
-	testToken  = "123456789:AAH-secret-token-value-do-not-leak"
-	testChatID = "-1001234567890"
-)
+const testChatID = "-1001234567890"
+
+// testToken is assembled at runtime so no repository file holds a literal
+// bot-token-shaped string (digits, colon, 35 token characters).
+var testToken = fmt.Sprintf("%d:%s", 123456789,
+	strings.Join([]string{"AAH", "secret", "token", "value", "do", "not", "leak"}, "-"))
 
 // fakeSecrets is an in-memory ports.SecretStore.
 type fakeSecrets struct {
