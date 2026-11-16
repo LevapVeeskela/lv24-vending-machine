@@ -4,5 +4,6 @@ use (
 	./core
 	./providers/decision-drex
 	./providers/marketdata-binance
+	./providers/notify-telegram
 	./tools
 )
