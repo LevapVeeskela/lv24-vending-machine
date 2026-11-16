@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"regexp"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -594,5 +595,128 @@ func TestErrorsPropagate(t *testing.T) {
 	jr3.appendErr = boom
 	if _, err := lb3.Run(context.Background()); !errors.Is(err, boom) {
 		t.Fatalf("Run() append err = %v, want boom", err)
+	}
+}
+
+func TestMissingBarSkipped(t *testing.T) {
+	jr := &memJournal{}
+	bars := []domain.Candle{
+		candle("BTCUSDT", "1h", sigTS, sigTS.Add(time.Hour), "100", "110", "90", "105", "1000"),
+		// The 07:00 bar is missing: the window no longer spans N intervals.
+		candle("BTCUSDT", "1h", sigTS.Add(2*time.Hour), sigTS.Add(3*time.Hour),
+			"108", "112", "100", "110", "1500"),
+	}
+	src := &stubSource{candles: bars}
+	seedRequest(t, jr, entryReq("sig-gap", domain.SideBuy), "dec-1")
+	lb, err := New(jr, src, testDeps(), testConfig())
+	if err != nil {
+		t.Fatalf("New() = %v", err)
+	}
+	sum, err := lb.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run() = %v", err)
+	}
+	if sum != (Summary{Skipped: 1}) {
+		t.Fatalf("summary = %+v, want {Skipped:1}", sum)
+	}
+	if n := jr.count(); n != 1 {
+		t.Fatalf("events = %d, want 1 (no outcome event on a gappy window)", n)
+	}
+}
+
+func TestShiftedBarSkipped(t *testing.T) {
+	jr := &memJournal{}
+	bars := []domain.Candle{
+		candle("BTCUSDT", "1h", sigTS, sigTS.Add(time.Hour), "100", "110", "90", "105", "1000"),
+		// Opens half an hour late: not on the 1h grid.
+		candle("BTCUSDT", "1h", sigTS.Add(90*time.Minute), sigTS.Add(150*time.Minute),
+			"105", "115", "95", "112", "2000"),
+	}
+	src := &stubSource{candles: bars}
+	seedRequest(t, jr, entryReq("sig-shift", domain.SideBuy), "dec-1")
+	lb, err := New(jr, src, testDeps(), testConfig())
+	if err != nil {
+		t.Fatalf("New() = %v", err)
+	}
+	sum, err := lb.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run() = %v", err)
+	}
+	if sum != (Summary{Skipped: 1}) {
+		t.Fatalf("summary = %+v, want {Skipped:1}", sum)
+	}
+	if n := jr.count(); n != 1 {
+		t.Fatalf("events = %d, want 1 (no outcome event on a shifted window)", n)
+	}
+}
+
+func TestCandlesHashRepresentationIndependent(t *testing.T) {
+	rep := func(o, h, l, c, v string, openHour int) domain.Candle {
+		return candle("BTCUSDT", "1h",
+			time.Date(2026, time.November, 10, openHour, 0, 0, 0, time.UTC),
+			time.Date(2026, time.November, 10, openHour+1, 0, 0, 0, time.UTC),
+			o, h, l, c, v)
+	}
+	plain := []domain.Candle{rep("100", "110", "90", "105", "1000", 6), rep("105", "115", "95", "112", "2000", 7)}
+	scaled := []domain.Candle{
+		rep("100.0", "110.00", "90.000", "105.0000", "1000.00000", 6),
+		rep("105.0", "115.00", "95.000", "112.0000", "2000.00000", 7),
+	}
+	// Guard the test itself: the two fixtures must be numerically equal.
+	for i := range plain {
+		for _, pair := range [][2]domain.Decimal{
+			{plain[i].Open, scaled[i].Open},
+			{plain[i].High, scaled[i].High},
+			{plain[i].Low, scaled[i].Low},
+			{plain[i].Close, scaled[i].Close},
+			{plain[i].Volume, scaled[i].Volume},
+		} {
+			if pair[0].Cmp(pair[1]) != 0 {
+				t.Fatalf("fixtures differ numerically: %q vs %q", pair[0], pair[1])
+			}
+		}
+	}
+
+	label := func(candles []domain.Candle) domain.Outcome {
+		t.Helper()
+		jr := &memJournal{}
+		seedRequest(t, jr, entryReq("sig-rep", domain.SideBuy), "dec-1")
+		lb, err := New(jr, &stubSource{candles: candles}, testDeps(), testConfig())
+		if err != nil {
+			t.Fatalf("New() = %v", err)
+		}
+		if sum, err := lb.Run(context.Background()); err != nil {
+			t.Fatalf("Run() = %v", err)
+		} else if sum != (Summary{Labeled: 1}) {
+			t.Fatalf("summary = %+v, want {Labeled:1}", sum)
+		}
+		return labeledOutcome(t, jr)
+	}
+	first, second := label(plain), label(scaled)
+	if !hex64.MatchString(first.CandlesHash) || !hex64.MatchString(second.CandlesHash) {
+		t.Fatalf("hashes = %q, %q, want 64 lowercase hex", first.CandlesHash, second.CandlesHash)
+	}
+	if first.CandlesHash != second.CandlesHash {
+		t.Fatalf("hash depends on representation: %q vs %q", first.CandlesHash, second.CandlesHash)
+	}
+}
+
+func TestUnsupportedTimeframeErrors(t *testing.T) {
+	for _, tf := range []string{"", "1M", "xyz", "h", "0h", "1H", "1.5h"} {
+		jr := &memJournal{}
+		req := entryReq("sig-badtf", domain.SideBuy)
+		req.Timeframe = tf
+		seedRequest(t, jr, req, "dec-1")
+		lb, err := New(jr, &stubSource{candles: twoBars()}, testDeps(), testConfig())
+		if err != nil {
+			t.Fatalf("New() = %v", err)
+		}
+		_, err = lb.Run(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "unsupported timeframe") {
+			t.Fatalf("Run() with timeframe %q = %v, want a clear unsupported-timeframe error", tf, err)
+		}
+		if n := jr.count(); n != 1 {
+			t.Fatalf("events = %d, want 1 (no outcome event on bad timeframe)", n)
+		}
 	}
 }

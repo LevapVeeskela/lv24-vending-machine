@@ -26,9 +26,10 @@ const returnScale = 12
 
 // Config tunes one Labeler.
 type Config struct {
-	// HorizonBars is the number of closed candles per label.
+	// HorizonBars is the number of consecutive timeframe intervals per label.
 	HorizonBars int
-	// FeeBps is the one-way fee in basis points; the round trip is 2x.
+	// FeeBps is the one-way fee in basis points. NetReturn subtracts twice
+	// this rate (entry plus exit: the round trip).
 	FeeBps int
 	// CodeVersion is stamped on every appended event envelope.
 	CodeVersion string
@@ -130,9 +131,13 @@ func (l *Labeler) Run(ctx context.Context) (Summary, error) {
 }
 
 // labelOne fetches the candles following req and appends the outcome.labeled
-// event. It reports false when fewer than HorizonBars closed candles exist
-// yet, in which case nothing is appended.
+// event. It reports false when fewer than HorizonBars consecutive closed
+// candles exist yet, in which case nothing is appended.
 func (l *Labeler) labelOne(ctx context.Context, ev domain.Event, req domain.GateRequest, now time.Time) (bool, error) {
+	interval, err := parseInterval(req.Timeframe)
+	if err != nil {
+		return false, err
+	}
 	candles, err := l.src.Candles(ctx, domain.CandleRequest{
 		Symbol:   req.Instrument.Symbol,
 		Interval: req.Timeframe,
@@ -147,6 +152,11 @@ func (l *Labeler) labelOne(ctx context.Context, ev domain.Event, req domain.Gate
 		return false, nil
 	}
 	bars = bars[:l.cfg.HorizonBars]
+	if !contiguous(bars, interval) {
+		// A missing or shifted bar breaks the horizon: labeling over a
+		// gappy window would silently change the holding period.
+		return false, nil
+	}
 	oc, err := l.buildOutcome(req, bars, now)
 	if err != nil {
 		return false, err
@@ -203,6 +213,55 @@ func selectBars(all []domain.Candle, req domain.GateRequest, now time.Time) []do
 	return out
 }
 
+// parseInterval parses a timeframe of integer magnitude plus unit m/h/d/w
+// (minutes, hours, days, weeks) into a duration. Anything else is a clear
+// error: the horizon is N intervals, so an unknown bar length cannot label.
+func parseInterval(tf string) (time.Duration, error) {
+	bad := func() (time.Duration, error) {
+		return 0, fmt.Errorf("outcome: unsupported timeframe %q (want e.g. 5m, 1h, 1d, 1w)", tf)
+	}
+	i := 0
+	for i < len(tf) && tf[i] >= '0' && tf[i] <= '9' {
+		i++
+	}
+	if i == 0 || i >= len(tf) {
+		return bad()
+	}
+	n, err := strconv.Atoi(tf[:i])
+	if err != nil || n <= 0 {
+		return bad()
+	}
+	var unit time.Duration
+	switch tf[i:] {
+	case "m":
+		unit = time.Minute
+	case "h":
+		unit = time.Hour
+	case "d":
+		unit = 24 * time.Hour
+	case "w":
+		unit = 7 * 24 * time.Hour
+	default:
+		return bad()
+	}
+	if d := time.Duration(n) * unit; d > 0 {
+		return d, nil
+	}
+	return bad()
+}
+
+// contiguous reports whether bars open exactly one interval apart starting
+// at bars[0].OpenTime.
+func contiguous(bars []domain.Candle, interval time.Duration) bool {
+	base := bars[0].OpenTime.UTC()
+	for i := 1; i < len(bars); i++ {
+		if want := base.Add(time.Duration(i) * interval); !bars[i].OpenTime.UTC().Equal(want) {
+			return false
+		}
+	}
+	return true
+}
+
 // buildOutcome computes the labeled outcome over exactly the used bars.
 func (l *Labeler) buildOutcome(req domain.GateRequest, bars []domain.Candle, now time.Time) (domain.Outcome, error) {
 	entry := bars[0].Open
@@ -223,6 +282,8 @@ func (l *Labeler) buildOutcome(req domain.GateRequest, bars []domain.Candle, now
 	if err != nil {
 		return domain.Outcome{}, fmt.Errorf("outcome: gross return for signal %q: %w", req.SignalID, err)
 	}
+	// Round-trip fee: FeeBps is one-way, so the label pays it twice
+	// (entry plus exit).
 	fee, err := domain.MustParseDecimal(strconv.Itoa(2*l.cfg.FeeBps)).QuoRound(domain.MustParseDecimal("10000"), returnScale)
 	if err != nil {
 		return domain.Outcome{}, fmt.Errorf("outcome: fee: %w", err)
@@ -287,6 +348,19 @@ type candleHash struct {
 	Volume    string `json:"volume"`
 }
 
+// decOne is the QuoRound divisor for scale normalization.
+var decOne = domain.MustParseDecimal("1")
+
+// norm12 renders d with exactly 12 fractional digits so the hash is
+// representation-independent: "105" and "105.0" hash identically.
+func norm12(d domain.Decimal) string {
+	q, err := d.QuoRound(decOne, returnScale)
+	if err != nil {
+		return d.String()
+	}
+	return q.String()
+}
+
 // hashCandles returns the lowercase hex SHA-256 of the canonical JSON of
 // exactly the used candles.
 func hashCandles(bars []domain.Candle) string {
@@ -297,11 +371,11 @@ func hashCandles(bars []domain.Candle) string {
 			Interval:  b.Interval,
 			OpenTime:  b.OpenTime.UTC().Format(time.RFC3339Nano),
 			CloseTime: b.CloseTime.UTC().Format(time.RFC3339Nano),
-			Open:      b.Open.String(),
-			High:      b.High.String(),
-			Low:       b.Low.String(),
-			Close:     b.Close.String(),
-			Volume:    b.Volume.String(),
+			Open:      norm12(b.Open),
+			High:      norm12(b.High),
+			Low:       norm12(b.Low),
+			Close:     norm12(b.Close),
+			Volume:    norm12(b.Volume),
 		})
 	}
 	raw, err := json.Marshal(items)
