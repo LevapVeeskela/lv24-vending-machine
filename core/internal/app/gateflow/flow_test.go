@@ -638,6 +638,178 @@ func TestConcurrentDuplicateSignalSharesOneExecution(t *testing.T) {
 		t.Fatalf("events = %d decisions = %d, want 6 events over 2 decisions", len(evs), len(decisions))
 	}
 }
+
+func TestProviderCallSurvivesClientCancel(t *testing.T) {
+	jr := &memJournal{}
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	prov := &fnDecision{fn: func(ctx context.Context, _ domain.DecisionRequest) (domain.DecisionResponse, error) {
+		started <- struct{}{}
+		<-release
+		if err := ctx.Err(); err != nil {
+			return domain.DecisionResponse{}, err
+		}
+		return allowResp(), nil
+	}}
+	f, _ := New(jr, prov, testDeps("dec-1"), testConfig())
+	ctx, cancel := context.WithCancel(context.Background())
+	type out struct {
+		res Result
+		err error
+	}
+	done := make(chan out, 1)
+	go func() {
+		res, err := f.Evaluate(ctx, entryReq())
+		done <- out{res, err}
+	}()
+	<-started
+	cancel()
+	close(release)
+	got := <-done
+	if got.err != nil {
+		t.Fatalf("Evaluate() = %v", got.err)
+	}
+	if got.res.Verdict.Verdict != domain.VerdictAllow || got.res.Response == nil {
+		t.Fatalf("result = %+v, want ALLOW from the completed provider call", got.res)
+	}
+	if n := jr.count(); n != 3 {
+		t.Fatalf("events = %d, want request response verdict", n)
+	}
+}
+
+func TestSignalReusedWithDifferentBodyConflicts(t *testing.T) {
+	mutations := map[string]func(*domain.GateRequest){
+		"price": func(r *domain.GateRequest) { r.Price = domain.MustParseDecimal("67433.00") },
+		"state": func(r *domain.GateRequest) { r.State = map[string]float64{"rsi": 61} },
+	}
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			jr := &memJournal{}
+			prov := &fnDecision{fn: func(context.Context, domain.DecisionRequest) (domain.DecisionResponse, error) {
+				return allowResp(), nil
+			}}
+			f, _ := New(jr, prov, testDeps("dec-1", "dec-2"), testConfig())
+			if _, err := f.Evaluate(context.Background(), entryReq()); err != nil {
+				t.Fatalf("first Evaluate() = %v", err)
+			}
+			before := jr.count()
+			req := entryReq()
+			mutate(&req)
+			if _, err := f.Evaluate(context.Background(), req); domain.CodeOf(err) != domain.CodeConflict {
+				t.Fatalf("changed-body Evaluate() = %v, want conflict", err)
+			}
+			if prov.calls != 1 {
+				t.Fatalf("provider calls = %d, want 1", prov.calls)
+			}
+			if after := jr.count(); after != before {
+				t.Fatalf("events = %d, want unchanged %d", after, before)
+			}
+		})
+	}
+}
+
+func TestInflightSignalWithDifferentBodyConflicts(t *testing.T) {
+	jr := &memJournal{}
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	prov := &fnDecision{fn: func(ctx context.Context, _ domain.DecisionRequest) (domain.DecisionResponse, error) {
+		started <- struct{}{}
+		select {
+		case <-release:
+			return allowResp(), nil
+		case <-ctx.Done():
+			return domain.DecisionResponse{}, ctx.Err()
+		}
+	}}
+	f, _ := New(jr, prov, testDeps("dec-1"), testConfig())
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := f.Evaluate(context.Background(), entryReq())
+		firstDone <- err
+	}()
+	<-started
+	changed := entryReq()
+	changed.Price = domain.MustParseDecimal("1.00")
+	if _, err := f.Evaluate(context.Background(), changed); domain.CodeOf(err) != domain.CodeConflict {
+		t.Fatalf("conflicting in-flight Evaluate() = %v, want conflict", err)
+	}
+	if n := jr.count(); n != 0 {
+		t.Fatalf("events = %d, want none from the conflicting caller", n)
+	}
+	close(release)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first Evaluate() = %v", err)
+	}
+	if n := jr.count(); n != 3 {
+		t.Fatalf("events = %d, want request response verdict", n)
+	}
+}
+
+func TestRequestTimestampPrecedesDecisionTimestamp(t *testing.T) {
+	jr := &memJournal{}
+	var mu sync.Mutex
+	now := fixedTime
+	deps := ports.Deps{
+		Clock: func() time.Time {
+			mu.Lock()
+			defer mu.Unlock()
+			now = now.Add(time.Second)
+			return now
+		},
+		NewID: func() string { return "dec-1" },
+	}
+	prov := &fnDecision{fn: func(context.Context, domain.DecisionRequest) (domain.DecisionResponse, error) {
+		return allowResp(), nil
+	}}
+	f, _ := New(jr, prov, deps, testConfig())
+	res, err := f.Evaluate(context.Background(), entryReq())
+	if err != nil {
+		t.Fatalf("Evaluate() = %v", err)
+	}
+	evs, _ := jr.Query(context.Background(), 0, "")
+	if len(evs) != 3 {
+		t.Fatalf("events = %d, want 3", len(evs))
+	}
+	reqTS, respTS, verdictTS := evs[0].TS, evs[1].TS, evs[2].TS
+	if reqTS.After(respTS) || !reqTS.Before(respTS) {
+		t.Fatalf("request ts %v, response ts %v: want request before response", reqTS, respTS)
+	}
+	if !respTS.Equal(verdictTS) {
+		t.Fatalf("response ts %v != verdict ts %v", respTS, verdictTS)
+	}
+	if !res.Verdict.DecidedAt.Equal(verdictTS) {
+		t.Fatalf("decidedAt %v != verdict ts %v", res.Verdict.DecidedAt, verdictTS)
+	}
+}
+
+func TestRepeatedProviderFailureReusesAbstain(t *testing.T) {
+	jr := &memJournal{}
+	prov := &fnDecision{fn: func(context.Context, domain.DecisionRequest) (domain.DecisionResponse, error) {
+		return domain.DecisionResponse{}, errors.New("boom")
+	}}
+	f, _ := New(jr, prov, testDeps("dec-1", "dec-2"), testConfig())
+	first, err := f.Evaluate(context.Background(), entryReq())
+	if err != nil {
+		t.Fatalf("first Evaluate() = %v", err)
+	}
+	second, err := f.Evaluate(context.Background(), entryReq())
+	if err != nil {
+		t.Fatalf("second Evaluate() = %v", err)
+	}
+	if !second.Reused || second.ProviderErr != nil || second.Response != nil {
+		t.Fatalf("replay = %+v, want Reused with no provider contact", second)
+	}
+	if second.Verdict.Verdict != domain.VerdictAbstain || second.Verdict.DecisionID != first.Verdict.DecisionID {
+		t.Fatalf("replayed verdict = %+v, want the stored ABSTAIN", second.Verdict)
+	}
+	if prov.calls != 1 {
+		t.Fatalf("provider calls = %d, want 1", prov.calls)
+	}
+	if n := jr.count(); n != 2 {
+		t.Fatalf("events = %d, want request plus verdict", n)
+	}
+}
+
 func TestNewRejectsBadConfig(t *testing.T) {
 	if _, err := New(nil, nil, testDeps(), testConfig()); err == nil {
 		t.Fatalf("New(nil journal) = nil, want error")

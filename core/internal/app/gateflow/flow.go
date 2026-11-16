@@ -8,6 +8,7 @@ package gateflow
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -63,11 +64,52 @@ type Flow struct {
 }
 
 // inflightCall tracks one running Evaluate so concurrent duplicates of the
-// same signal wait for it instead of calling the provider twice.
+// same signal wait for it instead of calling the provider twice. fingerprint
+// binds the call to one request body, so a different body under the same
+// signal id is rejected instead of sharing the result.
 type inflightCall struct {
-	done chan struct{}
-	res  Result
-	err  error
+	done        chan struct{}
+	fingerprint [sha256.Size]byte
+	res         Result
+	err         error
+}
+
+// errSignalBodyConflict marks a reused signal id sent with another body.
+func errSignalBodyConflict() error {
+	return domain.NewError(domain.CodeConflict, "gateflow: signalId already used with a different request body")
+}
+
+// requestFingerprint returns the sha256 of the canonical JSON encoding of req.
+//
+// json.Marshal is deterministic for GateRequest (sorted state keys, string
+// decimals, RFC3339Nano timestamps), so the fingerprint identifies the body
+// of a signal id both across restarts and within one process.
+func requestFingerprint(req domain.GateRequest) ([sha256.Size]byte, []byte, error) {
+	raw, err := json.Marshal(req)
+	if err != nil {
+		return [sha256.Size]byte{}, nil, fmt.Errorf("gateflow: encode gate request: %w", err)
+	}
+	return sha256.Sum256(raw), raw, nil
+}
+
+// sameRequestAs reports a conflict unless payload decodes to a request whose
+// fingerprint equals fp. An empty payload cannot be compared and is ignored.
+func sameRequestAs(payload []byte, fp [sha256.Size]byte) error {
+	if len(payload) == 0 {
+		return nil
+	}
+	var stored domain.GateRequest
+	if err := json.Unmarshal(payload, &stored); err != nil {
+		return fmt.Errorf("gateflow: decode recorded gate request: %w", err)
+	}
+	got, _, err := requestFingerprint(stored)
+	if err != nil {
+		return err
+	}
+	if got != fp {
+		return errSignalBodyConflict()
+	}
+	return nil
 }
 
 // New builds a Flow. A nil provider is accepted because exit intents never
@@ -248,19 +290,31 @@ func (f *Flow) appendOne(ctx context.Context, kind, decisionID, policyHash strin
 // Evaluate runs one gate request through the provider and the journal.
 //
 // Concurrent duplicates of the same signal id share one execution: the
-// second caller waits for the first and receives its Result. Different
+// second caller waits for the first and receives its Result. A duplicate with
+// a different request body is a CodeConflict and writes nothing. Different
 // signals never block each other.
 //
 // Exit intents never touch the provider. Entry intents call it under a
-// single deadline covering all retries; journal appends use a
-// cancellation-detached context so a client disconnect cannot lose a
-// recorded verdict.
+// single deadline covering all retries; journal I/O and the provider call are
+// detached from caller cancellation so a client disconnect cannot lose a
+// recorded verdict or abort a paid call.
 func (f *Flow) Evaluate(ctx context.Context, req domain.GateRequest) (Result, error) {
 	if err := validateRequest(req); err != nil {
 		return Result{}, err
 	}
+	fp, raw, err := requestFingerprint(req)
+	if err != nil {
+		return Result{}, err
+	}
+	// Only the wait for an in-flight duplicate honours caller cancellation.
+	workCtx := context.WithoutCancel(ctx)
+
 	f.mu.Lock()
 	if c, ok := f.inflight[req.SignalID]; ok {
+		if c.fingerprint != fp {
+			f.mu.Unlock()
+			return Result{}, errSignalBodyConflict()
+		}
 		f.mu.Unlock()
 		select {
 		case <-c.done:
@@ -269,11 +323,11 @@ func (f *Flow) Evaluate(ctx context.Context, req domain.GateRequest) (Result, er
 			return Result{}, ctx.Err()
 		}
 	}
-	c := &inflightCall{done: make(chan struct{})}
+	c := &inflightCall{done: make(chan struct{}), fingerprint: fp}
 	f.inflight[req.SignalID] = c
 	f.mu.Unlock()
 
-	res, err := f.evaluate(ctx, req)
+	res, err := f.evaluate(workCtx, req, fp, raw)
 
 	c.res, c.err = res, err
 	close(c.done)
@@ -284,12 +338,14 @@ func (f *Flow) Evaluate(ctx context.Context, req domain.GateRequest) (Result, er
 }
 
 // evaluate runs one gate request; it assumes no duplicate is in flight.
-func (f *Flow) evaluate(ctx context.Context, req domain.GateRequest) (Result, error) {
+func (f *Flow) evaluate(ctx context.Context, req domain.GateRequest, fp [sha256.Size]byte, raw []byte) (Result, error) {
 	decisionID := ""
+	var storedRequest []byte
 	if err := f.jr.Walk(ctx, 0, domain.EventGateRequest, func(ev domain.Event) error {
 		sig, ok := signalOf(ev.Payload)
 		if ok && sig == req.SignalID {
 			decisionID = ev.DecisionID
+			storedRequest = append([]byte(nil), ev.Payload...)
 		}
 		return nil
 	}); err != nil {
@@ -300,7 +356,11 @@ func (f *Flow) evaluate(ctx context.Context, req domain.GateRequest) (Result, er
 		if decisionID == "" {
 			return Result{}, fmt.Errorf("gateflow: NewID returned an empty decision id")
 		}
-		return f.complete(ctx, req, decisionID)
+		return f.complete(ctx, req, decisionID, raw)
+	}
+	// The signal id is already recorded: only the identical body may reuse it.
+	if err := sameRequestAs(storedRequest, fp); err != nil {
+		return Result{}, err
 	}
 	var verdict *domain.GateVerdict
 	if err := f.jr.Walk(ctx, 0, domain.EventGateVerdict, func(ev domain.Event) error {
@@ -323,15 +383,23 @@ func (f *Flow) evaluate(ctx context.Context, req domain.GateRequest) (Result, er
 	// The request exists but the verdict does not (crash between
 	// appends): continue with the same decision id and append only
 	// the missing events, never a second gate.request.
-	return f.complete(ctx, req, decisionID)
+	return f.complete(ctx, req, decisionID, raw)
 }
 
 // complete evaluates req and appends the events missing for decisionID.
-func (f *Flow) complete(ctx context.Context, req domain.GateRequest, decisionID string) (Result, error) {
-	now := f.deps.Now().UTC()
+//
+// Timestamps are split by phase: a fresh decision stamps gate.request with
+// its admission time, and every event produced by the decision (response,
+// model change, verdict) carries decidedAt. A crash retry never rewrites
+// gate.request, so its original admission time survives.
+func (f *Flow) complete(ctx context.Context, req domain.GateRequest, decisionID string, reqRaw []byte) (Result, error) {
 	sc, err := f.scan(ctx, decisionID)
 	if err != nil {
 		return Result{}, err
+	}
+	var admittedAt time.Time
+	if !sc.present[domain.EventGateRequest] {
+		admittedAt = f.deps.Now()
 	}
 
 	var outcome domain.DecisionOutcome
@@ -358,7 +426,7 @@ func (f *Flow) complete(ctx context.Context, req domain.GateRequest, decisionID 
 				Questions: gate.Questions(),
 				Timeout:   f.timeout,
 			}
-			callCtx, cancel := context.WithTimeout(ctx, f.timeout)
+			callCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), f.timeout)
 			callErr := resilience.Do(callCtx, resilience.DefaultPolicy(), func(cctx context.Context) error {
 				r, err := f.provider.Decide(cctx, decReq)
 				if err != nil {
@@ -382,18 +450,21 @@ func (f *Flow) complete(ctx context.Context, req domain.GateRequest, decisionID 
 
 	verdict := gate.Evaluate(req, outcome, f.cfg.Policy)
 	verdict.DecisionID = decisionID
-	verdict.DecidedAt = now
+	decidedAt := f.deps.Now()
+	verdict.DecidedAt = decidedAt
 
 	// Journal appends use a detached context: a client disconnect after
 	// the provider answered must not lose the recorded verdict.
 	appendCtx := context.WithoutCancel(ctx)
 	present := sc.present
 	if !present[domain.EventGateRequest] {
-		raw, err := json.Marshal(req)
-		if err != nil {
-			return Result{}, fmt.Errorf("gateflow: encode gate request: %w", err)
+		if len(reqRaw) == 0 {
+			reqRaw, err = json.Marshal(req)
+			if err != nil {
+				return Result{}, fmt.Errorf("gateflow: encode gate request: %w", err)
+			}
 		}
-		if err := f.appendOne(appendCtx, domain.EventGateRequest, decisionID, "", raw, now); err != nil {
+		if err := f.appendOne(appendCtx, domain.EventGateRequest, decisionID, "", reqRaw, admittedAt); err != nil {
 			return Result{}, err
 		}
 	}
@@ -403,7 +474,7 @@ func (f *Flow) complete(ctx context.Context, req domain.GateRequest, decisionID 
 			if err != nil {
 				return Result{}, fmt.Errorf("gateflow: encode decision response: %w", err)
 			}
-			if err := f.appendOne(appendCtx, domain.EventDecisionResponse, decisionID, "", raw, now); err != nil {
+			if err := f.appendOne(appendCtx, domain.EventDecisionResponse, decisionID, "", raw, decidedAt); err != nil {
 				return Result{}, err
 			}
 		}
@@ -414,12 +485,12 @@ func (f *Flow) complete(ctx context.Context, req domain.GateRequest, decisionID 
 					RequestedModel: requested,
 					PreviousModel:  prev,
 					ActualModel:    resp.Model,
-					DetectedAt:     now,
+					DetectedAt:     decidedAt,
 				})
 				if err != nil {
 					return Result{}, fmt.Errorf("gateflow: encode model change: %w", err)
 				}
-				if err := f.appendOne(appendCtx, domain.EventDecisionModelChanged, decisionID, "", raw, now); err != nil {
+				if err := f.appendOne(appendCtx, domain.EventDecisionModelChanged, decisionID, "", raw, decidedAt); err != nil {
 					return Result{}, err
 				}
 			}
@@ -430,7 +501,7 @@ func (f *Flow) complete(ctx context.Context, req domain.GateRequest, decisionID 
 		if err != nil {
 			return Result{}, fmt.Errorf("gateflow: encode gate verdict: %w", err)
 		}
-		if err := f.appendOne(appendCtx, domain.EventGateVerdict, decisionID, verdict.PolicyHash, raw, now); err != nil {
+		if err := f.appendOne(appendCtx, domain.EventGateVerdict, decisionID, verdict.PolicyHash, raw, decidedAt); err != nil {
 			return Result{}, err
 		}
 	}
