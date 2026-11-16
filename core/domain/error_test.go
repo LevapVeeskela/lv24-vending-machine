@@ -34,6 +34,9 @@ func TestCodeOf(t *testing.T) {
 	if got := CodeOf(nil); got != CodeUnknown {
 		t.Errorf("CodeOf(nil) = %q, want unknown", got)
 	}
+	if got := CodeOf(NewError(CodeIPBanned, "banned")); got != CodeIPBanned {
+		t.Errorf("CodeOf(ip_banned) = %q, want ip_banned", got)
+	}
 }
 
 func TestIsRetryable(t *testing.T) {
@@ -45,6 +48,8 @@ func TestIsRetryable(t *testing.T) {
 		{CodePaymentRequired, false},
 		{CodeInvalidRequest, false},
 		{CodeInvalidOutput, false},
+		{CodeIPBanned, false},
+		{CodeRegionUnavailable, false},
 		{CodeRateLimit, true},
 		{CodeUnavailable, true},
 		{CodeTimeout, true},

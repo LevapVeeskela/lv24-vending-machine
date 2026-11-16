@@ -26,6 +26,8 @@ const (
 	CodeTimeout ErrorCode = "timeout"
 	// CodeUnknown is the fallback for unclassified errors.
 	CodeUnknown ErrorCode = "unknown"
+	// CodeIPBanned signals that the provider banned the caller's IP; do not retry.
+	CodeIPBanned ErrorCode = "ip_banned"
 	// CodeRegionUnavailable signals that the provider region is unavailable.
 	CodeRegionUnavailable ErrorCode = "region_unavailable"
 )
