@@ -634,7 +634,7 @@ func TestFailedSendRecordsOneOKFalse(t *testing.T) {
 		seedAbstain(t, jr)
 	}
 	now := baseTime
-	n := &fakeNotifier{err: errors.New("telegram down")}
+	n := &fakeNotifier{err: domain.NewError(domain.CodeAuth, "notify-telegram: bot token rejected")}
 	r := newRunner(jr, mutableDeps(&now), testConfig(""), nil, nil, nil, nil, n)
 	for i := 0; i < 50; i++ {
 		now = baseTime.Add(time.Duration(i) * time.Minute)
@@ -1125,5 +1125,103 @@ func TestStepStopsEvaluatingWhenCancelled(t *testing.T) {
 	}
 	if e.calls != 1 {
 		t.Fatalf("evaluator calls = %d, want 1 (stop starting new calls after cancel)", e.calls)
+	}
+}
+
+// localRateNotifier mimics the Telegram provider's local one-message-per-
+// interval limiter: a rejected send returns CodeRateLimit with the remaining
+// delay and never touches the network.
+type localRateNotifier struct {
+	mu          sync.Mutex
+	minInterval time.Duration
+	now         func() time.Time
+	last        time.Time
+	sends       []ports.Notification
+	times       []time.Time
+}
+
+func (n *localRateNotifier) Send(_ context.Context, msg ports.Notification) error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	now := n.now().UTC()
+	if !n.last.IsZero() {
+		if elapsed := now.Sub(n.last); elapsed < n.minInterval {
+			e := domain.NewError(domain.CodeRateLimit,
+				"notify-telegram: local rate limit (one message per interval)")
+			e.Retryable = true
+			e.RetryAfter = n.minInterval - elapsed
+			return e
+		}
+	}
+	n.last = now
+	n.sends = append(n.sends, msg)
+	n.times = append(n.times, now)
+	return nil
+}
+
+func (n *localRateNotifier) delivered() int {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return len(n.sends)
+}
+
+// TestLocalRateLimitIsNotDeliveryFailure: a local limiter rejection writes no
+// notify.sent, keeps the series healthy and defers the next attempt to the
+// remaining delay, so the second alert still arrives within the interval.
+func TestLocalRateLimitIsNotDeliveryFailure(t *testing.T) {
+	jr := &memJournal{}
+	now := baseTime
+	seedEvent(t, jr, domain.EventDecisionModelChanged, domain.ModelChanged{
+		RequestedModel: "test-model",
+		PreviousModel:  "model-v1",
+		ActualModel:    "model-v2",
+	})
+	n := &localRateNotifier{minInterval: time.Minute, now: func() time.Time { return now }}
+	r := newRunner(jr, mutableDeps(&now), testConfig(""), nil, nil, nil, nil, n)
+
+	if err := r.Step(context.Background()); err != nil {
+		t.Fatalf("first Step() = %v", err)
+	}
+	if got := n.delivered(); got != 1 {
+		t.Fatalf("delivered = %d, want 1", got)
+	}
+
+	// A second alert 30 seconds later is rejected locally, not delivered.
+	now = baseTime.Add(30 * time.Second)
+	seedEventAt(t, jr, domain.EventDecisionModelChanged, now, domain.ModelChanged{
+		RequestedModel: "test-model",
+		PreviousModel:  "model-v2",
+		ActualModel:    "model-v3",
+	})
+	if err := r.Step(context.Background()); err != nil {
+		t.Fatalf("rate-limited Step() = %v", err)
+	}
+	if got := n.delivered(); got != 1 {
+		t.Fatalf("delivered = %d, want still 1 after the local limit", got)
+	}
+	events := notifySentEvents(t, jr)
+	if len(events) != 1 || !events[0].OK {
+		t.Fatalf("notify.sent after the local limit = %+v, want only the first ok=true", events)
+	}
+	if got := r.Status().LastCycleError; got != "" {
+		t.Fatalf("LastCycleError = %q, want empty (local limit is not a failure)", got)
+	}
+
+	// The remaining delay is 30 seconds: the next cycle after 61 seconds
+	// delivers the pending notification.
+	now = baseTime.Add(61 * time.Second)
+	if err := r.Step(context.Background()); err != nil {
+		t.Fatalf("retry Step() = %v", err)
+	}
+	if got := n.delivered(); got != 2 {
+		t.Fatalf("delivered = %d, want 2 after the local limit", got)
+	}
+	for _, ev := range notifySentEvents(t, jr) {
+		if !ev.OK {
+			t.Fatalf("notify.sent carries ok=false after a local limit: %+v", ev)
+		}
+	}
+	if got := n.times[1].Sub(n.times[0]); got > 70*time.Second {
+		t.Fatalf("second delivery took %v after the first, want <= 70s", got)
 	}
 }

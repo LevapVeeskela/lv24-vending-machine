@@ -504,6 +504,20 @@ func (r *Runner) notify(ctx context.Context) error {
 
 	sendErr := r.notifier.Send(ctx, ports.Notification{Kind: first.kind, Text: first.text})
 	if sendErr != nil {
+		if domain.CodeOf(sendErr) == domain.CodeRateLimit {
+			// The channel's own one-message-per-interval limiter never
+			// touched the network: this is not a delivery failure, so it
+			// writes no notify.sent, keeps the failure counter and only
+			// defers the next attempt to the remaining delay.
+			retryAfter := domain.RetryAfterOf(sendErr)
+			r.deferSend(key, now, retryAfter)
+			if r.deps.Logger != nil {
+				r.deps.Logger.Debug("shadow: notification rate limited",
+					"kind", first.kind,
+					"retryAfter", retryAfter)
+			}
+			return notifyErr
+		}
 		notifyErr = sendErr
 		if firstFailure := r.recordSendFailure(key, now); firstFailure {
 			if _, appendErr := r.appendNotifySent(ctx, first, false); appendErr != nil {
@@ -561,6 +575,22 @@ func (r *Runner) recordSendFailure(key string, now time.Time) bool {
 // resetSendFailure forgets the retry state of a delivered series.
 func (r *Runner) resetSendFailure(key string) {
 	delete(r.retry, key)
+}
+
+// deferSend postpones the next attempt of a notification series after the
+// channel's local rate limiter rejected it. It deliberately leaves the
+// failure counter alone: no message was attempted, so this is not a delivery
+// failure. A zero or negative delay means the next label cycle.
+func (r *Runner) deferSend(key string, now time.Time, delay time.Duration) {
+	if delay <= 0 {
+		delay = r.cfg.LabelInterval
+		if delay <= 0 {
+			delay = defaultInterval
+		}
+	}
+	st := r.retry[key]
+	st.next = now.Add(delay)
+	r.retry[key] = st
 }
 
 // journalState derives the notification schedule inputs from the whole journal:
