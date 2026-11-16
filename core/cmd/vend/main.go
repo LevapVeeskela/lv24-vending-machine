@@ -16,6 +16,7 @@ import (
 
 	decisiondrex "github.com/LevapVeeskela/lv24-vending-machine/providers/decision-drex"
 	marketdatabinance "github.com/LevapVeeskela/lv24-vending-machine/providers/marketdata-binance"
+	notifytelegram "github.com/LevapVeeskela/lv24-vending-machine/providers/notify-telegram"
 
 	"github.com/LevapVeeskela/lv24-vending-machine/core/internal/cli"
 	"github.com/LevapVeeskela/lv24-vending-machine/core/internal/config"
@@ -26,6 +27,19 @@ import (
 
 // version is replaced at release time via ldflags (-X main.version=...).
 var version = "0.1.0-m0"
+
+// arenaDecision pins a decision provider under the arena registry id while
+// keeping the wrapped provider's own identity for its outbound calls.
+type arenaDecision struct {
+	ports.Decision
+}
+
+// Descriptor reports the arena registry id.
+func (a arenaDecision) Descriptor() ports.Descriptor {
+	d := a.Decision.Descriptor()
+	d.ID = "decision-arena"
+	return d
+}
 
 // newRegistry constructs both providers from the config without network I/O.
 func newRegistry(cfg config.Config, logger *slog.Logger) (*registry.Registry, error) {
@@ -46,6 +60,26 @@ func newRegistry(cfg config.Config, logger *slog.Logger) (*registry.Registry, er
 	if err := reg.RegisterDecision(dec); err != nil {
 		return nil, err
 	}
+	if cfg.Arena.Enabled {
+		// The arena is a second connection to the same provider protocol,
+		// registered under its own id so the core never branches on it.
+		arenaDec, err := decisiondrex.New(decisiondrex.Config{
+			Profile:         decisiondrex.Profile(cfg.Arena.Profile),
+			BaseURL:         cfg.Arena.BaseURL,
+			SecretRef:       cfg.Arena.SecretRef,
+			PricePerBillion: cfg.Arena.PricePerBillion,
+		}, ports.Deps{
+			Clock:   time.Now,
+			Logger:  logger,
+			Secrets: config.EnvSecretStore{Getenv: os.Getenv},
+		})
+		if err != nil {
+			return nil, err
+		}
+		if err := reg.RegisterDecision(arenaDecision{Decision: arenaDec}); err != nil {
+			return nil, err
+		}
+	}
 	md, err := marketdatabinance.New(marketdatabinance.Config{
 		BaseURL: cfg.Providers.MarketData.BaseURL,
 	}, ports.Deps{Clock: time.Now, Logger: logger})
@@ -54,6 +88,24 @@ func newRegistry(cfg config.Config, logger *slog.Logger) (*registry.Registry, er
 	}
 	if err := reg.RegisterCandle(md); err != nil {
 		return nil, err
+	}
+	if cfg.Notify.Telegram.Enabled {
+		// The bot token is resolved from the secret store at send time; only
+		// the chat id and the secret reference are wired here.
+		tg, err := notifytelegram.New(notifytelegram.Config{
+			ChatID:    cfg.Notify.Telegram.ChatID,
+			SecretRef: cfg.Notify.Telegram.SecretRef,
+		}, ports.Deps{
+			Clock:   time.Now,
+			Logger:  logger,
+			Secrets: config.EnvSecretStore{Getenv: os.Getenv},
+		})
+		if err != nil {
+			return nil, err
+		}
+		if err := reg.RegisterNotifier(tg); err != nil {
+			return nil, err
+		}
 	}
 	return reg, nil
 }

@@ -25,6 +25,18 @@ import (
 // defaultTimeout bounds one provider call including its retries.
 const defaultTimeout = 20 * time.Second
 
+// arenaTimeout bounds one arena provider call including its retries.
+const arenaTimeout = 20 * time.Second
+
+// ArenaConfig configures the cross-model arena: a second decision provider
+// answers the same request in the background after the primary verdict.
+type ArenaConfig struct {
+	// Provider is the arena decision provider; it is required.
+	Provider ports.Decision
+	// Model is the arena model id sent in the decision request.
+	Model string
+}
+
 // Config tunes one gate flow.
 type Config struct {
 	// Model is the requested decision model id.
@@ -35,6 +47,18 @@ type Config struct {
 	CodeVersion string
 	// Timeout bounds the provider call including retries; <=0 means defaultTimeout.
 	Timeout time.Duration
+	// Arena is the optional cross-model comparison provider.
+	Arena *ArenaConfig
+}
+
+// arenaPayload mirrors the arena.decision event payload
+// (contracts/jsonschema/events/v1.json $defs.ArenaDecision). It is declared
+// locally so the app layer keeps depending on domain and ports only.
+type arenaPayload struct {
+	DecisionID string                  `json:"decisionId"`
+	Model      string                  `json:"model"`
+	Response   domain.DecisionResponse `json:"response"`
+	Verdict    domain.GateVerdict      `json:"verdict"`
 }
 
 // Result is the outcome of one Evaluate call.
@@ -120,6 +144,14 @@ func New(jr ports.Journal, provider ports.Decision, deps ports.Deps, cfg Config)
 	}
 	if strings.TrimSpace(cfg.Model) == "" {
 		return nil, fmt.Errorf("gateflow: empty model")
+	}
+	if cfg.Arena != nil {
+		if cfg.Arena.Provider == nil {
+			return nil, fmt.Errorf("gateflow: nil arena provider")
+		}
+		if strings.TrimSpace(cfg.Arena.Model) == "" {
+			return nil, fmt.Errorf("gateflow: empty arena model")
+		}
 	}
 	timeout := cfg.Timeout
 	if timeout <= 0 {
@@ -505,6 +537,11 @@ func (f *Flow) complete(ctx context.Context, req domain.GateRequest, decisionID 
 			return Result{}, err
 		}
 	}
+	// The arena is advisory and must never delay or fail the primary answer:
+	// it runs detached, writes only its own event, and logs failures.
+	if req.IntentKind != domain.IntentExit && !present[domain.EventArenaDecision] {
+		f.launchArena(appendCtx, req, decisionID)
+	}
 
 	return Result{
 		SignalID:    req.SignalID,
@@ -512,4 +549,86 @@ func (f *Flow) complete(ctx context.Context, req domain.GateRequest, decisionID 
 		Response:    resp,
 		ProviderErr: providerErr,
 	}, nil
+}
+
+// launchArena starts the detached arena call for one recorded decision.
+//
+// The state snapshot is taken synchronously, before the goroutine starts, so
+// the caller may reuse or mutate its request map once Evaluate returns.
+func (f *Flow) launchArena(ctx context.Context, req domain.GateRequest, decisionID string) {
+	arena := f.cfg.Arena
+	if arena == nil || arena.Provider == nil {
+		return
+	}
+	state := composeState(req)
+	go f.runArena(ctx, arena, req, state, decisionID)
+}
+
+// runArena calls the arena provider and appends one arena.decision event.
+//
+// It runs off the request path with its own deadline: a slow or failing arena
+// never delays or changes the primary verdict, and failures are logged by
+// error code only (never the response or the request state).
+func (f *Flow) runArena(ctx context.Context, arena *ArenaConfig, req domain.GateRequest, state map[string]any, decisionID string) {
+	callCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), arenaTimeout)
+	decReq := domain.DecisionRequest{
+		Model:     arena.Model,
+		State:     state,
+		Questions: gate.Questions(),
+		Timeout:   arenaTimeout,
+	}
+	var resp *domain.DecisionResponse
+	err := resilience.Do(callCtx, resilience.DefaultPolicy(), func(cctx context.Context) error {
+		r, ierr := arena.Provider.Decide(cctx, decReq)
+		if ierr != nil {
+			return ierr
+		}
+		rCopy := r
+		resp = &rCopy
+		return nil
+	})
+	cancel()
+	if err != nil {
+		f.logArenaError(arena, decisionID, err)
+		return
+	}
+	if resp == nil {
+		return
+	}
+	// The arena evaluation never records decision.response or gate.verdict:
+	// one arena.decision event carries both answers under the primary id.
+	verdict := gate.Evaluate(req, domain.DecisionOutcome{Response: resp}, f.cfg.Policy)
+	verdict.DecisionID = decisionID
+	ts := f.deps.Now()
+	verdict.DecidedAt = ts
+	raw, merr := json.Marshal(arenaPayload{
+		DecisionID: decisionID,
+		Model:      resp.Model,
+		Response:   *resp,
+		Verdict:    verdict,
+	})
+	if merr != nil {
+		f.logArenaError(arena, decisionID, fmt.Errorf("gateflow: encode arena decision: %w", merr))
+		return
+	}
+	appendCtx := context.WithoutCancel(ctx)
+	if aerr := f.appendOne(appendCtx, domain.EventArenaDecision, decisionID, verdict.PolicyHash, raw, ts); aerr != nil {
+		f.logArenaError(arena, decisionID, aerr)
+	}
+}
+
+// logArenaError records an arena failure without response or state content.
+func (f *Flow) logArenaError(arena *ArenaConfig, decisionID string, err error) {
+	logger := f.deps.Logger
+	if logger == nil {
+		return
+	}
+	providerID := ""
+	if arena != nil && arena.Provider != nil {
+		providerID = arena.Provider.Descriptor().ID
+	}
+	logger.Warn("gateflow: arena decision failed",
+		"decisionId", decisionID,
+		"provider", providerID,
+		"code", string(domain.CodeOf(err)))
 }

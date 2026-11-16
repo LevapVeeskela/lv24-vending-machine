@@ -6,11 +6,17 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/LevapVeeskela/lv24-vending-machine/core/domain"
 	"github.com/LevapVeeskela/lv24-vending-machine/core/internal/api"
 	"github.com/LevapVeeskela/lv24-vending-machine/core/internal/app/gateflow"
+	"github.com/LevapVeeskela/lv24-vending-machine/core/internal/app/outcome"
+	"github.com/LevapVeeskela/lv24-vending-machine/core/internal/app/report"
+	"github.com/LevapVeeskela/lv24-vending-machine/core/internal/app/shadow"
+	"github.com/LevapVeeskela/lv24-vending-machine/core/internal/app/signals/trend"
 	"github.com/LevapVeeskela/lv24-vending-machine/core/internal/config"
 	"github.com/LevapVeeskela/lv24-vending-machine/core/ports"
 )
@@ -78,6 +84,15 @@ func (r *runner) cmdServe(args []string) int {
 		return r.fail(jsonOut, exitProvider, codeProvider, err.Error(),
 			"align providers.decision.id with a registered provider", false, nil)
 	}
+	var arena *gateflow.ArenaConfig
+	if cfg.Arena.Enabled {
+		arenaProvider, aerr := reg.Decision("decision-arena")
+		if aerr != nil {
+			return r.fail(jsonOut, exitProvider, codeProvider, aerr.Error(),
+				"the arena provider is not registered; fix arena settings or set arena.enabled=false", false, nil)
+		}
+		arena = &gateflow.ArenaConfig{Provider: arenaProvider, Model: cfg.Arena.Model}
+	}
 	jr, closer, err := r.openJournalAt(config.DBPath(dataDir))
 	if err != nil {
 		return r.fail(jsonOut, exitGeneral, codeGeneral, err.Error(),
@@ -93,10 +108,67 @@ func (r *runner) cmdServe(args []string) int {
 		Model:       cfg.Providers.Decision.Model,
 		Policy:      domain.GatePolicy{Version: cfg.Gate.Version, MinPass: cfg.Gate.MinPass, MinBlock: cfg.Gate.MinBlock},
 		CodeVersion: r.ver,
+		Arena:       arena,
 	})
 	if err != nil {
 		return r.fail(jsonOut, exitGeneral, codeGeneral, err.Error(),
 			"check the vend wiring and retry", false, nil)
+	}
+	candle, err := reg.Candle(cfg.Providers.MarketData.ID)
+	if err != nil {
+		return r.fail(jsonOut, exitProvider, codeProvider, err.Error(),
+			"align providers.marketdata.id with a registered provider", false, nil)
+	}
+	deps := ports.Deps{
+		Clock:  r.clock,
+		NewID:  r.newID,
+		Logger: logger,
+	}
+	labeler, err := outcome.New(jr, candle, deps, outcome.Config{
+		HorizonBars: cfg.Outcome.HorizonBars,
+		FeeBps:      cfg.Outcome.FeeBps,
+		CodeVersion: r.ver,
+		PriceSource: cfg.Providers.MarketData.ID,
+	})
+	if err != nil {
+		return r.fail(jsonOut, exitGeneral, codeGeneral, err.Error(),
+			"fix outcome.horizonBars/outcome.feeBps and retry", false, nil)
+	}
+	reporter, err := report.New(jr, deps, report.Config{})
+	if err != nil {
+		return r.fail(jsonOut, exitGeneral, codeGeneral, err.Error(),
+			"check the vend wiring and retry", false, nil)
+	}
+	var gen *trend.Generator
+	if tr := cfg.Signals.Trend; tr.Enabled {
+		gen, err = trend.New(trend.Config{
+			Symbols:   tr.Symbols,
+			Timeframe: tr.Timeframe,
+			Fast:      tr.Fast,
+			Slow:      tr.Slow,
+			Sides:     tr.Sides,
+		}, candle, deps)
+		if err != nil {
+			return r.fail(jsonOut, exitUsage, codeUsage, err.Error(),
+				"fix signals.trend settings via vend config validate", false, nil)
+		}
+	}
+	var notifier ports.Notifier
+	if cfg.Notify.Telegram.Enabled {
+		notifier, err = reg.Notifier("notify-telegram")
+		if err != nil {
+			return r.fail(jsonOut, exitProvider, codeProvider, err.Error(),
+				"check notify.telegram settings or disable it", false, nil)
+		}
+	}
+	runner, err := shadow.New(jr, labeler, gen, flow, reporter, notifier, deps, shadow.Config{
+		LabelInterval: time.Duration(cfg.Outcome.LabelIntervalSec) * time.Second,
+		StatusPath:    filepath.Join(dataDir, "shadow-status.json"),
+		CodeVersion:   r.ver,
+	})
+	if err != nil {
+		return r.fail(jsonOut, exitGeneral, codeGeneral, err.Error(),
+			"check the shadow wiring and retry", false, nil)
 	}
 	h, err := api.New(api.Config{
 		Token:         token,
@@ -112,8 +184,18 @@ func (r *runner) cmdServe(args []string) int {
 	fmt.Fprintf(r.stderr, "listening on http://%s\n", *addr)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := api.Serve(ctx, *addr, h, logger); err != nil {
-		return r.fail(jsonOut, exitGeneral, codeGeneral, err.Error(),
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runner.Run(ctx)
+	}()
+	serveErr := api.Serve(ctx, *addr, h, logger)
+	// Cancel the shadow loop and wait for an in-flight step to finish before
+	// the journal is closed by the deferred closer.
+	stop()
+	<-done
+	if serveErr != nil {
+		return r.fail(jsonOut, exitGeneral, codeGeneral, serveErr.Error(),
 			"check the address is free and retry", false, nil)
 	}
 	return exitOK
