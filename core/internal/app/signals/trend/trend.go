@@ -9,6 +9,9 @@
 // symbol, so a repeated scan over the same provider data never replays the
 // same bar. The first scan of a symbol evaluates only the last closed bar:
 // earlier history is used for EMA warm-up but is never turned into signals.
+//
+// Crossings exposes the pure EMA crossing calculation, and Estimate applies it
+// to a bounded history window for the offline volume estimate of vend.
 package trend
 
 import (
@@ -62,6 +65,7 @@ type Config struct {
 type Generator struct {
 	symbols   []string
 	timeframe string
+	interval  time.Duration
 	fast      int
 	slow      int
 	sides     map[domain.Side]bool
@@ -73,6 +77,28 @@ type Generator struct {
 	// lastSeen holds the close time of the latest evaluated closed bar per
 	// symbol. It is the high-water mark that prevents replayed signals.
 	lastSeen map[string]time.Time
+}
+
+// Crossing is one EMA crossover on one closed bar.
+type Crossing struct {
+	// Index is the bar position in the evaluated sequence.
+	Index int
+	// Side is buy when the fast EMA crossed above the slow EMA, sell when it
+	// crossed below.
+	Side domain.Side
+	// EMAFast and EMASlow are the EMA values on the crossed bar.
+	EMAFast float64
+	EMASlow float64
+	// Close is the bar close used for the EMA at Index.
+	Close float64
+}
+
+// SymbolEstimate is the signal count one symbol would have produced over the
+// estimated window. Err is set when the symbol could not be estimated.
+type SymbolEstimate struct {
+	Symbol  string
+	Signals int
+	Err     error
 }
 
 // invalid builds a coded configuration error.
@@ -89,21 +115,16 @@ func New(cfg Config, candles ports.CandleProvider, deps ports.Deps) (*Generator,
 	if timeframe == "" {
 		return nil, invalid("timeframe must not be empty")
 	}
+	interval, err := domain.ParseTimeframe(timeframe)
+	if err != nil {
+		return nil, invalid(fmt.Sprintf("timeframe %q: %v", timeframe, err))
+	}
 	if cfg.Fast <= 0 || cfg.Slow <= 0 || cfg.Fast >= cfg.Slow {
 		return nil, invalid(fmt.Sprintf("fast and slow must satisfy 0 < fast < slow, got fast=%d slow=%d", cfg.Fast, cfg.Slow))
 	}
-	if len(cfg.Sides) == 0 {
-		return nil, invalid("sides must not be empty")
-	}
-	sides := make(map[domain.Side]bool, len(cfg.Sides))
-	for _, raw := range cfg.Sides {
-		side := domain.Side(strings.ToLower(strings.TrimSpace(raw)))
-		switch side {
-		case domain.SideBuy, domain.SideSell:
-			sides[side] = true
-		default:
-			return nil, invalid(fmt.Sprintf("side %q must be buy or sell", raw))
-		}
+	sides, err := Sides(cfg.Sides)
+	if err != nil {
+		return nil, err
 	}
 	if len(cfg.Symbols) == 0 {
 		return nil, invalid("symbols must not be empty")
@@ -125,10 +146,6 @@ func New(cfg Config, candles ports.CandleProvider, deps ports.Deps) (*Generator,
 		return nil, invalid(fmt.Sprintf("label interval sec must not be negative, got %d", cfg.LabelIntervalSec))
 	}
 	if cfg.LabelIntervalSec > 0 {
-		interval, err := domain.ParseTimeframe(timeframe)
-		if err != nil {
-			return nil, invalid(fmt.Sprintf("timeframe %q: %v", timeframe, err))
-		}
 		if min := 2 * time.Duration(cfg.LabelIntervalSec) * time.Second; interval < min {
 			return nil, invalid(fmt.Sprintf("timeframe %q is shorter than twice the label interval %s", timeframe, min))
 		}
@@ -140,6 +157,7 @@ func New(cfg Config, candles ports.CandleProvider, deps ports.Deps) (*Generator,
 	return &Generator{
 		symbols:   symbols,
 		timeframe: timeframe,
+		interval:  interval,
 		fast:      cfg.Fast,
 		slow:      cfg.Slow,
 		sides:     sides,
@@ -150,6 +168,24 @@ func New(cfg Config, candles ports.CandleProvider, deps ports.Deps) (*Generator,
 		minBars:   cfg.Slow + minBarsAboveSlow,
 		lastSeen:  make(map[string]time.Time, len(cfg.Symbols)),
 	}, nil
+}
+
+// Sides validates raw side names and returns the allowed direction set.
+func Sides(raw []string) (map[domain.Side]bool, error) {
+	if len(raw) == 0 {
+		return nil, invalid("sides must not be empty")
+	}
+	sides := make(map[domain.Side]bool, len(raw))
+	for _, value := range raw {
+		side := domain.Side(strings.ToLower(strings.TrimSpace(value)))
+		switch side {
+		case domain.SideBuy, domain.SideSell:
+			sides[side] = true
+		default:
+			return nil, invalid(fmt.Sprintf("side %q must be buy or sell", value))
+		}
+	}
+	return sides, nil
 }
 
 // Scan evaluates every configured symbol and returns the new gate requests in
@@ -199,16 +235,12 @@ func (g *Generator) evaluate(symbol string, raw []domain.Candle, now time.Time) 
 	if len(bars) < g.minBars {
 		return nil, nil
 	}
-	closes := make([]float64, len(bars))
-	for i, bar := range bars {
-		f, err := decimalToFloat(bar.Close)
-		if err != nil {
-			return nil, fmt.Errorf("trend: %s close: %w", symbol, err)
-		}
-		closes[i] = f
+	// Crossings is pure; a bad close is reported before the watermark moves,
+	// so the same bars are retried on the next scan.
+	crossings, err := Crossings(bars, g.fast, g.slow, g.sides)
+	if err != nil {
+		return nil, err
 	}
-	fast := emaSeries(closes, g.fast)
-	slow := emaSeries(closes, g.slow)
 	last := len(bars) - 1
 	seen, known := g.lastSeen[symbol]
 	start := -1
@@ -231,12 +263,100 @@ func (g *Generator) evaluate(symbol string, raw []domain.Candle, now time.Time) 
 		return nil, nil
 	}
 	var out []domain.GateRequest
-	for i := start; i <= last; i++ {
-		side, ok := crossSide(fast, slow, i)
-		if !ok || !g.sides[side] {
+	for _, crossing := range crossings {
+		if crossing.Index < start {
 			continue
 		}
-		out = append(out, g.request(symbol, bars[i], side, fast[i], slow[i], closes[i]))
+		out = append(out, g.request(symbol, bars[crossing.Index], crossing.Side,
+			crossing.EMAFast, crossing.EMASlow, crossing.Close))
+	}
+	return out, nil
+}
+
+// Estimate counts the crossings the generator would have emitted per symbol
+// over the last days of closed candles. The candle request adds the same
+// warm-up reserve the scan uses, and only crossings whose bar closed inside
+// the window are counted. It performs no journal I/O, calls no decision
+// provider and never changes the scan watermark.
+func (g *Generator) Estimate(ctx context.Context, days int) ([]SymbolEstimate, error) {
+	if days < 1 {
+		return nil, invalid(fmt.Sprintf("days must be >= 1, got %d", days))
+	}
+	now := g.deps.Now()
+	window := time.Duration(days) * 24 * time.Hour
+	cutoff := now.Add(-window)
+	// Round up so a partial bar at the window edge is requested too.
+	windowBars := int((window + g.interval - 1) / g.interval)
+	out := make([]SymbolEstimate, 0, len(g.symbols))
+	for _, symbol := range g.symbols {
+		if err := ctx.Err(); err != nil {
+			return out, err
+		}
+		est := SymbolEstimate{Symbol: symbol}
+		raw, err := g.candles.Candles(ctx, domain.CandleRequest{
+			Symbol:   symbol,
+			Interval: g.timeframe,
+			Limit:    windowBars + g.limit,
+		})
+		if err != nil {
+			est.Err = err
+			out = append(out, est)
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return out, ctxErr
+			}
+			continue
+		}
+		bars := closedBars(symbol, g.timeframe, raw, now)
+		crossings, err := Crossings(bars, g.fast, g.slow, g.sides)
+		if err != nil {
+			est.Err = err
+			out = append(out, est)
+			continue
+		}
+		for _, crossing := range crossings {
+			if bars[crossing.Index].CloseTime.After(cutoff) {
+				est.Signals++
+			}
+		}
+		out = append(out, est)
+	}
+	return out, nil
+}
+
+// Crossings returns the EMA crossovers of bars in bar order, restricted to the
+// allowed sides. It is pure: it calls no provider, clock or logger. Fewer than
+// slow+2 bars produce no crossing because the slow EMA needs a previous bar
+// and a crossing bar. A nil allowed set suppresses every crossing.
+func Crossings(bars []domain.Candle, fast, slow int, allowed map[domain.Side]bool) ([]Crossing, error) {
+	if fast <= 0 || slow <= 0 || fast >= slow {
+		return nil, invalid(fmt.Sprintf("fast and slow must satisfy 0 < fast < slow, got fast=%d slow=%d", fast, slow))
+	}
+	if len(bars) < slow+minBarsAboveSlow {
+		return nil, nil
+	}
+	closes := make([]float64, len(bars))
+	for i, bar := range bars {
+		f, err := decimalToFloat(bar.Close)
+		if err != nil {
+			return nil, fmt.Errorf("trend: close of bar %d: %w", i, err)
+		}
+		closes[i] = f
+	}
+	fastEMA := emaSeries(closes, fast)
+	slowEMA := emaSeries(closes, slow)
+	out := make([]Crossing, 0, len(bars)/4)
+	for i := 1; i < len(bars); i++ {
+		side, ok := crossSide(fastEMA, slowEMA, i)
+		if !ok || !allowed[side] {
+			continue
+		}
+		out = append(out, Crossing{
+			Index:   i,
+			Side:    side,
+			EMAFast: fastEMA[i],
+			EMASlow: slowEMA[i],
+			Close:   closes[i],
+		})
 	}
 	return out, nil
 }
