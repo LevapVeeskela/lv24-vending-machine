@@ -1,0 +1,22 @@
+{
+  "model": "drex-max-v1.1",
+  "answers": {
+    "team": {
+      "type": "choice",
+      "choice": "billing",
+      "confidence": 0.9889,
+      "probabilities": { "billing": 0.9926, "technical": 0.0024, "other": 0.005 }
+    },
+    "refund": { "type": "noul", "noul": 0.9931 },
+    "urgency": {
+      "type": "score",
+      "score": 1.3362,
+      "legend": ["Routine", "Soon", "Urgent"],
+      "probabilities": { "0": 0.2489, "1": 0.166, "2": 0.5851 },
+      "confidence": 0.6681
+    }
+  },
+  "usage": { "input_tokens": 1420, "output_tokens": 12 },
+  "request_id": "req_9f2c7a1b4e",
+  "evaluation_time_ms": 104
+}
