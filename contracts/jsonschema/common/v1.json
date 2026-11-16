@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://lv24.io/contracts/jsonschema/common/v1.json",
+  "$id": "https://lv24.by/contracts/jsonschema/common/v1.json",
   "title": "InstrumentRef",
   "description": "Reference to a trading instrument on a venue.",
   "type": "object",

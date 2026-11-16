@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://lv24.io/contracts/jsonschema/decision/v1.json",
+  "$id": "https://lv24.by/contracts/jsonschema/decision/v1.json",
   "title": "DecisionRequest",
   "description": "Request to an advisory decision vendor (LLM).",
   "type": "object",

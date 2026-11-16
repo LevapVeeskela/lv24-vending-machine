@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://lv24.io/contracts/jsonschema/gate/v1.json",
+  "$id": "https://lv24.by/contracts/jsonschema/gate/v1.json",
   "title": "GateRequest",
   "description": "RiskGate evaluation request for a signal.",
   "type": "object",

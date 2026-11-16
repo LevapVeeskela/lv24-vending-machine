@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://lv24.io/contracts/jsonschema/events/v1.json",
+  "$id": "https://lv24.by/contracts/jsonschema/events/v1.json",
   "title": "Event",
   "description": "Journal event envelope per 06-risk-execution.md section 11.",
   "type": "object",
