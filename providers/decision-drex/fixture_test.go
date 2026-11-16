@@ -88,12 +88,10 @@ func TestVendorFixtureConfidence(t *testing.T) {
 	if teamA.Choice != "billing" {
 		t.Fatalf("choice = %q", teamA.Choice)
 	}
-	pmax := teamA.Probabilities["billing"]
-	recomputed := (pmax - 1.0/3.0) / (1.0 - 1.0/3.0)
-	if math.Abs(recomputed-0.9889) > 0.0001 {
-		t.Fatalf("recomputed confidence = %v, want 0.9889 ± 0.0001", recomputed)
+	if got := recomputeConfidence(3, 0.9926); math.Abs(got-0.9889) > 0.0001 {
+		t.Fatalf("recomputeConfidence(3, 0.9926) = %v, want 0.9889 ± 0.0001", got)
 	}
-	if teamA.Confidence == nil || math.Abs(*teamA.Confidence-recomputed) > 0.02 {
+	if teamA.Confidence == nil || math.Abs(*teamA.Confidence-0.9889) > 0.02 {
 		t.Fatalf("stored confidence does not match recomputed value")
 	}
 	if wr.Usage.InputTokens != 87 || wr.Usage.OutputTokens != 166 {

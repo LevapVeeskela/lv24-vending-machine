@@ -161,6 +161,16 @@ func (p *Provider) Decide(ctx context.Context, req domain.DecisionRequest) (doma
 	if req.Timeout > 0 {
 		timeout = req.Timeout
 	}
+	if err := validateRequest(req); err != nil {
+		return domain.DecisionResponse{}, err
+	}
+
+	var cancel context.CancelFunc = func() {}
+	if timeout > 0 {
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+	}
+	defer cancel()
+
 	secret := ""
 	if p.deps.Secrets == nil {
 		return domain.DecisionResponse{}, domain.NewError(domain.CodeAuth,
@@ -177,12 +187,6 @@ func (p *Provider) Decide(ctx context.Context, req domain.DecisionRequest) (doma
 	if err != nil {
 		return domain.DecisionResponse{}, err
 	}
-
-	var cancel context.CancelFunc = func() {}
-	if timeout > 0 {
-		ctx, cancel = context.WithTimeout(ctx, timeout)
-	}
-	defer cancel()
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.endpoint, bytes.NewReader(body))
 	if err != nil {
@@ -213,7 +217,7 @@ func (p *Provider) Decide(ctx context.Context, req domain.DecisionRequest) (doma
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return domain.DecisionResponse{}, mapStatusError(resp.StatusCode, resp.Header.Get("Retry-After"), raw)
+		return domain.DecisionResponse{}, mapStatusError(resp.StatusCode, resp.Header.Get("Retry-After"), p.deps.Now(), raw)
 	}
 	return parseResponse(raw, req, p.price)
 }
@@ -253,14 +257,38 @@ type vendorErrorEnvelope struct {
 	} `json:"error"`
 }
 
+// sanitizeVendorCode keeps only [A-Za-z0-9_.-], capped at 64 characters.
+// Control characters and newlines never survive: they are simply not in the
+// allowlist, so the result is safe to embed in messages, logs and journals.
+func sanitizeVendorCode(s string) string {
+	const maxLen = 64
+	var b strings.Builder
+	b.Grow(len(s))
+	n := 0
+	for _, r := range s {
+		switch {
+		case r >= 'A' && r <= 'Z',
+			r >= 'a' && r <= 'z',
+			r >= '0' && r <= '9',
+			r == '_', r == '.', r == '-':
+			b.WriteRune(r)
+			n++
+			if n >= maxLen {
+				return b.String()
+			}
+		}
+	}
+	return b.String()
+}
+
 // mapStatusError maps an HTTP failure status to a domain error.
-// Only the status and the vendor error code enter the message: headers,
-// the full body and the secret never do.
-func mapStatusError(status int, retryAfter string, raw []byte) error {
+// Only the status and the sanitized vendor error code enter the message:
+// headers, the full body and the secret never do.
+func mapStatusError(status int, retryAfter string, now time.Time, raw []byte) error {
 	code := ""
 	var env vendorErrorEnvelope
 	if json.Unmarshal(raw, &env) == nil && env.Error != nil {
-		code = strings.TrimSpace(env.Error.Code)
+		code = sanitizeVendorCode(strings.TrimSpace(env.Error.Code))
 	}
 	suffix := ""
 	if code != "" {
@@ -276,17 +304,24 @@ func mapStatusError(status int, retryAfter string, raw []byte) error {
 		return domain.NewError(domain.CodeInvalidRequest, msg("invalid request with status "+strconv.Itoa(status)))
 	case http.StatusTooManyRequests:
 		m := "rate limited with status 429"
-		if secs, ok := parseRetryAfter(retryAfter); ok {
-			m += ", retry after " + strconv.FormatInt(secs, 10) + "s"
-		}
 		e := domain.NewError(domain.CodeRateLimit, msg(m))
 		e.Retryable = true
+		if d, ok := parseRetryAfter(retryAfter, now); ok {
+			e.RetryAfter = d
+		}
+		if e.RetryAfter > 0 {
+			e.Message += ", retry after " + strconv.FormatInt(int64(e.RetryAfter/time.Second), 10) + "s"
+		}
 		return e
 	case http.StatusInternalServerError, http.StatusServiceUnavailable, 529:
 		e := domain.NewError(domain.CodeUnavailable, msg("provider unavailable with status "+strconv.Itoa(status)))
 		e.Retryable = true
 		return e
 	default:
+		if status >= 300 && status < 400 {
+			// Redirects are never followed; retrying the same URL is futile.
+			return domain.NewError(domain.CodeInvalidOutput, msg("redirect not followed with status "+strconv.Itoa(status)))
+		}
 		if status >= 400 && status < 500 {
 			return domain.NewError(domain.CodeInvalidRequest, msg("request failed with status "+strconv.Itoa(status)))
 		}
@@ -296,16 +331,56 @@ func mapStatusError(status int, retryAfter string, raw []byte) error {
 	}
 }
 
-// parseRetryAfter parses a Retry-After header as delay seconds.
-func parseRetryAfter(v string) (int64, bool) {
+// parseRetryAfter parses a Retry-After header as a delay: either delta
+// seconds or an HTTP date (delay until then from now, clamped to >= 0).
+func parseRetryAfter(v string, now time.Time) (time.Duration, bool) {
 	v = strings.TrimSpace(v)
 	if v == "" {
 		return 0, false
 	}
 	if n, err := strconv.ParseInt(v, 10, 64); err == nil && n >= 0 {
-		return n, true
+		return time.Duration(n) * time.Second, true
+	}
+	if tm, err := http.ParseTime(v); err == nil {
+		d := tm.Sub(now)
+		if d < 0 {
+			d = 0
+		}
+		return d, true
 	}
 	return 0, false
+}
+
+// validateRequest rejects malformed advisory requests before any I/O.
+func validateRequest(req domain.DecisionRequest) error {
+	if strings.TrimSpace(req.Model) == "" {
+		return domain.NewError(domain.CodeInvalidRequest,
+			"decision-drex: request model is empty")
+	}
+	if len(req.Questions) == 0 {
+		return domain.NewError(domain.CodeInvalidRequest,
+			"decision-drex: request has no questions")
+	}
+	seen := make(map[string]struct{}, len(req.Questions))
+	for _, q := range req.Questions {
+		if _, dup := seen[q.ID]; dup {
+			return domain.NewError(domain.CodeInvalidRequest,
+				"decision-drex: duplicate question id")
+		}
+		seen[q.ID] = struct{}{}
+		switch q.Type {
+		case domain.QuestionChoice:
+			if len(q.Options) < 2 {
+				return domain.NewError(domain.CodeInvalidRequest,
+					"decision-drex: choice needs at least two options")
+			}
+		case domain.QuestionNoul, domain.QuestionScore:
+		default:
+			return domain.NewError(domain.CodeInvalidRequest,
+				"decision-drex: unknown question type")
+		}
+	}
+	return nil
 }
 
 // buildRequestBody encodes the wire JSON manually to preserve the option
@@ -570,7 +645,7 @@ func convertChoice(q domain.Question, wa wireAnswer) (domain.Answer, error) {
 	if math.IsNaN(*wa.Confidence) || math.IsInf(*wa.Confidence, 0) {
 		return invalid("choice confidence is not finite")
 	}
-	want := (max - 1/float64(n)) / (1 - 1/float64(n))
+	want := recomputeConfidence(n, max)
 	if math.Abs(*wa.Confidence-want) > 0.02 {
 		return invalid("choice confidence does not match recomputed value")
 	}
@@ -582,6 +657,12 @@ func convertChoice(q domain.Question, wa wireAnswer) (domain.Answer, error) {
 	c := *wa.Confidence
 	a.Confidence = &c
 	return a, nil
+}
+
+// recomputeConfidence rescales the winning probability above a uniform
+// baseline: C = (p_max - 1/n) / (1 - 1/n). Callers must pass n >= 2.
+func recomputeConfidence(n int, max float64) float64 {
+	return (max - 1/float64(n)) / (1 - 1/float64(n))
 }
 
 // copyProbs duplicates a probability map.

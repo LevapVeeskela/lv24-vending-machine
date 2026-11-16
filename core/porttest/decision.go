@@ -248,6 +248,9 @@ func DecisionConformance(t *testing.T, newProvider DecisionFactory) {
 			{"confidence diverged", func(answers map[string]any, _ map[string]any) {
 				answers["team"].(map[string]any)["confidence"] = 0.9
 			}, "m"},
+			{"missing confidence", func(answers map[string]any, _ map[string]any) {
+				delete(answers["team"].(map[string]any), "confidence")
+			}, "m"},
 			{"type mismatch", func(answers map[string]any, _ map[string]any) {
 				answers["team"].(map[string]any)["type"] = "score"
 			}, "m"},
@@ -304,6 +307,164 @@ func DecisionConformance(t *testing.T, newProvider DecisionFactory) {
 		}
 		if resp.Answers["team"].Choice != "beta" {
 			t.Fatalf("choice = %q", resp.Answers["team"].Choice)
+		}
+	})
+
+	t.Run("choice confidence boundary", func(t *testing.T) {
+		for _, tc := range []struct {
+			sent float64
+			ok   bool
+		}{
+			{0.56, true},
+			{0.58, false},
+		} {
+			answers := map[string]any{
+				"team": map[string]any{
+					"type": "choice", "choice": "alpha", "confidence": tc.sent,
+					"probabilities": map[string]any{"alpha": 0.7, "beta": 0.2, "gamma": 0.1},
+				},
+				"refund": map[string]any{"type": "noul", "noul": 0.93},
+				"urgency": map[string]any{"type": "score", "score": 1.0,
+					"legend":        []any{"Routine", "Soon", "Urgent"},
+					"probabilities": map[string]any{"0": 0.3, "1": 0.3, "2": 0.4},
+					"confidence":    0.2},
+			}
+			raw, _ := json.Marshal(map[string]any{
+				"model": "m", "answers": answers,
+				"usage": map[string]any{"input_tokens": 10, "output_tokens": 5},
+			})
+			setHandler(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write(raw)
+			})
+			_, err := decide(baseReq())
+			if tc.ok && err != nil {
+				t.Fatalf("confidence %v: expected success, got %v", tc.sent, err)
+			}
+			if !tc.ok && domain.CodeOf(err) != domain.CodeInvalidOutput {
+				t.Fatalf("confidence %v: expected invalid_output, got %v", tc.sent, err)
+			}
+		}
+	})
+
+	t.Run("answer validation", func(t *testing.T) {
+		cases := map[string]func(answers map[string]any){
+			"noul out of range": func(answers map[string]any) {
+				answers["refund"].(map[string]any)["noul"] = 1.5
+			},
+			"score without probabilities": func(answers map[string]any) {
+				delete(answers["urgency"].(map[string]any), "probabilities")
+			},
+			"extra answer": func(answers map[string]any) {
+				answers["extra"] = map[string]any{"type": "noul", "noul": 0.5}
+			},
+		}
+		for name, mutate := range cases {
+			t.Run(name, func(t *testing.T) {
+				answers := map[string]any{
+					"team": map[string]any{
+						"type": "choice", "choice": "alpha", "confidence": 0.55,
+						"probabilities": map[string]any{"alpha": 0.7, "beta": 0.2, "gamma": 0.1},
+					},
+					"refund": map[string]any{"type": "noul", "noul": 0.93},
+					"urgency": map[string]any{"type": "score", "score": 1.0,
+						"legend":        []any{"Routine", "Soon", "Urgent"},
+						"probabilities": map[string]any{"0": 0.3, "1": 0.3, "2": 0.4},
+						"confidence":    0.2},
+				}
+				mutate(answers)
+				raw, _ := json.Marshal(map[string]any{
+					"model": "m", "answers": answers,
+					"usage": map[string]any{"input_tokens": 10, "output_tokens": 5},
+				})
+				setHandler(func(w http.ResponseWriter, _ *http.Request) {
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write(raw)
+				})
+				_, err := decide(baseReq())
+				if domain.CodeOf(err) != domain.CodeInvalidOutput {
+					t.Fatalf("%s: expected invalid_output, got %v", name, err)
+				}
+			})
+		}
+	})
+
+	t.Run("redirect not followed", func(t *testing.T) {
+		var secondHits atomic.Int64
+		second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			secondHits.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(decisionOKBody("m", 1, 1)))
+		}))
+		t.Cleanup(second.Close)
+		setHandler(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Location", second.URL+"/systemone")
+			w.WriteHeader(http.StatusFound)
+		})
+		_, err := decide(baseReq())
+		if domain.CodeOf(err) != domain.CodeInvalidOutput {
+			t.Fatalf("expected invalid_output for redirect, got %v", err)
+		}
+		var derr *domain.Error
+		if !errors.As(err, &derr) {
+			t.Fatalf("error is not *domain.Error: %v", err)
+		}
+		if derr.Retryable {
+			t.Fatalf("redirect error must not be retryable")
+		}
+		if secondHits.Load() != 0 {
+			t.Fatalf("provider followed the redirect")
+		}
+	})
+
+	t.Run("oversized body", func(t *testing.T) {
+		setHandler(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(decisionOKBody("m", 10, 1) + strings.Repeat(" ", 1<<20)))
+		})
+		_, err := decide(baseReq())
+		if domain.CodeOf(err) != domain.CodeInvalidOutput {
+			t.Fatalf("expected invalid_output for oversized body, got %v", err)
+		}
+	})
+
+	t.Run("retry after", func(t *testing.T) {
+		respond429 := func(header string) {
+			setHandler(func(w http.ResponseWriter, _ *http.Request) {
+				if header != "" {
+					w.Header().Set("Retry-After", header)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusTooManyRequests)
+				_, _ = w.Write([]byte(`{"error":{"code":"rate_limit_error"}}`))
+			})
+		}
+		respond429("5")
+		_, err := decide(baseReq())
+		if domain.CodeOf(err) != domain.CodeRateLimit {
+			t.Fatalf("expected rate_limit, got %v", err)
+		}
+		if d := domain.RetryAfterOf(err); d != 5*time.Second {
+			t.Fatalf("retry after = %v, want 5s", d)
+		}
+
+		future := deps.Now().Add(30 * time.Second).UTC().Format(http.TimeFormat)
+		respond429(future)
+		_, err = decide(baseReq())
+		if domain.CodeOf(err) != domain.CodeRateLimit {
+			t.Fatalf("expected rate_limit, got %v", err)
+		}
+		if d := domain.RetryAfterOf(err); d < 29*time.Second || d > 31*time.Second {
+			t.Fatalf("retry after = %v, want ~30s", d)
+		}
+
+		respond429("")
+		_, err = decide(baseReq())
+		if domain.CodeOf(err) != domain.CodeRateLimit {
+			t.Fatalf("expected rate_limit, got %v", err)
+		}
+		if d := domain.RetryAfterOf(err); d != 0 {
+			t.Fatalf("retry after = %v, want 0", d)
 		}
 	})
 
