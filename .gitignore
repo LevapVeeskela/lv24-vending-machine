@@ -1,0 +1,68 @@
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+*.secret
+
+# Go
+/bin/
+/dist/
+*.exe
+*.exe~
+*.test
+*.out
+coverage.*
+vendor/
+
+# Node
+node_modules/
+.vite/
+.cache/
+*.tsbuildinfo
+apps/*/dist/
+packages/*/dist/
+
+# Rust / Tauri
+target/
+apps/desktop/src-tauri/target/
+apps/desktop/src-tauri/gen/
+
+# Flutter / Dart
+.dart_tool/
+.packages
+.pub-cache/
+.pub/
+build/
+apps/mobile/build/
+*.iml
+.flutter-plugins
+.flutter-plugins-dependencies
+
+# Data / local state
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+data/
+tmp/
+logs/
+packs/
+
+# IDE
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json.example
+
+# Research clones (outside repo normally; guard against accidental add)
+ideas/

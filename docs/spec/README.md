@@ -1,0 +1,68 @@
+# LV24 Vending — спецификация
+
+Рабочее имя продукта: **LV24 Vending** · репозиторий: `lv24-vending-machine`
+CLI: `vend` · демон: `vendd` · стек: Go 1.27 · Tauri 2 + React 19 · Flutter 3.47
+
+## Документы
+
+| # | Документ | О чём |
+|---|---|---|
+| 00 | [vision](00-vision.md) | продукт, роли, scope, non-goals, принципы, термины |
+| 01 | [architecture](01-architecture.md) | слои, порты, реестр, runtime, контракты, безопасность |
+| 02 | [monorepo](02-monorepo.md) | дерево репо, тулинг, кодоген, CI, конвенции |
+| 03 | [core-cli](03-core-cli.md) | команды CLI, форматы, коды возврата, WASM-стратегии |
+| 04 | [providers](04-providers.md) | контракты портов, capability-модель, деградации, conformance |
+| 05 | [agents](05-agents.md) | роли, манифесты, рантайм, калибровка, evals, guardrails |
+| 06 | [risk-execution](06-risk-execution.md) | OrderIntent, RiskGate, reservation, reconciliation, аудит |
+| 07 | [desktop-web](07-clients-desktop-web.md) | Tauri-шелл, экраны, realtime, web-режим |
+| 08 | [mobile](08-mobile.md) | Flutter, pairing, approve, push, оффлайн |
+| 09 | [research](09-research.md) | карта open-source решений и что заимствуем |
+| 10 | [roadmap](10-roadmap.md) | этапы, критерии приёмки, риски |
+
+ADR: [0001 Go](adr/0001-go-core.md) · [0002 contract-first](adr/0002-contract-first.md) ·
+[0003 deterministic core](adr/0003-deterministic-core.md) ·
+[0004 provider registry](adr/0004-provider-registry.md) ·
+[0005 local-first](adr/0005-local-first.md) ·
+[0006 decision models](adr/0006-decision-models.md)
+
+## Ключевые решения (кратко)
+
+1. **Ядро на Go**, CLI + локальный демон, один контракт для трёх клиентов.
+2. **ИИ совещательный, код решает**: `Proposal → RiskGate → Reservation → OMS`.
+3. **Провайдер = пакет с дескриптором возможностей**, а не ветка в ядре.
+4. **Capability-модель**: вендорские фичи объявляются, деградации — явные.
+5. **Decision-модели (Drex/Jev) — отдельный порт**, не «LLM с JSON».
+6. **Local-first**: SQLite + sidecar в desktop; Postgres + сервер — тот же код.
+7. **Contract-first**: OpenAPI + JSON Schema, кодоген в Go/TS/Dart, drift-тест.
+8. **Paper по умолчанию**, live — явный unlock с TTL и подтверждением.
+9. **Журнал с hash-chain**: каждое решение объяснимо и воспроизводимо.
+10. **Расширяемость**: стратегии — WASM, агенты — YAML-паки, провайдеры — Go-модули.
+
+## Быстрый старт (целевой UX)
+
+```bash
+vend init --template crypto-paper
+vend provider connect exchange-binance --id binance-main
+vend run start grid-btc --account binance-main --symbol BTC/USDT --mode paper
+vend run inspect <run-id>
+vend agent explain <decision-id>
+vend serve            # desktop/web/mobile подключаются к этому API
+```
+
+## Открытые вопросы к владельцу
+
+| # | Вопрос | Рекомендация |
+|---|---|---|
+| 1 | Название и CLI (`vend`/`lvvm`/другое) | `vend` + `vendd`, репо оставить `lv24-vending-machine` |
+| 2 | Лицензия | MIT для ядра и паков (как в lv24), docs CC-BY-4.0 |
+| 3 | Первые рынки | крипто-спот (Binance/Bybit) → US equities (Alpaca) → фьючерсы |
+| 4 | Live в v1 | paper-only до M3, live — после чек-листа и 2 недель paper |
+| 5 | Push | FCM/APNs для v1, self-hosted (ntfy/UnifiedPush) как опция |
+| 6 | Multi-user сервер | архитектурно готов, продуктом — после v1 |
+| 7 | Публичный репозиторий | да (бесплатный CI), с `SECURITY.md` и без секретов в истории |
+
+## Статус
+
+- Ресёрч: 13 направлений, клоны и разборы в `C:\0project\lv24-vending-machine\ideas`.
+- Спека: draft v0.1 (этот набор документов).
+- Код: не начат. Первый шаг — `contracts/` + скелет `core/` (см. `10-roadmap.md`).
