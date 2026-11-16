@@ -6,9 +6,11 @@
 // CloseTime before now are used, the first used bar always opens at or
 // after the signal timestamp and closes after the anchor (the gate verdict
 // time when the journal has one, otherwise the gate.request receipt time).
-// An entry bar that opened well before the anchor is shifted to the next
-// bar and flagged in the outcome, because its open price was already gone
-// when the signal became actionable.
+// An entry bar that opened more than min(10% of one interval, 30 seconds)
+// before the anchor is shifted to the next bar and flagged in the outcome;
+// without a spare bar the signal waits for a later cycle. A signal that still
+// has no honest window after its deadline gets one final labeling attempt and
+// is then recorded as outcome.unlabelable.
 package outcome
 
 import (
@@ -60,7 +62,7 @@ type Summary struct {
 	Already int
 	// Unlabelable is the number of entry signals whose closed candles are
 	// missing or off-grid: no honest forward window exists, so nothing is
-	// appended and the signal stays retryable.
+	// appended and the signal is retried with the failure backoff.
 	Unlabelable int
 	// Failed is the number of entry signals whose labeling errored (candle
 	// source, bad payload, unsupported timeframe, math). One bad symbol never
@@ -89,8 +91,14 @@ const (
 // may stay unlabeled before it is recorded as a timeout.
 const unlabelableTimeout = 7 * 24 * time.Hour
 
-// retryCap bounds the exponential backoff between failed attempts.
+// retryCap bounds the exponential backoff between failed or unusable
+// attempts: one hour, so a stuck signal is retried at least hourly.
 const retryCap = time.Hour
+
+// maxEntryLag is the absolute cap of the entry-shift threshold: a bar that
+// opened more than this long before the signal became actionable cannot be
+// entered honestly, even on a long timeframe.
+const maxEntryLag = 30 * time.Second
 
 // retryState tracks the exponential backoff of one failing signal.
 type retryState struct {
@@ -109,6 +117,9 @@ type Labeler struct {
 
 	mu    sync.Mutex
 	retry map[string]retryState
+	// warned marks signals whose per-signal warning was already logged, so a
+	// retrying signal does not flood the log every cycle.
+	warned map[string]bool
 }
 
 // New builds a Labeler. A non-empty CodeVersion is not required.
@@ -126,11 +137,12 @@ func New(jr ports.Journal, src CandleSource, deps ports.Deps, cfg Config) (*Labe
 		return nil, fmt.Errorf("outcome: feeBps must be in [0, 10000]")
 	}
 	return &Labeler{
-		jr:    jr,
-		src:   src,
-		deps:  deps,
-		cfg:   cfg,
-		retry: make(map[string]retryState),
+		jr:     jr,
+		src:    src,
+		deps:   deps,
+		cfg:    cfg,
+		retry:  make(map[string]retryState),
+		warned: make(map[string]bool),
 	}, nil
 }
 
@@ -288,25 +300,50 @@ func (l *Labeler) recordFailure(signalID string, interval time.Duration, now tim
 	l.retry[signalID] = st
 }
 
-// resetRetry forgets the backoff of a signal that labeled successfully.
+// resetRetry forgets the backoff and the logged warning of a signal that
+// labeled successfully.
 func (l *Labeler) resetRetry(signalID string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	delete(l.retry, signalID)
+	delete(l.warned, signalID)
 }
 
-// fail logs one per-signal labeling error, schedules its retry and asks Run to
-// continue. The message carries ids only: no payload, price or secret ever
-// reaches the log.
+// warnOnce logs one per-signal labeling problem the first time it is seen.
+// The message carries ids and a short reason only: no payload, price or
+// secret ever reaches the log.
+func (l *Labeler) warnOnce(signalID, symbol, msg, reason string) {
+	if l.deps.Logger == nil {
+		return
+	}
+	l.mu.Lock()
+	if l.warned[signalID] {
+		l.mu.Unlock()
+		return
+	}
+	l.warned[signalID] = true
+	l.mu.Unlock()
+	l.deps.Logger.Warn(msg,
+		"signalId", signalID,
+		"symbol", symbol,
+		"reason", reason)
+}
+
+// fail schedules the retry of one per-signal labeling error and asks Run to
+// continue. The warning is logged once per signal, not on every retry.
 func (l *Labeler) fail(req domain.GateRequest, interval time.Duration, err error) (labelResult, error) {
 	l.recordFailure(req.SignalID, interval, l.deps.Now().UTC())
-	if l.deps.Logger != nil {
-		l.deps.Logger.Warn("outcome: label failed",
-			"signalId", req.SignalID,
-			"symbol", req.Instrument.Symbol,
-			"err", err.Error())
-	}
+	l.warnOnce(req.SignalID, req.Instrument.Symbol, "outcome: label failed", err.Error())
 	return resultFailed, nil
+}
+
+// wait schedules the exponential retry of a signal whose candle source
+// answered but could not produce an honest forward window, and logs the
+// reason once per signal.
+func (l *Labeler) wait(req domain.GateRequest, interval time.Duration, msg, reason string) (labelResult, error) {
+	l.recordFailure(req.SignalID, interval, l.deps.Now().UTC())
+	l.warnOnce(req.SignalID, req.Instrument.Symbol, msg, reason)
+	return resultSkipped, nil
 }
 
 // labelOne fetches the candles following req and appends the outcome.labeled
@@ -333,21 +370,22 @@ func (l *Labeler) labelOne(ctx context.Context, ev domain.Event, req domain.Gate
 	// and one slack bar, so the source is not asked earlier: an early fetch
 	// would return the same incomplete window at a cost.
 	windowEnd := anchor.Add(time.Duration(l.cfg.HorizonBars+1) * interval)
-	// A signal that never produced an outcome by the deadline is recorded
-	// once and then dropped from labeling for good.
-	if !now.Before(windowEnd.Add(unlabelableTimeout)) {
-		if err := l.appendUnlabelable(ctx, req, ev.DecisionID, now, "timeout"); err != nil {
-			return resultFailed, err
-		}
-		return resultTimedOut, nil
-	}
 	if now.Before(windowEnd) {
 		return resultSkipped, nil
 	}
+	// A signal that never produced an outcome by the deadline makes exactly
+	// one final labeling attempt before it is recorded as unlabelable: the
+	// candles may have become available late, and a late label is still
+	// honest. A source error keeps the signal retryable instead of burning
+	// the last chance on a provider outage.
+	expired := !now.Before(windowEnd.Add(unlabelableTimeout))
+	// Start from the bar that contains the anchor when it opens after the
+	// signal: the earlier bars can never be entered and only waste the
+	// request budget of a late (backfill) signal.
 	candles, err := l.src.Candles(ctx, domain.CandleRequest{
 		Symbol:   req.Instrument.Symbol,
 		Interval: req.Timeframe,
-		From:     req.TS.UTC(),
+		From:     candleFrom(req.TS.UTC(), anchor, interval),
 		Limit:    l.cfg.HorizonBars + 2,
 	})
 	if err != nil {
@@ -355,25 +393,43 @@ func (l *Labeler) labelOne(ctx context.Context, ev domain.Event, req domain.Gate
 	}
 	bars := selectBars(candles, req, anchor, now)
 	if len(bars) == 0 {
-		// The source answered but nothing was usable: log why and stay
-		// retryable. An empty response is normal provider lag, not a fault.
-		if len(candles) > 0 && l.deps.Logger != nil {
-			l.deps.Logger.Warn("outcome: no usable candle",
-				"signalId", req.SignalID,
-				"symbol", req.Instrument.Symbol,
-				"candles", len(candles),
-				"reason", "no candle opens at or after the signal and closes after the gate decision")
+		if expired {
+			return l.timedOut(ctx, req, ev.DecisionID, now)
 		}
-		return resultSkipped, nil
+		// The source answered but nothing was usable: log once and back off
+		// exactly like a failure. An empty response is normal provider lag,
+		// not a reason to hammer the source every cycle.
+		return l.wait(req, interval, "outcome: no usable candle",
+			"no candle opens at or after the signal and closes after the gate decision")
 	}
 	if len(bars) < l.cfg.HorizonBars {
+		if expired {
+			return l.timedOut(ctx, req, ev.DecisionID, now)
+		}
+		return l.wait(req, interval, "outcome: not enough closed candles",
+			fmt.Sprintf("usable bars=%d, need %d", len(bars), l.cfg.HorizonBars))
+	}
+	bars, lagMS, shifted, ok := shiftEntry(bars, anchor, interval, l.cfg.HorizonBars)
+	if !ok {
+		if expired {
+			return l.timedOut(ctx, req, ev.DecisionID, now)
+		}
+		// The entry bar opened too early and there is no spare bar to shift
+		// into yet. Wait for the next closed bar instead of writing an
+		// outcome measured from a price the signal could not get.
 		return resultSkipped, nil
 	}
-	bars, lagMS, shifted := shiftEntry(bars, anchor, interval, l.cfg.HorizonBars)
 	bars = bars[:l.cfg.HorizonBars]
 	if !contiguous(bars, interval) {
 		// A missing or shifted bar breaks the horizon: labeling over a
 		// gappy window would silently change the holding period.
+		if expired {
+			return l.timedOut(ctx, req, ev.DecisionID, now)
+		}
+		l.recordFailure(req.SignalID, interval, now)
+		l.warnOnce(req.SignalID, req.Instrument.Symbol,
+			"outcome: candles not contiguous",
+			"a bar is missing or shifted inside the horizon")
 		return resultUnlabelable, nil
 	}
 	oc, err := l.buildOutcome(req, bars, now)
@@ -402,6 +458,27 @@ func (l *Labeler) labelOne(ctx context.Context, ev domain.Event, req domain.Gate
 	}
 	l.resetRetry(req.SignalID)
 	return resultLabeled, nil
+}
+
+// timedOut records the one outcome.unlabelable event of a signal whose last
+// labeling attempt produced no honest forward window.
+func (l *Labeler) timedOut(ctx context.Context, req domain.GateRequest, decisionID string, now time.Time) (labelResult, error) {
+	if err := l.appendUnlabelable(ctx, req, decisionID, now, "timeout"); err != nil {
+		return resultFailed, err
+	}
+	return resultTimedOut, nil
+}
+
+// candleFrom returns the earliest candle open the source must serve: the
+// signal time, or the open of the bar that contains the anchor when that is
+// later. The anchor bar may open before the anchor and still close after it,
+// so it stays in the window.
+func candleFrom(sigTS, anchor time.Time, interval time.Duration) time.Time {
+	from := sigTS.UTC()
+	if start := anchor.UTC().Truncate(interval); start.After(from) {
+		return start
+	}
+	return from
 }
 
 // appendUnlabelable records one signal that will never be labeled. The reason
@@ -473,19 +550,27 @@ func selectBars(all []domain.Candle, req domain.GateRequest, anchor, now time.Ti
 }
 
 // shiftEntry moves the entry to the next bar when the first usable bar opened
-// more than 10% of one interval before the anchor: entering that bar would
+// more than the shift threshold before the anchor: entering that bar would
 // measure the return from an open price the signal could no longer get.
 //
-// The shift needs a spare bar so the full horizon still fits; without one the
-// entry stays and only its lag is recorded. The returned lag always belongs to
-// the final entry bar.
-func shiftEntry(bars []domain.Candle, anchor time.Time, interval time.Duration, horizon int) ([]domain.Candle, int64, bool) {
+// The threshold is min(10% of one interval, 30 seconds). The shift needs a
+// spare bar so the full horizon still fits; without one ok is false and the
+// caller waits for the next closed bar instead of writing an outcome without
+// the shift. The returned lag always belongs to the final entry bar.
+func shiftEntry(bars []domain.Candle, anchor time.Time, interval time.Duration, horizon int) ([]domain.Candle, int64, bool, bool) {
 	lag := entryLagMS(anchor, bars[0].OpenTime)
-	if lag <= interval.Milliseconds()/10 || len(bars) <= horizon {
-		return bars, lag, false
+	threshold := interval / 10
+	if threshold > maxEntryLag {
+		threshold = maxEntryLag
+	}
+	if lag <= threshold.Milliseconds() {
+		return bars, lag, false, true
+	}
+	if len(bars) <= horizon {
+		return bars, lag, false, false
 	}
 	bars = bars[1:]
-	return bars, entryLagMS(anchor, bars[0].OpenTime), true
+	return bars, entryLagMS(anchor, bars[0].OpenTime), true, true
 }
 
 // entryLagMS is how long after the entry bar open the signal became
