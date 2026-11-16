@@ -12,7 +12,7 @@ type QuestionType string
 const (
 	// QuestionChoice asks the model to pick one option.
 	QuestionChoice QuestionType = "choice"
-	// QuestionNoul asks for a normalised -1..+1 assessment.
+	// QuestionNoul asks for a normalised 0..1 assessment.
 	QuestionNoul QuestionType = "noul"
 	// QuestionScore asks for a numeric score.
 	QuestionScore QuestionType = "score"

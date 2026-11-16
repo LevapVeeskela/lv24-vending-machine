@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestErrorStringHidesCause(t *testing.T) {
@@ -61,5 +62,44 @@ func TestIsRetryable(t *testing.T) {
 	wrapped := fmt.Errorf("ctx: %w", NewError(CodeTimeout, "t"))
 	if !IsRetryable(wrapped) {
 		t.Error("wrapped timeout must be retryable")
+	}
+}
+
+func TestRetryAfterOf(t *testing.T) {
+	direct := &Error{Code: CodeRateLimit, Message: "slow", RetryAfter: 1500 * time.Millisecond}
+	if got := RetryAfterOf(direct); got != 1500*time.Millisecond {
+		t.Errorf("RetryAfterOf(direct) = %v, want 1.5s", got)
+	}
+	wrapped := fmt.Errorf("call: %w", direct)
+	if got := RetryAfterOf(wrapped); got != 1500*time.Millisecond {
+		t.Errorf("RetryAfterOf(wrapped) = %v, want 1.5s", got)
+	}
+	plain := NewError(CodeRateLimit, "slow")
+	if got := RetryAfterOf(plain); got != 0 {
+		t.Errorf("RetryAfterOf(absent) = %v, want 0", got)
+	}
+	if got := RetryAfterOf(fmt.Errorf("boom")); got != 0 {
+		t.Errorf("RetryAfterOf(plain) = %v, want 0", got)
+	}
+	if got := RetryAfterOf(nil); got != 0 {
+		t.Errorf("RetryAfterOf(nil) = %v, want 0", got)
+	}
+	neg := &Error{Code: CodeRateLimit, Message: "slow", RetryAfter: -5 * time.Second}
+	if got := RetryAfterOf(neg); got != 0 {
+		t.Errorf("RetryAfterOf(negative) = %v, want 0", got)
+	}
+	negWrapped := fmt.Errorf("ctx: %w", neg)
+	if got := RetryAfterOf(negWrapped); got != 0 {
+		t.Errorf("RetryAfterOf(wrapped negative) = %v, want 0", got)
+	}
+	// Error() still hides the cause after the struct change.
+	withCause := WrapError(CodeAuth, "bad key", fmt.Errorf("secret-token-abc123"))
+	withCause.RetryAfter = time.Second
+	s := withCause.Error()
+	if s != "auth: bad key" {
+		t.Fatalf("Error() = %q, want %q", s, "auth: bad key")
+	}
+	if strings.Contains(s, "secret-token") {
+		t.Fatalf("Error() leaks cause: %q", s)
 	}
 }

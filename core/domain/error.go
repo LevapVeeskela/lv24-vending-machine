@@ -1,6 +1,9 @@
 package domain
 
-import "errors"
+import (
+	"errors"
+	"time"
+)
 
 // ErrorCode classifies domain and provider failures.
 type ErrorCode string
@@ -32,7 +35,10 @@ type Error struct {
 	Code      ErrorCode
 	Message   string
 	Retryable bool
-	Cause     error
+	// RetryAfter is the provider-requested delay before retrying.
+	// Zero means the provider did not specify one.
+	RetryAfter time.Duration
+	Cause      error
 }
 
 // Error renders "<code>: <message>" without the cause.
@@ -89,4 +95,20 @@ func IsRetryable(err error) bool {
 	default:
 		return false
 	}
+}
+
+// RetryAfterOf returns the provider-requested retry delay carried by err,
+// or 0 when absent. Negative values are clamped to 0.
+func RetryAfterOf(err error) time.Duration {
+	if err == nil {
+		return 0
+	}
+	var de *Error
+	if !errors.As(err, &de) || de == nil {
+		return 0
+	}
+	if de.RetryAfter < 0 {
+		return 0
+	}
+	return de.RetryAfter
 }
