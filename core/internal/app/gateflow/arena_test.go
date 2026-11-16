@@ -182,6 +182,49 @@ func TestArenaRunsDetachedAndRecordsOneEvent(t *testing.T) {
 	}
 }
 
+func TestWaitBlocksUntilArenaFinishes(t *testing.T) {
+	jr := &memJournal{}
+	primary := &fnDecision{fn: func(context.Context, domain.DecisionRequest) (domain.DecisionResponse, error) {
+		return allowResp(), nil
+	}}
+	arena := &blockingArena{started: make(chan struct{}), release: make(chan struct{}), resp: arenaResp()}
+	cfg := testConfig()
+	cfg.Arena = arenaConfig(arena)
+	f, err := New(jr, primary, testDeps("dec-1"), cfg)
+	if err != nil {
+		t.Fatalf("New() = %v", err)
+	}
+	if _, err := f.Evaluate(context.Background(), entryReq()); err != nil {
+		t.Fatalf("Evaluate() = %v", err)
+	}
+	select {
+	case <-arena.started:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("arena provider never started")
+	}
+
+	waited := make(chan struct{})
+	go func() {
+		f.Wait()
+		close(waited)
+	}()
+	select {
+	case <-waited:
+		t.Fatalf("Wait returned while the arena call was blocked")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(arena.release)
+	select {
+	case <-waited:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("Wait did not return after the arena call finished")
+	}
+	if got := len(arenaEvents(t, jr)); got != 1 {
+		t.Fatalf("arena events after Wait = %d, want 1", got)
+	}
+}
+
 func TestArenaSkippedForExitIntent(t *testing.T) {
 	jr := &memJournal{}
 	primary := &fnDecision{fn: func(context.Context, domain.DecisionRequest) (domain.DecisionResponse, error) {

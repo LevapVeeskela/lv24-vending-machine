@@ -139,19 +139,10 @@ func (r *runner) cmdServe(args []string) int {
 		return r.fail(jsonOut, exitGeneral, codeGeneral, err.Error(),
 			"check the vend wiring and retry", false, nil)
 	}
-	var gen *trend.Generator
-	if tr := cfg.Signals.Trend; tr.Enabled {
-		gen, err = trend.New(trend.Config{
-			Symbols:   tr.Symbols,
-			Timeframe: tr.Timeframe,
-			Fast:      tr.Fast,
-			Slow:      tr.Slow,
-			Sides:     tr.Sides,
-		}, candle, deps)
-		if err != nil {
-			return r.fail(jsonOut, exitUsage, codeUsage, err.Error(),
-				"fix signals.trend settings via vend config validate", false, nil)
-		}
+	signals, err := shadowSignals(cfg.Signals.Trend, candle, deps)
+	if err != nil {
+		return r.fail(jsonOut, exitUsage, codeUsage, err.Error(),
+			"fix signals.trend settings via vend config validate", false, nil)
 	}
 	var notifier ports.Notifier
 	if cfg.Notify.Telegram.Enabled {
@@ -161,7 +152,7 @@ func (r *runner) cmdServe(args []string) int {
 				"check notify.telegram settings or disable it", false, nil)
 		}
 	}
-	runner, err := shadow.New(jr, labeler, gen, flow, reporter, notifier, deps, shadow.Config{
+	runner, err := shadow.New(jr, labeler, signals, flow, reporter, notifier, deps, shadow.Config{
 		LabelInterval: time.Duration(cfg.Outcome.LabelIntervalSec) * time.Second,
 		StatusPath:    filepath.Join(dataDir, "shadow-status.json"),
 		CodeVersion:   r.ver,
@@ -190,13 +181,36 @@ func (r *runner) cmdServe(args []string) int {
 		runner.Run(ctx)
 	}()
 	serveErr := api.Serve(ctx, *addr, h, logger)
-	// Cancel the shadow loop and wait for an in-flight step to finish before
-	// the journal is closed by the deferred closer.
+	// Cancel the shadow loop and wait for an in-flight step to finish, then
+	// drain detached arena calls: the journal is closed by the deferred
+	// closer after this function returns.
 	stop()
 	<-done
+	flow.Wait()
 	if serveErr != nil {
 		return r.fail(jsonOut, exitGeneral, codeGeneral, serveErr.Error(),
 			"check the address is free and retry", false, nil)
 	}
 	return exitOK
+}
+
+// shadowSignals builds the optional signal source for the shadow runner. It
+// returns a nil interface when the trend source is disabled: assigning a
+// typed nil *trend.Generator would make the interface non-nil and panic on
+// the first Step.
+func shadowSignals(tr config.TrendConfig, candle ports.CandleProvider, deps ports.Deps) (shadow.SignalSource, error) {
+	if !tr.Enabled {
+		return nil, nil
+	}
+	gen, err := trend.New(trend.Config{
+		Symbols:   tr.Symbols,
+		Timeframe: tr.Timeframe,
+		Fast:      tr.Fast,
+		Slow:      tr.Slow,
+		Sides:     tr.Sides,
+	}, candle, deps)
+	if err != nil {
+		return nil, err
+	}
+	return gen, nil
 }

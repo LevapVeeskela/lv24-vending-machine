@@ -25,6 +25,9 @@ import (
 // defaultTimeout bounds one provider call including its retries.
 const defaultTimeout = 20 * time.Second
 
+// arenaMaxParallel caps the concurrent arena background calls.
+const arenaMaxParallel = 2
+
 // arenaTimeout bounds one arena provider call including its retries.
 const arenaTimeout = 20 * time.Second
 
@@ -85,6 +88,11 @@ type Flow struct {
 
 	mu       sync.Mutex
 	inflight map[string]*inflightCall
+
+	// arenaSem bounds concurrent detached arena calls; arenaWG tracks them so
+	// a shutdown can wait before the journal is closed.
+	arenaSem chan struct{}
+	arenaWG  sync.WaitGroup
 }
 
 // inflightCall tracks one running Evaluate so concurrent duplicates of the
@@ -157,7 +165,16 @@ func New(jr ports.Journal, provider ports.Decision, deps ports.Deps, cfg Config)
 	if timeout <= 0 {
 		timeout = defaultTimeout
 	}
-	return &Flow{jr: jr, provider: provider, deps: deps, cfg: cfg, timeout: timeout, inflight: make(map[string]*inflightCall)}, nil
+	return &Flow{jr: jr, provider: provider, deps: deps, cfg: cfg, timeout: timeout,
+		inflight: make(map[string]*inflightCall), arenaSem: make(chan struct{}, arenaMaxParallel)}, nil
+}
+
+// Wait blocks until every detached arena call has finished.
+//
+// The journal must stay open until it returns: an arena call appends its
+// own event after the primary result is already delivered.
+func (f *Flow) Wait() {
+	f.arenaWG.Wait()
 }
 
 // validateRequest rejects malformed requests before any journal I/O.
@@ -554,14 +571,31 @@ func (f *Flow) complete(ctx context.Context, req domain.GateRequest, decisionID 
 // launchArena starts the detached arena call for one recorded decision.
 //
 // The state snapshot is taken synchronously, before the goroutine starts, so
-// the caller may reuse or mutate its request map once Evaluate returns.
+// the caller may reuse or mutate its request map once Evaluate returns. The
+// concurrency cap is acquired without blocking: a saturated arena drops the
+// comparison instead of slowing the gate.
 func (f *Flow) launchArena(ctx context.Context, req domain.GateRequest, decisionID string) {
 	arena := f.cfg.Arena
 	if arena == nil || arena.Provider == nil {
 		return
 	}
 	state := composeState(req)
-	go f.runArena(ctx, arena, req, state, decisionID)
+	select {
+	case f.arenaSem <- struct{}{}:
+	default:
+		if f.deps.Logger != nil {
+			f.deps.Logger.Warn("gateflow: arena busy, skipping",
+				"decisionId", decisionID,
+				"code", "arena_saturated")
+		}
+		return
+	}
+	f.arenaWG.Add(1)
+	go func() {
+		defer f.arenaWG.Done()
+		defer func() { <-f.arenaSem }()
+		f.runArena(ctx, arena, req, state, decisionID)
+	}()
 }
 
 // runArena calls the arena provider and appends one arena.decision event.
