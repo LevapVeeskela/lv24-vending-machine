@@ -692,9 +692,10 @@ func convertAnswer(q domain.Question, wa wireAnswer) (domain.Answer, error) {
 		a.Legend = append([]string(nil), wa.Legend...)
 		a.Probabilities = copyProbs(wa.Probabilities)
 		if wa.Confidence != nil {
-			if math.IsNaN(*wa.Confidence) || math.IsInf(*wa.Confidence, 0) {
+			if math.IsNaN(*wa.Confidence) || math.IsInf(*wa.Confidence, 0) ||
+				*wa.Confidence < 0 || *wa.Confidence > 1 {
 				return domain.Answer{}, domain.NewError(domain.CodeInvalidOutput,
-					"decision-drex: score confidence is not finite")
+					"decision-drex: score confidence out of range [0, 1]")
 			}
 			c := *wa.Confidence
 			a.Confidence = &c

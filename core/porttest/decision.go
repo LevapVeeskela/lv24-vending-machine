@@ -718,6 +718,12 @@ func DecisionConformance(t *testing.T, newProvider DecisionFactory) {
 			"confidence string": func(u map[string]any) {
 				u["confidence"] = "high"
 			},
+			"confidence below zero": func(u map[string]any) {
+				u["confidence"] = -0.1
+			},
+			"confidence above one": func(u map[string]any) {
+				u["confidence"] = 1.1
+			},
 		}
 		for name, mutate := range cases {
 			t.Run(name, func(t *testing.T) {
@@ -759,6 +765,22 @@ func DecisionConformance(t *testing.T, newProvider DecisionFactory) {
 				"urgency":{"type":"score","score":1.0,
 				"legend":["Routine","Soon","Urgent"],
 				"probabilities":{"0":0.3,"1":0.3,"2":0.4}}},
+				"usage":{"input_tokens":10,"output_tokens":5}}`},
+			{"confidence zero accepted", `{"model":"m","answers":{
+				"team":{"type":"choice","choice":"alpha","confidence":0.55,
+				"probabilities":{"alpha":0.7,"beta":0.2,"gamma":0.1}},
+				"refund":{"type":"noul","noul":0.93},
+				"urgency":{"type":"score","score":1.0,
+				"legend":["Routine","Soon","Urgent"],
+				"probabilities":{"0":0.3,"1":0.3,"2":0.4},"confidence":0.0}},
+				"usage":{"input_tokens":10,"output_tokens":5}}`},
+			{"confidence one accepted", `{"model":"m","answers":{
+				"team":{"type":"choice","choice":"alpha","confidence":0.55,
+				"probabilities":{"alpha":0.7,"beta":0.2,"gamma":0.1}},
+				"refund":{"type":"noul","noul":0.93},
+				"urgency":{"type":"score","score":1.0,
+				"legend":["Routine","Soon","Urgent"],
+				"probabilities":{"0":0.3,"1":0.3,"2":0.4},"confidence":1.0}},
 				"usage":{"input_tokens":10,"output_tokens":5}}`},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
