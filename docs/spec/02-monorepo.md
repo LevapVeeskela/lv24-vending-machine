@@ -220,6 +220,7 @@ providers:
 | `desktop` | `tsc`, `vitest`, `cargo check`, `cargo test` | PR (path-filter) |
 | `mobile` | `dart analyze`, `flutter test`, сборка APK debug | PR (path-filter) |
 | `security` | `govulncheck`, `npm audit --omit=dev`, `cargo audit` | push, weekly |
+| `licenses` | `go-licenses`, `license-checker`, `cargo-deny`, `flutter pub deps` — запрет AGPL/GPL в ядре и mobile | PR, weekly |
 | `docs` | сборка/проверка ссылок в spec | PR (path-filter) |
 
 Path-фильтры обязательны: изменение `docs/**` не запускает Go/Flutter.

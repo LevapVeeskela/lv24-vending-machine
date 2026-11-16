@@ -34,7 +34,7 @@
 
 | Работа | Результат |
 |---|---|
-| `marketdata-ccxt` (REST) + `exchange-binance` (REST+WS) | инструменты, свечи, стакан |
+| `marketdata-ccxt` (REST) + `exchange-binance` (spot, REST+WS) | инструменты, свечи, стакан — первый рынок |
 | `InstrumentRegistry`, `CandleService`, `BookStream`, `ConnectionSupervisor` | нормализация, gap-детект, реконнект |
 | `paper` venue: fill model, комиссии, слиппедж, две книги | paper-исполнение |
 | OMS: intent → reserve → submit → reconcile, идемпотентность | без дублей |
@@ -101,6 +101,8 @@ kill switch и flatten проверены на реальном счёте с н
 - Web: OIDC/device-flow, RBAC, Postgres, контейнерный деплой.
 - Mobile: pairing QR, портфель, run pause/resume, approve, kill, push, оффлайн.
 - Мультиустройство: список устройств, отзыв, «выйти на всех».
+- Store-готовность: privacy policy, account deletion (Apple), Data safety (Google),
+  возрастной рейтинг, экспортная декларация шифрования, RuStore-публикация.
 
 **Приёмка:** approve с телефона доходит до исполнения < 5 с; push по критичным
 событиям; отзыв устройства мгновенно блокирует доступ; оффлайн показывает

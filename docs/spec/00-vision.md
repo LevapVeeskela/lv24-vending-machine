@@ -114,5 +114,5 @@
 - Референсы архитектуры владельца: `lv24-brain` (hexagonal core + CLI + server),
   `lv24-brain-desktop` (Tauri + React FSD + OpenAPI), `lv24/main` (контракты,
   Go-шлюзы, melos для Flutter).
-- `docs/spec/08-research.md` — карта open-source решений и что из них берём.
+- `docs/spec/09-research.md` — карта open-source решений и что из них берём.
 - `docs/spec/README.md` — индекс спеки и принятые решения.

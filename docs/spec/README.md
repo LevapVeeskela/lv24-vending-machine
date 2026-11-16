@@ -23,7 +23,8 @@ ADR: [0001 Go](adr/0001-go-core.md) · [0002 contract-first](adr/0002-contract-f
 [0003 deterministic core](adr/0003-deterministic-core.md) ·
 [0004 provider registry](adr/0004-provider-registry.md) ·
 [0005 local-first](adr/0005-local-first.md) ·
-[0006 decision models](adr/0006-decision-models.md)
+[0006 decision models](adr/0006-decision-models.md) ·
+[0007 license & stores](adr/0007-license-and-stores.md)
 
 ## Ключевые решения (кратко)
 
@@ -51,15 +52,15 @@ vend serve            # desktop/web/mobile подключаются к этом�
 
 ## Открытые вопросы к владельцу
 
-| # | Вопрос | Рекомендация |
+| # | Вопрос | Решение |
 |---|---|---|
-| 1 | Название и CLI (`vend`/`lvvm`/другое) | `vend` + `vendd`, репо оставить `lv24-vending-machine` |
-| 2 | Лицензия | MIT для ядра и паков (как в lv24), docs CC-BY-4.0 |
-| 3 | Первые рынки | крипто-спот (Binance/Bybit) → US equities (Alpaca) → фьючерсы |
+| 1 | Название и CLI | `vend` + `vendd`, репо `lv24-vending-machine` (рабочее) |
+| 2 | Лицензия | **MIT** для ядра/провайдеров/SDK, docs CC-BY-4.0; mobile можно продавать (ADR-0007) |
+| 3 | Первые рынки | **Binance spot** (M1), затем Bybit и Alpaca |
 | 4 | Live в v1 | paper-only до M3, live — после чек-листа и 2 недель paper |
 | 5 | Push | FCM/APNs для v1, self-hosted (ntfy/UnifiedPush) как опция |
 | 6 | Multi-user сервер | архитектурно готов, продуктом — после v1 |
-| 7 | Публичный репозиторий | да (бесплатный CI), с `SECURITY.md` и без секретов в истории |
+| 7 | Публичный репозиторий | **да** (бесплатный CI), с `SECURITY.md` и без секретов в истории |
 
 ## Статус
 
