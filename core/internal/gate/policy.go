@@ -41,17 +41,19 @@ func Normalize(p domain.GatePolicy) domain.GatePolicy {
 
 // PolicyHash returns a stable hash of the policy and the check order.
 //
-// The hashed JSON is deterministic:
-// {"version":"gate-v1","minPass":"0.550000","minBlock":"0.500000","checks":["intent",...]}
+// Thresholds use the shortest exact round-trip form
+// (strconv.FormatFloat with 'g', -1), so policies differing by any
+// representable amount hash differently. The hashed JSON is deterministic:
+// {"version":"gate-v1","minPass":"0.55","minBlock":"0.5","checks":["intent",...]}
 func PolicyHash(p domain.GatePolicy) string {
 	p = Normalize(p)
 	var sb strings.Builder
 	sb.WriteString(`{"version":`)
 	sb.WriteString(strconv.Quote(p.Version))
 	sb.WriteString(`,"minPass":`)
-	sb.WriteString(strconv.Quote(strconv.FormatFloat(p.MinPass, 'f', 6, 64)))
+	sb.WriteString(strconv.Quote(strconv.FormatFloat(p.MinPass, 'g', -1, 64)))
 	sb.WriteString(`,"minBlock":`)
-	sb.WriteString(strconv.Quote(strconv.FormatFloat(p.MinBlock, 'f', 6, 64)))
+	sb.WriteString(strconv.Quote(strconv.FormatFloat(p.MinBlock, 'g', -1, 64)))
 	sb.WriteString(`,"checks":[`)
 	for i, c := range CheckOrder {
 		if i > 0 {

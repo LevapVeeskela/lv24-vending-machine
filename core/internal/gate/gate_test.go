@@ -334,3 +334,21 @@ func TestEvaluateDeterminismAndModel(t *testing.T) {
 		t.Fatalf("policy hash mismatch")
 	}
 }
+
+func TestEvaluateDirectionalIgnoresJunkKeys(t *testing.T) {
+	pol := DefaultPolicy()
+	// conflict + adverse chosen, but real option p_max below minBlock;
+	// a junk key with 0.99 must not inflate p_max into a directional_block.
+	got := Evaluate(entryReq(), okOutcome(func(a map[string]domain.Answer) {
+		a["signal_alignment"] = choiceAnswer("conflict", map[string]float64{
+			"aligned": 0.2, "neutral": 0.2, "conflict": 0.4, "junk": 0.99,
+		})
+		a["market_regime"] = choiceAnswer("adverse", map[string]float64{
+			"favorable": 0.2, "neutral": 0.2, "adverse": 0.4, "junk": 0.99,
+		})
+		a["risk_check"] = choiceAnswer("pass", map[string]float64{"pass": 0.9, "block": 0.1})
+	}), pol)
+	if got.Code != "allow" {
+		t.Fatalf("junk key inflated p_max: code = %q, want allow (checks %v)", got.Code, got.Checks)
+	}
+}

@@ -70,6 +70,14 @@ func TestPolicyHashStableAndSensitive(t *testing.T) {
 	if h := PolicyHash(changed); h == h1 {
 		t.Fatalf("hash did not change with version")
 	}
+	// Sub-1e-6 differences must hash differently (exact round-trip format).
+	a := base
+	a.MinPass = 0.5500001
+	b := base
+	b.MinPass = 0.5500004
+	if ha, hb := PolicyHash(a), PolicyHash(b); ha == hb {
+		t.Fatalf("hash collision for 0.5500001 vs 0.5500004: %q", ha)
+	}
 }
 
 func TestQuestionsFrozen(t *testing.T) {

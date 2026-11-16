@@ -93,7 +93,11 @@ func Evaluate(req domain.GateRequest, outcome domain.DecisionOutcome, policy dom
 	}
 	maxProb := func(question string) float64 {
 		m := 0.0
-		for _, v := range answers[question].Probabilities {
+		allowed := allowedChoices[question]
+		for k, v := range answers[question].Probabilities {
+			if !allowed[k] {
+				continue
+			}
 			if v > m {
 				m = v
 			}
