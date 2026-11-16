@@ -1241,3 +1241,36 @@ func TestLastLabelAtRestoredFromJournal(t *testing.T) {
 		t.Fatalf("lastLabelAt = %v, want %v", got, labelAt)
 	}
 }
+
+// TestProviderFaultAlertOnlyWhenFresh: a provider fault verdict older than a
+// day must not page the operator after a restart; a fresh one still does.
+func TestProviderFaultAlertOnlyWhenFresh(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		at   time.Time
+		want int
+	}{
+		{name: "three days old", at: baseTime.Add(-72 * time.Hour), want: 0},
+		{name: "one hour old", at: baseTime.Add(-time.Hour), want: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			jr := &memJournal{}
+			seedEventAt(t, jr, domain.EventGateVerdict, tc.at, domain.GateVerdict{
+				Verdict: domain.VerdictAbstain,
+				Code:    providerAuth,
+			})
+			now := baseTime
+			n := &fakeNotifier{}
+			r := newRunner(jr, mutableDeps(&now), testConfig(""), nil, nil, nil, nil, n)
+			if err := r.Step(context.Background()); err != nil {
+				t.Fatalf("Step() = %v", err)
+			}
+			if got := len(n.sent()); got != tc.want {
+				t.Fatalf("sends = %d, want %d", got, tc.want)
+			}
+			if got := len(jr.eventsOf(domain.EventNotifySent)); got != tc.want {
+				t.Fatalf("notify.sent = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}

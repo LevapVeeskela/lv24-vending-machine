@@ -97,6 +97,11 @@ const trendScanDelay = 2 * time.Second
 // journal-derived alert series.
 const alertInterval = time.Hour
 
+// faultAlertMaxAge is how old the latest provider_auth/provider_misconfigured
+// verdict may be for its operator alert to be sent. An older verdict describes
+// a fault that has already gone quiet, so it must not page anyone.
+const faultAlertMaxAge = 24 * time.Hour
+
 // retryCap bounds the exponential retry delay of an undelivered notification.
 const retryCap = time.Hour
 
@@ -144,8 +149,10 @@ type journalNotifications struct {
 	streak    int
 	streakSeq int64
 	// faults maps provider_auth/provider_misconfigured to the seq of the
-	// latest verdict with that code.
-	faults map[string]int64
+	// latest verdict with that code; faultAt maps the same code to the time
+	// of that verdict so a stale fault is not announced.
+	faults  map[string]int64
+	faultAt map[string]time.Time
 	// delivered maps a notification key to its last successful delivery.
 	delivered map[string]deliveredAlert
 }
@@ -473,6 +480,11 @@ func (r *Runner) notify(ctx context.Context) error {
 		if seq == 0 {
 			continue
 		}
+		// A fault verdict older than a day has already gone quiet; paging the
+		// operator about it after a restart would be noise, not information.
+		if !faultFresh(now, state.faultAt[code]) {
+			continue
+		}
 		if !alertNeeded(now, state.delivered[notifyKey(notifyProviderConfig, code)], seq) {
 			continue
 		}
@@ -605,6 +617,15 @@ func (r *Runner) deferSend(key string, now time.Time, delay time.Duration) {
 	r.retry[key] = st
 }
 
+// faultFresh reports whether the latest verdict with the fault code is recent
+// enough to alert on. A missing timestamp is treated as stale.
+func faultFresh(now, at time.Time) bool {
+	if at.IsZero() {
+		return false
+	}
+	return now.Sub(at) <= faultAlertMaxAge
+}
+
 // journalState derives the notification schedule inputs from the whole journal:
 // the trailing provider-unavailable streak, the first gate.request timestamp,
 // the timestamp of the latest successful weekly notification, the latest
@@ -613,6 +634,7 @@ func (r *Runner) deferSend(key string, now time.Time, delay time.Duration) {
 func (r *Runner) journalState(ctx context.Context) (journalNotifications, error) {
 	st := journalNotifications{
 		faults:    make(map[string]int64),
+		faultAt:   make(map[string]time.Time),
 		delivered: make(map[string]deliveredAlert),
 	}
 	err := r.jr.Walk(ctx, 0, "", func(ev domain.Event) error {
@@ -637,6 +659,7 @@ func (r *Runner) journalState(ctx context.Context) (journalNotifications, error)
 				st.streak = 0
 				if ev.Seq > st.faults[v.Code] {
 					st.faults[v.Code] = ev.Seq
+					st.faultAt[v.Code] = ev.TS.UTC()
 				}
 			default:
 				st.streak = 0
