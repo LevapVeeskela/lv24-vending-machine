@@ -5,6 +5,18 @@ import (
 	"time"
 )
 
+// Event kind constants for the journal stream.
+const (
+	EventGateRequest          = "gate.request"
+	EventDecisionResponse     = "decision.response"
+	EventGateVerdict          = "gate.verdict"
+	EventOutcomeLabeled       = "outcome.labeled"
+	EventDecisionModelChanged = "decision.model_changed"
+)
+
+// EventSchemaVersion is the current journal payload schema version.
+const EventSchemaVersion = 1
+
 // Event is one hash-chained journal record.
 type Event struct {
 	Seq           int64           `json:"seq"`

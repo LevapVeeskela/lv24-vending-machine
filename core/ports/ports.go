@@ -72,6 +72,16 @@ type Deps struct {
 	Logger *slog.Logger
 	// Secrets resolves secret references.
 	Secrets SecretStore
+	// NewID generates unique identifiers; nil means callers must not rely on it.
+	NewID func() string
+}
+
+// NextID returns Deps.NewID() or "" when NewID is nil.
+func (d Deps) NextID() string {
+	if d.NewID == nil {
+		return ""
+	}
+	return d.NewID()
 }
 
 // Now returns the current time in UTC via Clock or time.Now.
@@ -112,6 +122,11 @@ type Journal interface {
 	Append(ctx context.Context, ev domain.Event) (domain.Event, error)
 	// Query lists events with Seq > from, optionally filtered by kind.
 	Query(ctx context.Context, from int64, kind string) ([]domain.Event, error)
+	// Walk streams events with Seq > from in ascending Seq order, calling
+	// fn for each event. fn returning an error stops the walk.
+	Walk(ctx context.Context, from int64, kind string, fn func(domain.Event) error) error
+	// Head returns the highest-seq event, or false when the journal is empty.
+	Head(ctx context.Context) (domain.Event, bool, error)
 	// Verify checks the hash chain integrity.
 	Verify(ctx context.Context) (domain.VerifyResult, error)
 }

@@ -25,7 +25,40 @@
     "hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "runId": { "type": "string" },
     "decisionId": { "type": "string" },
-    "policyHash": { "type": "string" },
+    "policyHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "snapshotHash": { "type": "string" }
+  },
+  "$defs": {
+    "GateRequestPayload": {
+      "$ref": "../gate/v1.json",
+      "description": "Payload of gate.request."
+    },
+    "DecisionResponsePayload": {
+      "$ref": "../decision/v1.json#/$defs/DecisionResponse",
+      "description": "Payload of decision.response."
+    },
+    "GateVerdictPayload": {
+      "$ref": "../gate/v1.json#/$defs/GateVerdict",
+      "description": "Payload of gate.verdict."
+    },
+    "OutcomeLabeledPayload": {
+      "$ref": "../outcome/v1.json",
+      "description": "Payload of outcome.labeled."
+    },
+    "DecisionModelChanged": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requestedModel", "previousModel", "actualModel", "detectedAt"],
+      "properties": {
+        "requestedModel": { "type": "string", "minLength": 1 },
+        "previousModel": { "type": "string", "minLength": 1 },
+        "actualModel": { "type": "string", "minLength": 1 },
+        "detectedAt": {
+          "description": "See common $defs/Timestamp. Inlined so the generated Go field is time.Time.",
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    }
   }
 }

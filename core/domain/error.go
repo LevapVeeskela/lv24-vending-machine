@@ -26,6 +26,8 @@ const (
 	CodeTimeout ErrorCode = "timeout"
 	// CodeUnknown is the fallback for unclassified errors.
 	CodeUnknown ErrorCode = "unknown"
+	// CodeRegionUnavailable signals that the provider region is unavailable.
+	CodeRegionUnavailable ErrorCode = "region_unavailable"
 )
 
 // Error is a coded failure with an optional cause.

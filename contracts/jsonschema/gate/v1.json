@@ -37,7 +37,7 @@
         "checks": { "type": "array", "items": { "$ref": "#/$defs/Check" } },
         "decisionId": { "type": "string" },
         "model": { "type": "string" },
-        "policyHash": { "type": "string", "minLength": 1 },
+        "policyHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         "decidedAt": {
           "description": "See common $defs/Timestamp. Inlined so the generated Go field is time.Time.",
           "type": "string",
@@ -53,6 +53,16 @@
         "name": { "type": "string", "minLength": 1 },
         "passed": { "type": "boolean" },
         "detail": { "type": "string" }
+      }
+    },
+    "GateVerdictResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "signalId", "verdict"],
+      "properties": {
+        "mode": { "enum": ["shadow"] },
+        "signalId": { "type": "string", "minLength": 1 },
+        "verdict": { "$ref": "#/$defs/GateVerdict" }
       }
     }
   }

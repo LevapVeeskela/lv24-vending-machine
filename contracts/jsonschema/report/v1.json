@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lv24.by/contracts/jsonschema/report/v1.json",
+  "title": "Report",
+  "description": "Summary of labeled outcomes and gate performance.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["generatedAt", "labeledCount", "sufficient", "verdictCounts", "decisionCostUsd", "latencyP50Ms", "latencyP95Ms"],
+  "properties": {
+    "generatedAt": {
+      "description": "See common $defs/Timestamp. Inlined so the generated Go field is time.Time.",
+      "type": "string",
+      "format": "date-time"
+    },
+    "labeledCount": { "type": "integer", "minimum": 0 },
+    "sufficient": { "type": "boolean" },
+    "verdictCounts": {
+      "type": "object",
+      "additionalProperties": { "type": "integer", "minimum": 0 }
+    },
+    "decisionCostUsd": { "$ref": "../common/v1.json#/$defs/Decimal" },
+    "latencyP50Ms": { "type": "integer", "minimum": 0 },
+    "latencyP95Ms": { "type": "integer", "minimum": 0 },
+    "comparisons": { "$ref": "#/$defs/ReportComparisons" }
+  },
+  "$defs": {
+    "ReportComparisons": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["allEntriesReturn", "allowReturn", "rejectedAvgReturn", "brier", "ece", "reliability", "byModel"],
+      "properties": {
+        "allEntriesReturn": { "$ref": "../common/v1.json#/$defs/Decimal" },
+        "allowReturn": { "$ref": "../common/v1.json#/$defs/Decimal" },
+        "rejectedAvgReturn": { "$ref": "../common/v1.json#/$defs/Decimal" },
+        "brier": { "type": "number", "minimum": 0, "maximum": 1 },
+        "ece": { "type": "number", "minimum": 0, "maximum": 1 },
+        "reliability": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ReliabilityBucket" }
+        },
+        "byModel": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ModelBreakdown" }
+        }
+      }
+    },
+    "ReliabilityBucket": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["lowerBound", "count", "meanPredicted", "observedRate"],
+      "properties": {
+        "lowerBound": { "type": "number", "minimum": 0, "maximum": 1 },
+        "count": { "type": "integer", "minimum": 0 },
+        "meanPredicted": { "type": "number", "minimum": 0, "maximum": 1 },
+        "observedRate": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "ModelBreakdown": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model", "count", "brier", "ece", "netReturnSum", "costUsd"],
+      "properties": {
+        "model": { "type": "string", "minLength": 1 },
+        "count": { "type": "integer", "minimum": 0 },
+        "brier": { "type": "number", "minimum": 0, "maximum": 1 },
+        "ece": { "type": "number", "minimum": 0, "maximum": 1 },
+        "netReturnSum": { "$ref": "../common/v1.json#/$defs/Decimal" },
+        "costUsd": { "$ref": "../common/v1.json#/$defs/Decimal" }
+      }
+    }
+  }
+}

@@ -13,6 +13,6 @@
   ],
   "decisionId": "01J9ZQ8W3E12AB3456789CDEFG",
   "model": "dre-x-1",
-  "policyHash": "sha256:b9ae3472b8ff26cc2889f5db91eb555ed09a935a112f16984ea1014a69e59b4f",
+  "policyHash": "b9ae3472b8ff26cc2889f5db91eb555ed09a935a112f16984ea1014a69e59b4f",
   "decidedAt": "2026-11-16T06:00:01Z"
 }

@@ -1,0 +1,24 @@
+{
+  "generatedAt": "2026-11-16T12:05:00Z",
+  "labeledCount": 42,
+  "sufficient": true,
+  "verdictCounts": { "ALLOW": 25, "REJECT": 15, "ABSTAIN": 2 },
+  "decisionCostUsd": "0.0003024",
+  "latencyP50Ms": 11,
+  "latencyP95Ms": 38,
+  "comparisons": {
+    "allEntriesReturn": "0.012400",
+    "allowReturn": "0.018200",
+    "rejectedAvgReturn": "-0.004100",
+    "brier": 0.21,
+    "ece": 0.06,
+    "reliability": [
+      { "lowerBound": 0.0, "count": 10, "meanPredicted": 0.12, "observedRate": 0.1 },
+      { "lowerBound": 0.5, "count": 20, "meanPredicted": 0.62, "observedRate": 0.6 },
+      { "lowerBound": 0.8, "count": 12, "meanPredicted": 0.87, "observedRate": 0.83 }
+    ],
+    "byModel": [
+      { "model": "dre-x-1", "count": 42, "brier": 0.21, "ece": 0.06, "netReturnSum": "0.280800", "costUsd": "0.0003024" }
+    ]
+  }
+}

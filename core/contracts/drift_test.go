@@ -35,6 +35,8 @@ func TestGeneratedContractsMatch(t *testing.T) {
 		"../contracts/jsonschema/common/v1.json",
 		"../contracts/jsonschema/decision/v1.json",
 		"../contracts/jsonschema/gate/v1.json",
+		"../contracts/jsonschema/outcome/v1.json",
+		"../contracts/jsonschema/report/v1.json",
 		"../contracts/jsonschema/events/v1.json",
 	}
 	cmd := exec.Command("go", args...)

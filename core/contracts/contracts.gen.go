@@ -148,6 +148,56 @@ func (j *Decimal) UnmarshalJSON(value []byte) error {
 	return nil
 }
 
+type DecisionModelChanged struct {
+	// ActualModel corresponds to the JSON schema field "actualModel".
+	ActualModel string `json:"actualModel"`
+
+	// See common $defs/Timestamp. Inlined so the generated Go field is time.Time.
+	DetectedAt time.Time `json:"detectedAt"`
+
+	// PreviousModel corresponds to the JSON schema field "previousModel".
+	PreviousModel string `json:"previousModel"`
+
+	// RequestedModel corresponds to the JSON schema field "requestedModel".
+	RequestedModel string `json:"requestedModel"`
+}
+
+// UnmarshalJSON implements json.Unmarshaler.
+func (j *DecisionModelChanged) UnmarshalJSON(value []byte) error {
+	var raw map[string]interface{}
+	if err := json.Unmarshal(value, &raw); err != nil {
+		return err
+	}
+	if _, ok := raw["actualModel"]; raw != nil && !ok {
+		return fmt.Errorf("field actualModel in DecisionModelChanged: required")
+	}
+	if _, ok := raw["detectedAt"]; raw != nil && !ok {
+		return fmt.Errorf("field detectedAt in DecisionModelChanged: required")
+	}
+	if _, ok := raw["previousModel"]; raw != nil && !ok {
+		return fmt.Errorf("field previousModel in DecisionModelChanged: required")
+	}
+	if _, ok := raw["requestedModel"]; raw != nil && !ok {
+		return fmt.Errorf("field requestedModel in DecisionModelChanged: required")
+	}
+	type Plain DecisionModelChanged
+	var plain Plain
+	if err := json.Unmarshal(value, &plain); err != nil {
+		return err
+	}
+	if utf8.RuneCountInString(string(plain.ActualModel)) < 1 {
+		return fmt.Errorf("field %s length: must be >= %d", "actualModel", 1)
+	}
+	if utf8.RuneCountInString(string(plain.PreviousModel)) < 1 {
+		return fmt.Errorf("field %s length: must be >= %d", "previousModel", 1)
+	}
+	if utf8.RuneCountInString(string(plain.RequestedModel)) < 1 {
+		return fmt.Errorf("field %s length: must be >= %d", "requestedModel", 1)
+	}
+	*j = DecisionModelChanged(plain)
+	return nil
+}
+
 // Request to an advisory decision vendor (LLM).
 type DecisionRequest struct {
 	// Model corresponds to the JSON schema field "model".
@@ -334,6 +384,11 @@ func (j *Event) UnmarshalJSON(value []byte) error {
 	if utf8.RuneCountInString(string(plain.Kind)) < 1 {
 		return fmt.Errorf("field %s length: must be >= %d", "kind", 1)
 	}
+	if plain.PolicyHash != nil {
+		if matched, _ := regexp.MatchString(`^[0-9a-f]{64}$`, string(*plain.PolicyHash)); !matched {
+			return fmt.Errorf("field %s pattern match: must match %s", "PolicyHash", `^[0-9a-f]{64}$`)
+		}
+	}
 	if matched, _ := regexp.MatchString(`^[0-9a-f]{64}$`, string(plain.PrevHash)); !matched {
 		return fmt.Errorf("field %s pattern match: must match %s", "PrevHash", `^[0-9a-f]{64}$`)
 	}
@@ -518,6 +573,72 @@ type GateVerdict struct {
 	Verdict GateVerdictVerdict `json:"verdict"`
 }
 
+type GateVerdictResponse struct {
+	// Mode corresponds to the JSON schema field "mode".
+	Mode GateVerdictResponseMode `json:"mode"`
+
+	// SignalID corresponds to the JSON schema field "signalId".
+	SignalID string `json:"signalId"`
+
+	// Verdict corresponds to the JSON schema field "verdict".
+	Verdict GateVerdict `json:"verdict"`
+}
+
+type GateVerdictResponseMode string
+
+const GateVerdictResponseModeShadow GateVerdictResponseMode = "shadow"
+
+var enumValues_GateVerdictResponseMode = []interface{}{
+	"shadow",
+}
+
+// UnmarshalJSON implements json.Unmarshaler.
+func (j *GateVerdictResponseMode) UnmarshalJSON(value []byte) error {
+	var v string
+	if err := json.Unmarshal(value, &v); err != nil {
+		return err
+	}
+	var ok bool
+	for _, expected := range enumValues_GateVerdictResponseMode {
+		if reflect.DeepEqual(v, expected) {
+			ok = true
+			break
+		}
+	}
+	if !ok {
+		return fmt.Errorf("invalid value (expected one of %#v): %#v", enumValues_GateVerdictResponseMode, v)
+	}
+	*j = GateVerdictResponseMode(v)
+	return nil
+}
+
+// UnmarshalJSON implements json.Unmarshaler.
+func (j *GateVerdictResponse) UnmarshalJSON(value []byte) error {
+	var raw map[string]interface{}
+	if err := json.Unmarshal(value, &raw); err != nil {
+		return err
+	}
+	if _, ok := raw["mode"]; raw != nil && !ok {
+		return fmt.Errorf("field mode in GateVerdictResponse: required")
+	}
+	if _, ok := raw["signalId"]; raw != nil && !ok {
+		return fmt.Errorf("field signalId in GateVerdictResponse: required")
+	}
+	if _, ok := raw["verdict"]; raw != nil && !ok {
+		return fmt.Errorf("field verdict in GateVerdictResponse: required")
+	}
+	type Plain GateVerdictResponse
+	var plain Plain
+	if err := json.Unmarshal(value, &plain); err != nil {
+		return err
+	}
+	if utf8.RuneCountInString(string(plain.SignalID)) < 1 {
+		return fmt.Errorf("field %s length: must be >= %d", "signalId", 1)
+	}
+	*j = GateVerdictResponse(plain)
+	return nil
+}
+
 type GateVerdictVerdict string
 
 const GateVerdictVerdictABSTAIN GateVerdictVerdict = "ABSTAIN"
@@ -581,8 +702,8 @@ func (j *GateVerdict) UnmarshalJSON(value []byte) error {
 	if err := json.Unmarshal(value, &plain); err != nil {
 		return err
 	}
-	if utf8.RuneCountInString(string(plain.PolicyHash)) < 1 {
-		return fmt.Errorf("field %s length: must be >= %d", "policyHash", 1)
+	if matched, _ := regexp.MatchString(`^[0-9a-f]{64}$`, string(plain.PolicyHash)); !matched {
+		return fmt.Errorf("field %s pattern match: must match %s", "PolicyHash", `^[0-9a-f]{64}$`)
 	}
 	*j = GateVerdict(plain)
 	return nil
@@ -624,6 +745,77 @@ func (j *InstrumentRef) UnmarshalJSON(value []byte) error {
 	return nil
 }
 
+type ModelBreakdown struct {
+	// Brier corresponds to the JSON schema field "brier".
+	Brier float64 `json:"brier"`
+
+	// CostUSD corresponds to the JSON schema field "costUsd".
+	CostUSD Decimal `json:"costUsd"`
+
+	// Count corresponds to the JSON schema field "count".
+	Count int `json:"count"`
+
+	// Ece corresponds to the JSON schema field "ece".
+	Ece float64 `json:"ece"`
+
+	// Model corresponds to the JSON schema field "model".
+	Model string `json:"model"`
+
+	// NetReturnSum corresponds to the JSON schema field "netReturnSum".
+	NetReturnSum Decimal `json:"netReturnSum"`
+}
+
+// UnmarshalJSON implements json.Unmarshaler.
+func (j *ModelBreakdown) UnmarshalJSON(value []byte) error {
+	var raw map[string]interface{}
+	if err := json.Unmarshal(value, &raw); err != nil {
+		return err
+	}
+	if _, ok := raw["brier"]; raw != nil && !ok {
+		return fmt.Errorf("field brier in ModelBreakdown: required")
+	}
+	if _, ok := raw["costUsd"]; raw != nil && !ok {
+		return fmt.Errorf("field costUsd in ModelBreakdown: required")
+	}
+	if _, ok := raw["count"]; raw != nil && !ok {
+		return fmt.Errorf("field count in ModelBreakdown: required")
+	}
+	if _, ok := raw["ece"]; raw != nil && !ok {
+		return fmt.Errorf("field ece in ModelBreakdown: required")
+	}
+	if _, ok := raw["model"]; raw != nil && !ok {
+		return fmt.Errorf("field model in ModelBreakdown: required")
+	}
+	if _, ok := raw["netReturnSum"]; raw != nil && !ok {
+		return fmt.Errorf("field netReturnSum in ModelBreakdown: required")
+	}
+	type Plain ModelBreakdown
+	var plain Plain
+	if err := json.Unmarshal(value, &plain); err != nil {
+		return err
+	}
+	if 1 < plain.Brier {
+		return fmt.Errorf("field %s: must be <= %v", "brier", 1)
+	}
+	if 0 > plain.Brier {
+		return fmt.Errorf("field %s: must be >= %v", "brier", 0)
+	}
+	if 0 > plain.Count {
+		return fmt.Errorf("field %s: must be >= %v", "count", 0)
+	}
+	if 1 < plain.Ece {
+		return fmt.Errorf("field %s: must be <= %v", "ece", 1)
+	}
+	if 0 > plain.Ece {
+		return fmt.Errorf("field %s: must be >= %v", "ece", 0)
+	}
+	if utf8.RuneCountInString(string(plain.Model)) < 1 {
+		return fmt.Errorf("field %s length: must be >= %d", "model", 1)
+	}
+	*j = ModelBreakdown(plain)
+	return nil
+}
+
 type Option struct {
 	// Description corresponds to the JSON schema field "description".
 	Description string `json:"description"`
@@ -656,10 +848,169 @@ func (j *Option) UnmarshalJSON(value []byte) error {
 	return nil
 }
 
-type Question struct {
-	// Criteria corresponds to the JSON schema field "criteria".
-	Criteria *string `json:"criteria,omitempty,omitzero"`
+// Labeled trading outcome for one signal.
+type Outcome struct {
+	// CandlesHash corresponds to the JSON schema field "candlesHash".
+	CandlesHash string `json:"candlesHash"`
 
+	// DecisionID corresponds to the JSON schema field "decisionId".
+	DecisionID *string `json:"decisionId,omitempty,omitzero"`
+
+	// EntryPrice corresponds to the JSON schema field "entryPrice".
+	EntryPrice Decimal `json:"entryPrice"`
+
+	// See common $defs/Timestamp. Inlined so the generated Go field is time.Time.
+	EntryTs time.Time `json:"entryTs"`
+
+	// ExitPrice corresponds to the JSON schema field "exitPrice".
+	ExitPrice Decimal `json:"exitPrice"`
+
+	// See common $defs/Timestamp. Inlined so the generated Go field is time.Time.
+	ExitTs time.Time `json:"exitTs"`
+
+	// FeeBps corresponds to the JSON schema field "feeBps".
+	FeeBps int `json:"feeBps"`
+
+	// GrossReturn corresponds to the JSON schema field "grossReturn".
+	GrossReturn Decimal `json:"grossReturn"`
+
+	// HorizonBars corresponds to the JSON schema field "horizonBars".
+	HorizonBars int `json:"horizonBars"`
+
+	// Instrument corresponds to the JSON schema field "instrument".
+	Instrument InstrumentRef `json:"instrument"`
+
+	// See common $defs/Timestamp. Inlined so the generated Go field is time.Time.
+	LabeledAt time.Time `json:"labeledAt"`
+
+	// Mae corresponds to the JSON schema field "mae".
+	Mae Decimal `json:"mae"`
+
+	// Mfe corresponds to the JSON schema field "mfe".
+	Mfe Decimal `json:"mfe"`
+
+	// NetReturn corresponds to the JSON schema field "netReturn".
+	NetReturn Decimal `json:"netReturn"`
+
+	// Side corresponds to the JSON schema field "side".
+	Side OutcomeSide `json:"side"`
+
+	// SignalID corresponds to the JSON schema field "signalId".
+	SignalID string `json:"signalId"`
+
+	// Timeframe corresponds to the JSON schema field "timeframe".
+	Timeframe string `json:"timeframe"`
+}
+
+type OutcomeSide string
+
+const OutcomeSideBuy OutcomeSide = "buy"
+const OutcomeSideSell OutcomeSide = "sell"
+
+var enumValues_OutcomeSide = []interface{}{
+	"buy",
+	"sell",
+}
+
+// UnmarshalJSON implements json.Unmarshaler.
+func (j *OutcomeSide) UnmarshalJSON(value []byte) error {
+	var v string
+	if err := json.Unmarshal(value, &v); err != nil {
+		return err
+	}
+	var ok bool
+	for _, expected := range enumValues_OutcomeSide {
+		if reflect.DeepEqual(v, expected) {
+			ok = true
+			break
+		}
+	}
+	if !ok {
+		return fmt.Errorf("invalid value (expected one of %#v): %#v", enumValues_OutcomeSide, v)
+	}
+	*j = OutcomeSide(v)
+	return nil
+}
+
+// UnmarshalJSON implements json.Unmarshaler.
+func (j *Outcome) UnmarshalJSON(value []byte) error {
+	var raw map[string]interface{}
+	if err := json.Unmarshal(value, &raw); err != nil {
+		return err
+	}
+	if _, ok := raw["candlesHash"]; raw != nil && !ok {
+		return fmt.Errorf("field candlesHash in Outcome: required")
+	}
+	if _, ok := raw["entryPrice"]; raw != nil && !ok {
+		return fmt.Errorf("field entryPrice in Outcome: required")
+	}
+	if _, ok := raw["entryTs"]; raw != nil && !ok {
+		return fmt.Errorf("field entryTs in Outcome: required")
+	}
+	if _, ok := raw["exitPrice"]; raw != nil && !ok {
+		return fmt.Errorf("field exitPrice in Outcome: required")
+	}
+	if _, ok := raw["exitTs"]; raw != nil && !ok {
+		return fmt.Errorf("field exitTs in Outcome: required")
+	}
+	if _, ok := raw["feeBps"]; raw != nil && !ok {
+		return fmt.Errorf("field feeBps in Outcome: required")
+	}
+	if _, ok := raw["grossReturn"]; raw != nil && !ok {
+		return fmt.Errorf("field grossReturn in Outcome: required")
+	}
+	if _, ok := raw["horizonBars"]; raw != nil && !ok {
+		return fmt.Errorf("field horizonBars in Outcome: required")
+	}
+	if _, ok := raw["instrument"]; raw != nil && !ok {
+		return fmt.Errorf("field instrument in Outcome: required")
+	}
+	if _, ok := raw["labeledAt"]; raw != nil && !ok {
+		return fmt.Errorf("field labeledAt in Outcome: required")
+	}
+	if _, ok := raw["mae"]; raw != nil && !ok {
+		return fmt.Errorf("field mae in Outcome: required")
+	}
+	if _, ok := raw["mfe"]; raw != nil && !ok {
+		return fmt.Errorf("field mfe in Outcome: required")
+	}
+	if _, ok := raw["netReturn"]; raw != nil && !ok {
+		return fmt.Errorf("field netReturn in Outcome: required")
+	}
+	if _, ok := raw["side"]; raw != nil && !ok {
+		return fmt.Errorf("field side in Outcome: required")
+	}
+	if _, ok := raw["signalId"]; raw != nil && !ok {
+		return fmt.Errorf("field signalId in Outcome: required")
+	}
+	if _, ok := raw["timeframe"]; raw != nil && !ok {
+		return fmt.Errorf("field timeframe in Outcome: required")
+	}
+	type Plain Outcome
+	var plain Plain
+	if err := json.Unmarshal(value, &plain); err != nil {
+		return err
+	}
+	if matched, _ := regexp.MatchString(`^[0-9a-f]{64}$`, string(plain.CandlesHash)); !matched {
+		return fmt.Errorf("field %s pattern match: must match %s", "CandlesHash", `^[0-9a-f]{64}$`)
+	}
+	if 0 > plain.FeeBps {
+		return fmt.Errorf("field %s: must be >= %v", "feeBps", 0)
+	}
+	if 0 > plain.HorizonBars {
+		return fmt.Errorf("field %s: must be >= %v", "horizonBars", 0)
+	}
+	if utf8.RuneCountInString(string(plain.SignalID)) < 1 {
+		return fmt.Errorf("field %s length: must be >= %d", "signalId", 1)
+	}
+	if utf8.RuneCountInString(string(plain.Timeframe)) < 1 {
+		return fmt.Errorf("field %s length: must be >= %d", "timeframe", 1)
+	}
+	*j = Outcome(plain)
+	return nil
+}
+
+type Question struct {
 	// ID corresponds to the JSON schema field "id".
 	ID string `json:"id"`
 
@@ -732,6 +1083,213 @@ func (j *Question) UnmarshalJSON(value []byte) error {
 	return nil
 }
 
+type ReliabilityBucket struct {
+	// Count corresponds to the JSON schema field "count".
+	Count int `json:"count"`
+
+	// LowerBound corresponds to the JSON schema field "lowerBound".
+	LowerBound float64 `json:"lowerBound"`
+
+	// MeanPredicted corresponds to the JSON schema field "meanPredicted".
+	MeanPredicted float64 `json:"meanPredicted"`
+
+	// ObservedRate corresponds to the JSON schema field "observedRate".
+	ObservedRate float64 `json:"observedRate"`
+}
+
+// UnmarshalJSON implements json.Unmarshaler.
+func (j *ReliabilityBucket) UnmarshalJSON(value []byte) error {
+	var raw map[string]interface{}
+	if err := json.Unmarshal(value, &raw); err != nil {
+		return err
+	}
+	if _, ok := raw["count"]; raw != nil && !ok {
+		return fmt.Errorf("field count in ReliabilityBucket: required")
+	}
+	if _, ok := raw["lowerBound"]; raw != nil && !ok {
+		return fmt.Errorf("field lowerBound in ReliabilityBucket: required")
+	}
+	if _, ok := raw["meanPredicted"]; raw != nil && !ok {
+		return fmt.Errorf("field meanPredicted in ReliabilityBucket: required")
+	}
+	if _, ok := raw["observedRate"]; raw != nil && !ok {
+		return fmt.Errorf("field observedRate in ReliabilityBucket: required")
+	}
+	type Plain ReliabilityBucket
+	var plain Plain
+	if err := json.Unmarshal(value, &plain); err != nil {
+		return err
+	}
+	if 0 > plain.Count {
+		return fmt.Errorf("field %s: must be >= %v", "count", 0)
+	}
+	if 1 < plain.LowerBound {
+		return fmt.Errorf("field %s: must be <= %v", "lowerBound", 1)
+	}
+	if 0 > plain.LowerBound {
+		return fmt.Errorf("field %s: must be >= %v", "lowerBound", 0)
+	}
+	if 1 < plain.MeanPredicted {
+		return fmt.Errorf("field %s: must be <= %v", "meanPredicted", 1)
+	}
+	if 0 > plain.MeanPredicted {
+		return fmt.Errorf("field %s: must be >= %v", "meanPredicted", 0)
+	}
+	if 1 < plain.ObservedRate {
+		return fmt.Errorf("field %s: must be <= %v", "observedRate", 1)
+	}
+	if 0 > plain.ObservedRate {
+		return fmt.Errorf("field %s: must be >= %v", "observedRate", 0)
+	}
+	*j = ReliabilityBucket(plain)
+	return nil
+}
+
+// Summary of labeled outcomes and gate performance.
+type Report struct {
+	// Comparisons corresponds to the JSON schema field "comparisons".
+	Comparisons *ReportComparisons `json:"comparisons,omitempty,omitzero"`
+
+	// DecisionCostUSD corresponds to the JSON schema field "decisionCostUsd".
+	DecisionCostUSD Decimal `json:"decisionCostUsd"`
+
+	// See common $defs/Timestamp. Inlined so the generated Go field is time.Time.
+	GeneratedAt time.Time `json:"generatedAt"`
+
+	// LabeledCount corresponds to the JSON schema field "labeledCount".
+	LabeledCount int `json:"labeledCount"`
+
+	// LatencyP50Ms corresponds to the JSON schema field "latencyP50Ms".
+	LatencyP50Ms int `json:"latencyP50Ms"`
+
+	// LatencyP95Ms corresponds to the JSON schema field "latencyP95Ms".
+	LatencyP95Ms int `json:"latencyP95Ms"`
+
+	// Sufficient corresponds to the JSON schema field "sufficient".
+	Sufficient bool `json:"sufficient"`
+
+	// VerdictCounts corresponds to the JSON schema field "verdictCounts".
+	VerdictCounts ReportVerdictCounts `json:"verdictCounts"`
+}
+
+type ReportComparisons struct {
+	// AllEntriesReturn corresponds to the JSON schema field "allEntriesReturn".
+	AllEntriesReturn Decimal `json:"allEntriesReturn"`
+
+	// AllowReturn corresponds to the JSON schema field "allowReturn".
+	AllowReturn Decimal `json:"allowReturn"`
+
+	// Brier corresponds to the JSON schema field "brier".
+	Brier float64 `json:"brier"`
+
+	// ByModel corresponds to the JSON schema field "byModel".
+	ByModel []ModelBreakdown `json:"byModel"`
+
+	// Ece corresponds to the JSON schema field "ece".
+	Ece float64 `json:"ece"`
+
+	// RejectedAvgReturn corresponds to the JSON schema field "rejectedAvgReturn".
+	RejectedAvgReturn Decimal `json:"rejectedAvgReturn"`
+
+	// Reliability corresponds to the JSON schema field "reliability".
+	Reliability []ReliabilityBucket `json:"reliability"`
+}
+
+// UnmarshalJSON implements json.Unmarshaler.
+func (j *ReportComparisons) UnmarshalJSON(value []byte) error {
+	var raw map[string]interface{}
+	if err := json.Unmarshal(value, &raw); err != nil {
+		return err
+	}
+	if _, ok := raw["allEntriesReturn"]; raw != nil && !ok {
+		return fmt.Errorf("field allEntriesReturn in ReportComparisons: required")
+	}
+	if _, ok := raw["allowReturn"]; raw != nil && !ok {
+		return fmt.Errorf("field allowReturn in ReportComparisons: required")
+	}
+	if _, ok := raw["brier"]; raw != nil && !ok {
+		return fmt.Errorf("field brier in ReportComparisons: required")
+	}
+	if _, ok := raw["byModel"]; raw != nil && !ok {
+		return fmt.Errorf("field byModel in ReportComparisons: required")
+	}
+	if _, ok := raw["ece"]; raw != nil && !ok {
+		return fmt.Errorf("field ece in ReportComparisons: required")
+	}
+	if _, ok := raw["rejectedAvgReturn"]; raw != nil && !ok {
+		return fmt.Errorf("field rejectedAvgReturn in ReportComparisons: required")
+	}
+	if _, ok := raw["reliability"]; raw != nil && !ok {
+		return fmt.Errorf("field reliability in ReportComparisons: required")
+	}
+	type Plain ReportComparisons
+	var plain Plain
+	if err := json.Unmarshal(value, &plain); err != nil {
+		return err
+	}
+	if 1 < plain.Brier {
+		return fmt.Errorf("field %s: must be <= %v", "brier", 1)
+	}
+	if 0 > plain.Brier {
+		return fmt.Errorf("field %s: must be >= %v", "brier", 0)
+	}
+	if 1 < plain.Ece {
+		return fmt.Errorf("field %s: must be <= %v", "ece", 1)
+	}
+	if 0 > plain.Ece {
+		return fmt.Errorf("field %s: must be >= %v", "ece", 0)
+	}
+	*j = ReportComparisons(plain)
+	return nil
+}
+
+type ReportVerdictCounts map[string]int
+
+// UnmarshalJSON implements json.Unmarshaler.
+func (j *Report) UnmarshalJSON(value []byte) error {
+	var raw map[string]interface{}
+	if err := json.Unmarshal(value, &raw); err != nil {
+		return err
+	}
+	if _, ok := raw["decisionCostUsd"]; raw != nil && !ok {
+		return fmt.Errorf("field decisionCostUsd in Report: required")
+	}
+	if _, ok := raw["generatedAt"]; raw != nil && !ok {
+		return fmt.Errorf("field generatedAt in Report: required")
+	}
+	if _, ok := raw["labeledCount"]; raw != nil && !ok {
+		return fmt.Errorf("field labeledCount in Report: required")
+	}
+	if _, ok := raw["latencyP50Ms"]; raw != nil && !ok {
+		return fmt.Errorf("field latencyP50Ms in Report: required")
+	}
+	if _, ok := raw["latencyP95Ms"]; raw != nil && !ok {
+		return fmt.Errorf("field latencyP95Ms in Report: required")
+	}
+	if _, ok := raw["sufficient"]; raw != nil && !ok {
+		return fmt.Errorf("field sufficient in Report: required")
+	}
+	if _, ok := raw["verdictCounts"]; raw != nil && !ok {
+		return fmt.Errorf("field verdictCounts in Report: required")
+	}
+	type Plain Report
+	var plain Plain
+	if err := json.Unmarshal(value, &plain); err != nil {
+		return err
+	}
+	if 0 > plain.LabeledCount {
+		return fmt.Errorf("field %s: must be >= %v", "labeledCount", 0)
+	}
+	if 0 > plain.LatencyP50Ms {
+		return fmt.Errorf("field %s: must be >= %v", "latencyP50Ms", 0)
+	}
+	if 0 > plain.LatencyP95Ms {
+		return fmt.Errorf("field %s: must be >= %v", "latencyP95Ms", 0)
+	}
+	*j = Report(plain)
+	return nil
+}
+
 // RFC3339 date-time string.
 type Timestamp time.Time
 
@@ -747,6 +1305,9 @@ type Usage struct {
 
 	// OutputTokens corresponds to the JSON schema field "outputTokens".
 	OutputTokens int `json:"outputTokens"`
+
+	// VendorLatencyMs corresponds to the JSON schema field "vendorLatencyMs".
+	VendorLatencyMs *int `json:"vendorLatencyMs,omitempty,omitzero"`
 }
 
 // UnmarshalJSON implements json.Unmarshaler.
@@ -774,6 +1335,9 @@ func (j *Usage) UnmarshalJSON(value []byte) error {
 	}
 	if 0 > plain.OutputTokens {
 		return fmt.Errorf("field %s: must be >= %v", "outputTokens", 0)
+	}
+	if plain.VendorLatencyMs != nil && 0 > *plain.VendorLatencyMs {
+		return fmt.Errorf("field %s: must be >= %v", "vendorLatencyMs", 0)
 	}
 	*j = Usage(plain)
 	return nil

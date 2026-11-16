@@ -17,8 +17,12 @@ func TestContractExamples(t *testing.T) {
 		"decision-response-choice.json": func() any { return &DecisionResponse{} },
 		"decision-response-noul.json":   func() any { return &DecisionResponse{} },
 		"decision-response-score.json":  func() any { return &DecisionResponse{} },
+		"decision-model-changed.json":   func() any { return &DecisionModelChanged{} },
 		"gate-request.json":             func() any { return &GateRequest{} },
 		"gate-verdict.json":             func() any { return &GateVerdict{} },
+		"gate-verdict-response.json":    func() any { return &GateVerdictResponse{} },
+		"outcome.json":                  func() any { return &Outcome{} },
+		"report.json":                   func() any { return &Report{} },
 		"event.json":                    func() any { return &Event{} },
 	}
 
@@ -27,6 +31,14 @@ func TestContractExamples(t *testing.T) {
 		"invalid-decision-request.json": func() any { return &DecisionRequest{} },
 		// invalid-decision-response.json: missing required "model".
 		"invalid-decision-response.json": func() any { return &DecisionResponse{} },
+		// invalid-gate-verdict-response.json: "mode" outside the shadow enum.
+		"invalid-gate-verdict-response.json": func() any { return &GateVerdictResponse{} },
+		// invalid-model-changed.json: missing required "actualModel".
+		"invalid-model-changed.json": func() any { return &DecisionModelChanged{} },
+		// invalid-outcome.json: "side" outside buy|sell enum.
+		"invalid-outcome.json": func() any { return &Outcome{} },
+		// invalid-report.json: "brier" above maximum 1.
+		"invalid-report.json": func() any { return &Report{} },
 		// invalid-gate-request.json: "side" outside buy|sell enum.
 		"invalid-gate-request.json": func() any { return &GateRequest{} },
 		// invalid-gate-verdict.json: "verdict" outside enum.

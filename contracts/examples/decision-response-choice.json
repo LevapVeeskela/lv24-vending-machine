@@ -9,6 +9,6 @@
   },
   "model": "dre-x-1",
   "requestedModel": "dre-x-1",
-  "usage": { "inputTokens": 120, "outputTokens": 40, "costUsd": "0.0000072", "latencyMs": 12 },
+  "usage": { "inputTokens": 120, "outputTokens": 40, "costUsd": "0.0000072", "latencyMs": 12, "vendorLatencyMs": 9 },
   "requestId": "req-001"
 }

@@ -28,14 +28,15 @@
         "id": { "type": "string", "minLength": 1 },
         "type": { "enum": ["choice", "noul", "score"] },
         "instructions": { "type": "string" },
-        "criteria": { "type": "string" },
         "options": {
           "description": "Required for type=choice: ordered option list, order is significant.",
           "type": "array",
           "minItems": 2,
           "items": { "$ref": "#/$defs/Option" }
         }
-      }
+      },
+      "if": { "properties": { "type": { "const": "choice" } } },
+      "then": { "required": ["id", "type", "options"] }
     },
     "Option": {
       "type": "object",
@@ -95,7 +96,8 @@
         "inputTokens": { "type": "integer", "minimum": 0 },
         "outputTokens": { "type": "integer", "minimum": 0 },
         "costUsd": { "$ref": "../common/v1.json#/$defs/Decimal" },
-        "latencyMs": { "type": "integer", "minimum": 0 }
+        "latencyMs": { "type": "integer", "minimum": 0 },
+        "vendorLatencyMs": { "type": "integer", "minimum": 0 }
       }
     }
   }

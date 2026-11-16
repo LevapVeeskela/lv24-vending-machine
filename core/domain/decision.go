@@ -29,7 +29,6 @@ type Question struct {
 	ID           string       `json:"id"`
 	Type         QuestionType `json:"type"`
 	Instructions string       `json:"instructions,omitempty"`
-	Criteria     string       `json:"criteria,omitempty"`
 	Options      []Option     `json:"options,omitempty"`
 }
 
@@ -55,10 +54,11 @@ type Answer struct {
 
 // Usage reports token consumption, cost and latency of a decision call.
 type Usage struct {
-	InputTokens  int     `json:"inputTokens"`
-	OutputTokens int     `json:"outputTokens"`
-	CostUSD      Decimal `json:"costUsd"`
-	LatencyMS    int64   `json:"latencyMs,omitempty"`
+	InputTokens     int     `json:"inputTokens"`
+	OutputTokens    int     `json:"outputTokens"`
+	CostUSD         Decimal `json:"costUsd"`
+	LatencyMS       int64   `json:"latencyMs,omitempty"`
+	VendorLatencyMS int64   `json:"vendorLatencyMs,omitempty"`
 }
 
 // DecisionResponse is the provider answer set for a DecisionRequest.

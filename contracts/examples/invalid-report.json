@@ -1,0 +1,18 @@
+{
+  "generatedAt": "2026-11-16T12:05:00Z",
+  "labeledCount": 42,
+  "sufficient": true,
+  "verdictCounts": { "ALLOW": 25 },
+  "decisionCostUsd": "0.0003024",
+  "latencyP50Ms": 11,
+  "latencyP95Ms": 38,
+  "comparisons": {
+    "allEntriesReturn": "0.012400",
+    "allowReturn": "0.018200",
+    "rejectedAvgReturn": "-0.004100",
+    "brier": 1.5,
+    "ece": 0.06,
+    "reliability": [],
+    "byModel": []
+  }
+}

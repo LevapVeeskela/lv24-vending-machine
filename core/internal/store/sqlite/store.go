@@ -177,15 +177,7 @@ func (s *Store) Append(ctx context.Context, ev domain.Event) (domain.Event, erro
 // Query lists events with Seq > from, optionally filtered by kind, in
 // ascending Seq order.
 func (s *Store) Query(ctx context.Context, from int64, kind string) ([]domain.Event, error) {
-	q := `SELECT seq, event_id, kind, ts, schema_version, payload, code_version,
-		prev_hash, hash, run_id, decision_id, policy_hash, snapshot_hash
-		FROM events WHERE seq > ?`
-	args := []any{from}
-	if kind != "" {
-		q += ` AND kind = ?`
-		args = append(args, kind)
-	}
-	q += ` ORDER BY seq ASC`
+	q, args := selectEvents(from, kind)
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("journal store: query: %w", err)
@@ -193,33 +185,67 @@ func (s *Store) Query(ctx context.Context, from int64, kind string) ([]domain.Ev
 	defer func() { _ = rows.Close() }()
 	var out []domain.Event
 	for rows.Next() {
-		var ev domain.Event
-		var ts string
-		var payload []byte
-		var runID, decisionID, policyHash, snapshotHash sql.NullString
-		if err := rows.Scan(
-			&ev.Seq, &ev.EventID, &ev.Kind, &ts, &ev.SchemaVersion, &payload,
-			&ev.CodeVersion, &ev.PrevHash, &ev.Hash,
-			&runID, &decisionID, &policyHash, &snapshotHash,
-		); err != nil {
-			return nil, fmt.Errorf("journal store: scan: %w", err)
-		}
-		parsed, err := time.Parse(time.RFC3339Nano, ts)
+		ev, err := scanEvent(rows)
 		if err != nil {
-			return nil, fmt.Errorf("journal store: parse ts at seq %d: %w", ev.Seq, err)
+			return nil, err
 		}
-		ev.TS = parsed.UTC()
-		ev.Payload = payload
-		ev.RunID = runID.String
-		ev.DecisionID = decisionID.String
-		ev.PolicyHash = policyHash.String
-		ev.SnapshotHash = snapshotHash.String
 		out = append(out, ev)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("journal store: rows: %w", err)
 	}
 	return out, nil
+}
+
+// Walk streams events with Seq > from in ascending Seq order, calling fn
+// for each event without loading all rows into memory. An error returned
+// by fn stops the walk and is returned.
+func (s *Store) Walk(ctx context.Context, from int64, kind string, fn func(domain.Event) error) error {
+	q, args := selectEvents(from, kind)
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return fmt.Errorf("journal store: query: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		ev, err := scanEvent(rows)
+		if err != nil {
+			return err
+		}
+		if err := fn(ev); err != nil {
+			return err
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("journal store: rows: %w", err)
+	}
+	return nil
+}
+
+// Head returns the highest-seq event, or false when the store is empty.
+func (s *Store) Head(ctx context.Context) (domain.Event, bool, error) {
+	q := `SELECT seq, event_id, kind, ts, schema_version, payload, code_version,
+		prev_hash, hash, run_id, decision_id, policy_hash, snapshot_hash
+		FROM events ORDER BY seq DESC LIMIT 1`
+	rows, err := s.db.QueryContext(ctx, q)
+	if err != nil {
+		return domain.Event{}, false, fmt.Errorf("journal store: head: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return domain.Event{}, false, fmt.Errorf("journal store: rows: %w", err)
+		}
+		return domain.Event{}, false, nil
+	}
+	ev, err := scanEvent(rows)
+	if err != nil {
+		return domain.Event{}, false, err
+	}
+	if err := rows.Err(); err != nil {
+		return domain.Event{}, false, fmt.Errorf("journal store: rows: %w", err)
+	}
+	return ev, true, nil
 }
 
 // Verify reads the whole chain in order and checks its integrity.
@@ -236,4 +262,44 @@ func nullStr(s string) any {
 		return nil
 	}
 	return s
+}
+
+// selectEvents builds the ascending-seq event listing query.
+func selectEvents(from int64, kind string) (string, []any) {
+	q := `SELECT seq, event_id, kind, ts, schema_version, payload, code_version,
+		prev_hash, hash, run_id, decision_id, policy_hash, snapshot_hash
+		FROM events WHERE seq > ?`
+	args := []any{from}
+	if kind != "" {
+		q += ` AND kind = ?`
+		args = append(args, kind)
+	}
+	q += ` ORDER BY seq ASC`
+	return q, args
+}
+
+// scanEvent scans one event row into a domain.Event.
+func scanEvent(rows *sql.Rows) (domain.Event, error) {
+	var ev domain.Event
+	var ts string
+	var payload []byte
+	var runID, decisionID, policyHash, snapshotHash sql.NullString
+	if err := rows.Scan(
+		&ev.Seq, &ev.EventID, &ev.Kind, &ts, &ev.SchemaVersion, &payload,
+		&ev.CodeVersion, &ev.PrevHash, &ev.Hash,
+		&runID, &decisionID, &policyHash, &snapshotHash,
+	); err != nil {
+		return domain.Event{}, fmt.Errorf("journal store: scan: %w", err)
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, ts)
+	if err != nil {
+		return domain.Event{}, fmt.Errorf("journal store: parse ts at seq %d: %w", ev.Seq, err)
+	}
+	ev.TS = parsed.UTC()
+	ev.Payload = payload
+	ev.RunID = runID.String
+	ev.DecisionID = decisionID.String
+	ev.PolicyHash = policyHash.String
+	ev.SnapshotHash = snapshotHash.String
+	return ev, nil
 }

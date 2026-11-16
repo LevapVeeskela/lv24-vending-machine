@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lv24.by/contracts/jsonschema/outcome/v1.json",
+  "title": "Outcome",
+  "description": "Labeled trading outcome for one signal.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["signalId", "instrument", "side", "timeframe", "entryTs", "entryPrice", "exitTs", "exitPrice", "horizonBars", "feeBps", "grossReturn", "netReturn", "mfe", "mae", "candlesHash", "labeledAt"],
+  "properties": {
+    "signalId": { "type": "string", "minLength": 1 },
+    "decisionId": { "type": "string" },
+    "instrument": { "$ref": "../common/v1.json" },
+    "side": { "enum": ["buy", "sell"] },
+    "timeframe": { "type": "string", "minLength": 1 },
+    "entryTs": {
+      "description": "See common $defs/Timestamp. Inlined so the generated Go field is time.Time.",
+      "type": "string",
+      "format": "date-time"
+    },
+    "entryPrice": { "$ref": "../common/v1.json#/$defs/Decimal" },
+    "exitTs": {
+      "description": "See common $defs/Timestamp. Inlined so the generated Go field is time.Time.",
+      "type": "string",
+      "format": "date-time"
+    },
+    "exitPrice": { "$ref": "../common/v1.json#/$defs/Decimal" },
+    "horizonBars": { "type": "integer", "minimum": 0 },
+    "feeBps": { "type": "integer", "minimum": 0 },
+    "grossReturn": { "$ref": "../common/v1.json#/$defs/Decimal" },
+    "netReturn": { "$ref": "../common/v1.json#/$defs/Decimal" },
+    "mfe": { "$ref": "../common/v1.json#/$defs/Decimal" },
+    "mae": { "$ref": "../common/v1.json#/$defs/Decimal" },
+    "candlesHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "labeledAt": {
+      "description": "See common $defs/Timestamp. Inlined so the generated Go field is time.Time.",
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}
