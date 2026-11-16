@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/oklog/ulid/v2"
@@ -39,6 +40,11 @@ type Store struct {
 func Open(ctx context.Context, path string) (*Store, error) {
 	if path == "" {
 		return nil, fmt.Errorf("journal store: empty path")
+	}
+	// The DSN is built as "file:"+path+"?params"; a path containing ? or #
+	// would be parsed as DSN parameters instead of a file name.
+	if strings.ContainsAny(path, "?#") {
+		return nil, fmt.Errorf("journal store: invalid path: %q", path)
 	}
 	if dir := filepath.Dir(path); dir != "" {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -84,9 +90,6 @@ func (s *Store) Close() error {
 	}
 	return nil
 }
-
-// Path returns the database file path.
-func (s *Store) Path() string { return s.path }
 
 // Append stores ev assigning Seq, EventID (ULID), TS (UTC), PrevHash and
 // Hash, and returns the stored event.

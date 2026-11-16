@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -53,19 +54,49 @@ func TestAppend1000AndVerify(t *testing.T) {
 	}
 }
 
-func TestTamperAnyFieldBreaksVerify(t *testing.T) {
-	// field -> SQL expression producing a different but valid-typed value.
-	cases := map[string]string{
-		"kind":         `'tampered'`,
-		"payload":      `'{"evil":true}'`,
-		"ts":           `'2020-01-01T00:00:00Z'`,
-		"code_version": `'9.9.9'`,
-		"prev_hash":    `'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'`,
-		"event_id":     `'01TAMPERED'`,
-		"run_id":       `'tampered'`,
+func TestOpenRejectsQueryLikePath(t *testing.T) {
+	ctx := context.Background()
+	for _, p := range []string{
+		filepath.Join(t.TempDir(), "journal.db?cache=shared"),
+		filepath.Join(t.TempDir(), "dir#frag", "journal.db"),
+	} {
+		s, err := Open(ctx, p)
+		if err == nil {
+			_ = s.Close()
+			t.Fatalf("path %q: want invalid path error, got nil", p)
+		}
+		if !strings.Contains(err.Error(), "journal store: invalid path:") {
+			t.Fatalf("path %q: want invalid path error, got %v", p, err)
+		}
 	}
-	for field, expr := range cases {
-		t.Run(field, func(t *testing.T) {
+}
+
+func TestTamperAnyFieldBreaksVerify(t *testing.T) {
+	// All 13 event columns. wantBroken is the seq Verify reports: the
+	// tampered row's own seq, except for the seq case itself: the row
+	// moves to the end of the ascending order, so the first gap is
+	// reported at seq 4 ("want 3 got 4").
+	cases := []struct {
+		field      string
+		expr       string
+		wantBroken int64
+	}{
+		{"kind", `'tampered'`, 3},
+		{"payload", `'{"evil":true}'`, 3},
+		{"ts", `'2020-01-01T00:00:00Z'`, 3},
+		{"code_version", `'9.9.9'`, 3},
+		{"prev_hash", `'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'`, 3},
+		{"event_id", `'01TAMPERED'`, 3},
+		{"run_id", `'tampered'`, 3},
+		{"schema_version", `2`, 3},
+		{"hash", `'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'`, 3},
+		{"decision_id", `'tampered'`, 3},
+		{"policy_hash", `'tampered'`, 3},
+		{"snapshot_hash", `'tampered'`, 3},
+		{"seq", `seq + 100`, 4},
+	}
+	for _, tc := range cases {
+		t.Run(tc.field, func(t *testing.T) {
 			s, ctx := openTestStore(t)
 			for i := 0; i < 5; i++ {
 				if _, err := s.Append(ctx, domain.Event{
@@ -78,15 +109,15 @@ func TestTamperAnyFieldBreaksVerify(t *testing.T) {
 				}
 			}
 			if _, err := s.db.ExecContext(ctx,
-				fmt.Sprintf("UPDATE events SET %s = %s WHERE seq = 3", field, expr)); err != nil {
+				fmt.Sprintf("UPDATE events SET %s = %s WHERE seq = 3", tc.field, tc.expr)); err != nil {
 				t.Fatalf("tamper: %v", err)
 			}
 			res, err := s.Verify(ctx)
 			if err != nil {
 				t.Fatalf("verify: %v", err)
 			}
-			if res.OK || res.BrokenSeq != 3 {
-				t.Fatalf("tampering %s: want break at seq 3, got %+v", field, res)
+			if res.OK || res.BrokenSeq != tc.wantBroken {
+				t.Fatalf("tampering %s: want break at seq %d, got %+v", tc.field, tc.wantBroken, res)
 			}
 		})
 	}
