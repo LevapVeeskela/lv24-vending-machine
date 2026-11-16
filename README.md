@@ -4,7 +4,10 @@
 ИИ-агентами.** Крипто-биржи и брокеры, LLM и decision-модели (Drex/Jev),
 локальный терминал, веб и мобильный пульт.
 
-> Статус: **спецификация v0.1**. Код ещё не начат — см. `docs/spec/10-roadmap.md`.
+> Статус: **M0 (wedge core) готов, M1 часть 1 готова 2026-11-16** (локальный
+> shadow-гейт, разметка исходов, отчёт только по журналу). НЕ сделано: Telegram,
+> источник trend-сигналов, арена моделей, рецепты Freqtrade/TradingView, релизные
+> бинарники, `--share`. Тесты — офлайн; живые вызовы — только ключом владельца.
 
 ## Идея
 
@@ -46,7 +49,26 @@
 - [План](docs/spec/10-roadmap.md)
 - [ADR](docs/adr/)
 
-## Целевой UX
+## Рабочий quickstart (реализовано в M1)
+
+```bash
+go build -o vend ./core/cmd/vend   # из корня workspace
+vend init
+vend gate test --request contracts/examples/gate-request.json \
+  --fixture core/cmd/vend/testdata/decision-response.json
+vend journal verify
+VENDING_SECRET_CONN_LOCAL_APITOKEN=<token> vend serve   # 127.0.0.1:8420
+curl -X POST http://127.0.0.1:8420/v1/gate \
+  -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
+  -d @contracts/examples/gate-request.json
+vend outcomes label --candles <file>
+vend gate report
+vend journal verify
+```
+
+Тесты офлайн; живые вызовы провайдеров — только ключом владельца.
+
+## Целевой UX (не реализовано в M1)
 
 ```bash
 vend init --template crypto-paper

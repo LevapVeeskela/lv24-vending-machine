@@ -47,7 +47,13 @@ ADR: [0001 Go](../adr/0001-go-core.md) · [0002 contract-first](../adr/0002-cont
 9. **Журнал с hash-chain**: каждое решение объяснимо и воспроизводимо.
 10. **Расширяемость**: стратегии — WASM, агенты — YAML-паки, провайдеры — Go-модули.
 
-## Быстрый старт (целевой UX)
+## Быстрый старт: рабочий (реализовано в M1) и целевой UX
+
+Рабочий (M1 часть 1) — см. `README.md` (сборка `vend`, `init`, `gate test --fixture`,
+`journal verify`, shadow-сервер с `VENDING_SECRET_CONN_LOCAL_APITOKEN` и `curl` POST,
+`outcomes label --candles <file>`, `gate report`).
+
+Целевой UX (не реализовано):
 
 ```bash
 vend init --template crypto-paper
@@ -72,6 +78,10 @@ vend serve            # desktop/web/mobile подключаются к этом�
 
 ## Статус
 
+- M0 (wedge core) готов; M1 часть 1 готова 2026-11-16: локальный HTTP-гейт
+  (`POST /v1/gate`, shadow), разметка исходов, отчёт только по журналу.
+- НЕ сделано: Telegram, источник trend-сигналов, арена моделей, рецепты
+  Freqtrade/TradingView, релизные бинарники, `--share`.
 - Ресёрч: 13 направлений, клоны и разборы в `ideas/` (вне репозитория; `ideas/INDEX.md`).
 - Спека: draft v0.1; `00-vision.md` и `10-roadmap.md` — v0.2 по итогам скептического
   ревью, приняты владельцем 2026-11-16 (ветка `review/skeptical-v1`). Документы 01–09

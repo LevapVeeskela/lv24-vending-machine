@@ -1,6 +1,12 @@
 # 03. Ядро и CLI
 
-Статус: draft v0.1 · Зависит от: `01-architecture.md`, `02-monorepo.md`
+Статус: M0 (wedge core) готов; M1 часть 1 готова 2026-11-16 (локальный shadow-гейт,
+разметка исходов, отчёт только по журналу). Зависит от: `01-architecture.md`, `02-monorepo.md`.
+
+> Реализовано в M0/M1 — см. §2.0. Остальные подразделы §2 (§2.1–§2.8, часть §2.9–§2.10)
+> описывают целевую платформу и **не реализованы**: Telegram, trend-источник сигналов,
+> арена моделей, рецепты Freqtrade/TradingView, релизные бинарники, `--share`.
+> Не вызывать реальные API в тестах; живые вызовы — только ключом владельца.
 
 ## 1. Два бинарника
 
@@ -27,6 +33,106 @@ Application Support` на macOS): `vending.db`, `run/` (pid, unix-socket), `logs
 `cache/`, `packs/`.
 
 ## 2. Команды
+
+### 2.0 Реализовано в M0/M1 (shadow-гейт)
+
+```bash
+vend version [--json]
+vend init [--config FILE] [--data-dir DIR] [--force] [--json]
+vend config path|get KEY|validate [--config FILE] [--data-dir DIR] [--json]
+vend doctor [--config FILE] [--data-dir DIR] [--json]
+vend gate test --request FILE [--fixture FILE] [--save-raw FILE] [--config FILE] [--data-dir DIR] [--json]
+vend gate report [--json] [--config FILE] [--data-dir DIR]
+vend serve [--addr 127.0.0.1:8420] [--config FILE] [--data-dir DIR]
+vend outcomes label [--candles FILE] [--json] [--config FILE] [--data-dir DIR]
+vend journal head [--json]
+vend journal verify [--json]
+```
+
+Глобальные флаги `--config FILE`, `--data-dir DIR`, `--json` принимаются в любом
+месте аргументов (`--flag value` или `--flag=value`, одинарный или двойной дефис);
+`--` прекращает их разбор. Приоритет путей: флаг > `VENDING_CONFIG_FILE` /
+`VENDING_DATA_DIR` > ОС-default. Конфиг — JSON (`apiVersion: "vending.lv24/v1"`,
+режим `shadow|paper|sandbox`; `live` отклоняется валидацией):
+
+```json
+{
+  "apiVersion": "vending.lv24/v1",
+  "mode": "shadow",
+  "gate": { "version": "gate-v1", "minPass": 0.55, "minBlock": 0.5 },
+  "outcome": { "horizonBars": 12, "feeBps": 20 },
+  "providers": {
+    "decision": {
+      "id": "decision-drex", "model": "drex-max-v1.1", "profile": "drex",
+      "baseUrl": "", "secretRef": "conn/drex/apiKey", "pricePerBillion": "60"
+    },
+    "marketdata": { "id": "marketdata-binance", "baseUrl": "https://api.binance.com" }
+  }
+}
+```
+
+Окружение: `VENDING_CONFIG_FILE`, `VENDING_DATA_DIR`; секрет провайдера —
+`VENDING_SECRET_<REF>`, где REF — `secretRef` в верхнем регистре с заменой каждого
+символа вне `[A-Za-z0-9]` на `_` (пример: `conn/drex/apiKey` →
+`VENDING_SECRET_CONN_DREX_APIKEY`). Токен локального API —
+`VENDING_SECRET_CONN_LOCAL_APITOKEN` (обязателен, без него сервер не стартует).
+Реальных значений в документации нет — только `<token>` и `<path>`.
+
+`vend serve`: слушает только `127.0.0.1`, default `127.0.0.1:8420`; токен обязателен;
+тело ≤ 64 КиБ; только `application/json`; максимум 8 параллельных вычислений;
+таймауты чтения/записи/idle; graceful shutdown; ошибки — `{code,message,hint,
+retryable,details?}`; access-лог содержит только method/path/status/duration.
+
+API (локальный, loopback):
+
+- `GET /healthz` → `{"status":"ok","mode":"shadow","version":"..."}` (без auth).
+- `POST /v1/gate` с `Authorization: Bearer <token>`, `Content-Type: application/json`,
+  телом = GateRequest (`signalId`, `instrument{venue,symbol}`, `side` buy|sell,
+  `intentKind` entry|exit, `timeframe`, `ts`, `price`, `source`, `state` — обязательный
+  объект конечных чисел). Ответ 200:
+  `{"mode":"shadow","signalId":"...","verdict":{"verdict":"ALLOW|REJECT|ABSTAIN|SKIP",
+  "code":"...","reasons":[...],"checks":[...],"decisionId":"...","model":"...",
+  "policyHash":"<64 hex>","decidedAt":"..."}}`.
+  Идемпотентность по `signalId`: повтор возвращает записанный вердикт с тем же
+  `decisionId` без обращения к провайдеру. Ошибка провайдера всё равно записывает
+  ABSTAIN; HTTP для вычисленного вердикта — 200.
+
+События журнала на один сигнал: `gate.request` → `decision.response` (когда провайдер
+ответил) → опционально `decision.model_changed` → `gate.verdict`; все связаны одним
+`decisionId` и `signalId`. Событие model changed — когда фактическая модель при том же
+запрошенном id отличается от предыдущей (ADR-0010).
+
+`gate test --fixture` проигрывает записанный ответ decision offline;
+`--save-raw` пишет сырое тело вендора (0600) и завершается ошибкой при идемпотентном
+повторе (сырого тела нет).
+
+`outcomes label`: для каждого `gate.request` без метки — первый CLOSED бар с
+OpenTime ≥ ts сигнала; ровно N подряд идущих баров (таймфрейм m/h/d/w); вход = open
+первого бара, выход = close бара N; gross со знаком side; net = gross − 2·feeBps/10000;
+MFE/MAE; candlesHash = 64 hex SHA-256 использованных баров (Decimals нормализованы к
+12 знакам); `--candles FILE` — offline JSON-массив объектов свечей, без него —
+настроенный marketdata-провайдер; повтор не дублирует метки.
+
+`gate report`: только журнал, без сети. Всегда: счётчики вердиктов, число размеченных,
+суммарная стоимость решений, latency p50/p95 (по usage.latencyMs). Меньше 100
+размеченных — «insufficient data», сравнений НЕТ. При ≥ 100: сумма net всех входов vs
+только ALLOW, средний доход REJECT, Brier и ECE для p(pass) vs net>0, 10-бакетная
+кривая надёжности, разбивка по моделям. Деньги — только Decimal (строки); float —
+только вероятности/метрики.
+
+Хэши журнала: все `hash`, `prevHash`, `policyHash`, `candlesHash` — 64 строчных hex БЕЗ
+префикса `sha256:`. Правило цепочки:
+`hash = SHA-256(prevHash + "\n" + canonicalJSON(событие без hash))`; первый prevHash =
+64 нуля; canonical payload = отсортированные ключи, без пробелов, числа литералами,
+дубликаты ключей отвергаются; SQLite хранит canonical payload, Verify сравнивает
+хранимые байты с каноном. policyHash покрывает пороги политики, порядок проверок и
+полный набор вопросов (id, инструкции, ключи/описания опций). Детали гарантий —
+в `06-risk-execution.md` §11.
+
+### 2.0.1 Целевая платформа (не реализовано)
+
+Нижеследующие подразделы §2.1–§2.10 описывают целевую платформу и не реализованы
+в M0/M1. Они сохранены как план; не использовать их команды в работе.
 
 ### 2.1 Онбординг
 
@@ -199,19 +305,19 @@ switch, рестарте демона и изменении ключей.
 Ошибки — структурированные: `{code, message, hint, docsUrl, retryable, details}`.
 `hint` обязателен: CLI должен говорить, что делать дальше.
 
-## 4. Конфиг и профили
+## 4. Конфиг и профили (целевая платформа vs реализовано в M1)
+
+Реализовано в M1 (JSON-конфиг, см. §2.0):
 
 ```bash
 vend config path
 vend config get risk.limits.maxOrderNotional
-vend config set risk.limits.maxOrderNotional=500 --scope account:binance-main
 vend config validate
-vend config diff --scope account:binance-main
 ```
 
-Иерархия scope: `global → account → run`; более специфичный переопределяет.
-Изменения, влияющие на деньги (лимиты, режим, ключи), пишутся в `audit_log` с
-автором и diff.
+Будущее (не реализовано): `config set ... --scope ...`, `config diff --scope ...`,
+иерархия scope `global → account → run` с переопределением, запись денежных изменений
+в `audit_log` с автором и diff. Эти команды и механики — целевая платформа.
 
 ## 5. Стратегии: встроенные и внешние
 
