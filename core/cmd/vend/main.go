@@ -12,6 +12,8 @@ import (
 	"os"
 	"time"
 
+	"github.com/oklog/ulid/v2"
+
 	decisiondrex "github.com/LevapVeeskela/lv24-vending-machine/providers/decision-drex"
 	marketdatabinance "github.com/LevapVeeskela/lv24-vending-machine/providers/marketdata-binance"
 
@@ -74,5 +76,7 @@ func main() {
 		Version:     version,
 		NewRegistry: newRegistry,
 		OpenJournal: openJournal,
+		Clock:       time.Now,
+		NewID:       func() string { return ulid.Make().String() },
 	}))
 }

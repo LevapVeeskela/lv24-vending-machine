@@ -25,6 +25,7 @@ type Config struct {
 	APIVersion string          `json:"apiVersion"`
 	Mode       string          `json:"mode"`
 	Gate       GateConfig      `json:"gate"`
+	Outcome    OutcomeConfig   `json:"outcome"`
 	Providers  ProvidersConfig `json:"providers"`
 }
 
@@ -33,6 +34,12 @@ type GateConfig struct {
 	Version  string  `json:"version"`
 	MinPass  float64 `json:"minPass"`
 	MinBlock float64 `json:"minBlock"`
+}
+
+// OutcomeConfig tunes outcome labeling for shadow evaluation.
+type OutcomeConfig struct {
+	HorizonBars int `json:"horizonBars"`
+	FeeBps      int `json:"feeBps"`
 }
 
 // ProvidersConfig holds provider connection settings.
@@ -61,11 +68,15 @@ type MarketDataConfig struct {
 func Default() Config {
 	return Config{
 		APIVersion: APIVersion,
-		Mode:       "paper",
+		Mode:       "shadow",
 		Gate: GateConfig{
 			Version:  "gate-v1",
 			MinPass:  0.55,
 			MinBlock: 0.50,
+		},
+		Outcome: OutcomeConfig{
+			HorizonBars: 12,
+			FeeBps:      20,
 		},
 		Providers: ProvidersConfig{
 			Decision: DecisionConfig{
@@ -94,13 +105,13 @@ func (c Config) Validate() error {
 		return invalid(fmt.Sprintf("apiVersion must be %q", APIVersion))
 	}
 	switch c.Mode {
-	case "paper", "sandbox":
+	case "paper", "sandbox", "shadow":
 		// ok
 	case "live":
 		return domain.NewError(domain.CodeInvalidRequest,
 			"config: live mode is not available in M0")
 	default:
-		return invalid(fmt.Sprintf("mode must be paper or sandbox, got %q", c.Mode))
+		return invalid(fmt.Sprintf("mode must be paper, sandbox or shadow, got %q", c.Mode))
 	}
 	if strings.TrimSpace(c.Gate.Version) == "" {
 		return invalid("gate.version must not be empty")
@@ -110,6 +121,12 @@ func (c Config) Validate() error {
 	}
 	if !(c.Gate.MinBlock > 0 && c.Gate.MinBlock <= 1) {
 		return invalid("gate.minBlock must be in (0, 1]")
+	}
+	if c.Outcome.HorizonBars < 1 || c.Outcome.HorizonBars > 1000 {
+		return invalid("outcome.horizonBars must be in [1, 1000]")
+	}
+	if c.Outcome.FeeBps < 0 || c.Outcome.FeeBps > 10000 {
+		return invalid("outcome.feeBps must be in [0, 10000]")
 	}
 	d := c.Providers.Decision
 	if strings.TrimSpace(d.ID) == "" {

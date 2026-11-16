@@ -5,6 +5,11 @@
 //
 //	core/domain      -> stdlib only
 //	core/ports       -> stdlib + .../core/domain
+//	core/internal/gate -> stdlib + .../core/domain only
+//	core/internal/app -> stdlib + .../core/domain + .../core/ports
+//	                    + .../core/internal/gate + .../core/internal/resilience.
+//	                    Store, cli, journal, config, contracts and providers
+//	                    are forbidden there.
 //	core/internal/*  -> anything except .../providers/* (any provider).
 //	                    Only core/cmd (the composition root) wires providers.
 //	providers/<name> -> stdlib + .../core/domain + .../core/ports
@@ -56,6 +61,11 @@ func classify(layer, importPath string, isTest bool) bool {
 		return inModule("/core/domain")
 	case layer == "core/ports":
 		return inModule("/core/domain") || inModule("/core/ports")
+	case layer == "core/internal/gate":
+		return inModule("/core/domain")
+	case layer == "core/internal/app":
+		return inModule("/core/domain") || inModule("/core/ports") ||
+			inModule("/core/internal/gate") || inModule("/core/internal/resilience")
 	case layer == "core/internal":
 		// Only the cmd composition root wires providers.
 		return !strings.HasPrefix(importPath, modulePrefix+"/providers/")
@@ -84,6 +94,10 @@ func layerOf(relSlash string) string {
 		return "core/domain"
 	case strings.HasPrefix(relSlash, "core/ports/"):
 		return "core/ports"
+	case strings.HasPrefix(relSlash, "core/internal/gate/"):
+		return "core/internal/gate"
+	case strings.HasPrefix(relSlash, "core/internal/app/"):
+		return "core/internal/app"
 	case strings.HasPrefix(relSlash, "core/internal/"):
 		return "core/internal"
 	case strings.HasPrefix(relSlash, "providers/"):

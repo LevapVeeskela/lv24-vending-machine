@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -71,7 +72,7 @@ func TestCLIEndToEnd(t *testing.T) {
 	if code := runArgs(env, "journal", "verify", "--config", cfgPath, "--data-dir", dataDir); code != 0 {
 		t.Fatalf("journal verify = %d, stderr=%s", code, stderr.String())
 	}
-	if got := stdout.String(); !strings.Contains(got, "journal ok: 1 events") {
+	if got := stdout.String(); !strings.Contains(got, "journal ok: 3 events") {
 		t.Fatalf("journal stdout = %q", got)
 	}
 
@@ -86,10 +87,31 @@ func TestCLIEndToEnd(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
+	rejectReq := writeSignalRequest(t, dir, req, "sig-test-002")
 	if code := runArgs(env, "gate", "test",
 		"--config", cfgPath, "--data-dir", dataDir,
-		"--request", req, "--fixture", rejectFix); code != 7 {
+		"--request", rejectReq, "--fixture", rejectFix); code != 7 {
 		t.Fatalf("gate test reject = %d, want 7, stderr=%s", code, stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := runArgs(env, "journal", "verify",
+		"--config", cfgPath, "--data-dir", dataDir); code != 0 {
+		t.Fatalf("journal verify = %d, stderr=%s", code, stderr.String())
+	}
+	if got := strings.TrimSpace(stdout.String()); got != "journal ok: 6 events" {
+		t.Fatalf("journal stdout = %q, want 6 events after allow plus reject", got)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := runArgs(env, "journal", "head",
+		"--config", cfgPath, "--data-dir", dataDir); code != 0 {
+		t.Fatalf("journal head = %d, stderr=%s", code, stderr.String())
+	}
+	if got := stdout.String(); !strings.Contains(got, "seq: 6") {
+		t.Fatalf("journal head stdout = %q, want seq 6", got)
 	}
 
 	stdout.Reset()
@@ -190,6 +212,30 @@ func testdataRel(names ...string) string {
 	return filepath.Join(parts...)
 }
 
+// writeSignalRequest copies a gate request fixture with a new signalId so
+// idempotency treats it as a distinct intent.
+func writeSignalRequest(t *testing.T, dir, src, signalID string) string {
+	t.Helper()
+	raw, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatalf("read request fixture: %v", err)
+	}
+	var v map[string]any
+	if err := json.Unmarshal(raw, &v); err != nil {
+		t.Fatalf("decode request fixture: %v", err)
+	}
+	v["signalId"] = signalID
+	out, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("encode request: %v", err)
+	}
+	path := filepath.Join(dir, signalID+".json")
+	if err := os.WriteFile(path, append(out, '\n'), 0o644); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+	return path
+}
+
 func TestVersionJSON(t *testing.T) {
 	env, stdout, stderr := testEnv(t)
 	if code := runArgs(env, "version", "--json"); code != 0 {
@@ -288,6 +334,135 @@ func TestExitIntentNoProvider(t *testing.T) {
 	}
 	if got := stdout.String(); !strings.Contains(got, "SKIP") {
 		t.Fatalf("exit verdict stdout misses SKIP: %q", got)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := runArgs(env, "journal", "verify",
+		"--config", cfgPath, "--data-dir", dataDir); code != 0 {
+		t.Fatalf("journal verify = %d, stderr=%s", code, stderr.String())
+	}
+	if got := strings.TrimSpace(stdout.String()); got != "journal ok: 2 events" {
+		t.Fatalf("journal stdout = %q, want 2 events for exit", got)
+	}
+}
+
+func TestJournalHead(t *testing.T) {
+	env, stdout, stderr, cfgPath, dataDir := initTestEnv(t)
+
+	if code := runArgs(env, "journal", "head",
+		"--config", cfgPath, "--data-dir", dataDir); code != 0 {
+		t.Fatalf("journal head empty = %d, stderr=%s", code, stderr.String())
+	}
+	if got := strings.TrimSpace(stdout.String()); got != "journal empty" {
+		t.Fatalf("journal head empty stdout = %q", got)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := runArgs(env, "journal", "head", "--json",
+		"--config", cfgPath, "--data-dir", dataDir); code != 0 {
+		t.Fatalf("journal head --json empty = %d, stderr=%s", code, stderr.String())
+	}
+	var empty struct {
+		Empty bool `json:"empty"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &empty); err != nil || !empty.Empty {
+		t.Fatalf("journal head JSON empty = %q, err=%v", stdout.String(), err)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := runArgs(env, "gate", "test",
+		"--config", cfgPath, "--data-dir", dataDir,
+		"--request", testdataRel("gate-request.json"),
+		"--fixture", testdataRel("decision-response.json")); code != 0 {
+		t.Fatalf("gate test = %d, stderr=%s", code, stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := runArgs(env, "journal", "head",
+		"--config", cfgPath, "--data-dir", dataDir); code != 0 {
+		t.Fatalf("journal head = %d, stderr=%s", code, stderr.String())
+	}
+	if got := stdout.String(); !strings.Contains(got, "seq: 3") || !strings.Contains(got, "hash: ") {
+		t.Fatalf("journal head stdout = %q", got)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := runArgs(env, "journal", "head", "--json",
+		"--config", cfgPath, "--data-dir", dataDir); code != 0 {
+		t.Fatalf("journal head --json = %d, stderr=%s", code, stderr.String())
+	}
+	var head struct {
+		Seq  int64  `json:"seq"`
+		Hash string `json:"hash"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &head); err != nil {
+		t.Fatalf("decode head JSON: %v", err)
+	}
+	if head.Seq != 3 || head.Hash == "" {
+		t.Fatalf("head = %+v, want seq 3 with hash", head)
+	}
+
+	if code := runArgs(env, "journal", "head",
+		"--data-dir", filepath.Join(dataDir, "missing")); code != 3 {
+		t.Fatalf("journal head missing db = %d, want 3", code)
+	}
+}
+
+func TestGateTestSaveRaw(t *testing.T) {
+	env, stdout, stderr, cfgPath, dataDir := initTestEnv(t)
+	rawPath := filepath.Join(t.TempDir(), "raw.json")
+
+	args := []string{"gate", "test",
+		"--config", cfgPath, "--data-dir", dataDir,
+		"--request", testdataRel("gate-request.json"),
+		"--fixture", testdataRel("decision-response.json"),
+		"--save-raw", rawPath}
+	if code := runArgs(env, args...); code != 0 {
+		t.Fatalf("gate test --save-raw = %d, stderr=%s", code, stderr.String())
+	}
+	raw, err := os.ReadFile(rawPath)
+	if err != nil {
+		t.Fatalf("read saved raw: %v", err)
+	}
+	var v struct {
+		Answers map[string]any `json:"answers"`
+	}
+	if err := json.Unmarshal(raw, &v); err != nil || len(v.Answers) != 4 {
+		t.Fatalf("saved raw = %q, err=%v", raw, err)
+	}
+
+	// Idempotent replay has no response to save.
+	stdout.Reset()
+	stderr.Reset()
+	if code := runArgs(env, args...); code != 1 {
+		t.Fatalf("gate test --save-raw replay = %d, want 1, stderr=%s", code, stderr.String())
+	}
+	if got := stderr.String(); !strings.Contains(got, "raw response unavailable") {
+		t.Fatalf("replay stderr misses hint: %q", got)
+	}
+	_ = stdout
+}
+
+func TestStubsNotImplemented(t *testing.T) {
+	env, _, stderr, cfgPath, dataDir := initTestEnv(t)
+	base := []string{"--config", cfgPath, "--data-dir", dataDir}
+	for _, args := range [][]string{
+		append([]string{"serve"}, base...),
+		append([]string{"gate", "report"}, base...),
+		append([]string{"outcomes", "label"}, base...),
+	} {
+		stderr.Reset()
+		if code := runArgs(env, args...); code != 2 {
+			t.Fatalf("vend %v = %d, want 2", args, code)
+		}
+		if got := stderr.String(); !strings.Contains(got, "not implemented yet") {
+			t.Fatalf("vend %v stderr misses stub message: %q", args, got)
+		}
 	}
 }
 

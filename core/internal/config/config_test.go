@@ -20,6 +20,10 @@ func TestValidateBad(t *testing.T) {
 		{"apiVersion", func(c *Config) { c.APIVersion = "v0" }},
 		{"mode", func(c *Config) { c.Mode = "paperX" }},
 		{"live", func(c *Config) { c.Mode = "live" }},
+		{"horizonZero", func(c *Config) { c.Outcome.HorizonBars = 0 }},
+		{"horizonHigh", func(c *Config) { c.Outcome.HorizonBars = 1001 }},
+		{"feeNeg", func(c *Config) { c.Outcome.FeeBps = -1 }},
+		{"feeHigh", func(c *Config) { c.Outcome.FeeBps = 10001 }},
 		{"gateVersion", func(c *Config) { c.Gate.Version = "" }},
 		{"minPassZero", func(c *Config) { c.Gate.MinPass = 0 }},
 		{"minPassHigh", func(c *Config) { c.Gate.MinPass = 1.5 }},
@@ -96,7 +100,7 @@ func TestGetPaths(t *testing.T) {
 	c := Default()
 	for key, want := range map[string]string{
 		"apiVersion":                   "vending.lv24/v1",
-		"mode":                         "paper",
+		"mode":                         "shadow",
 		"gate.version":                 "gate-v1",
 		"providers.decision.model":     "drex-max-v1.1",
 		"providers.decision.secretRef": "conn/drex/apiKey",
@@ -120,6 +124,41 @@ func TestGetPaths(t *testing.T) {
 	}
 	if _, err := c.Get("mode.deeper"); err == nil {
 		t.Fatalf("Get(mode.deeper) = nil, want error")
+	}
+}
+
+func TestShadowModeAccepted(t *testing.T) {
+	for _, mode := range []string{"paper", "sandbox", "shadow"} {
+		c := Default()
+		c.Mode = mode
+		if err := c.Validate(); err != nil {
+			t.Fatalf("mode %q: Validate() = %v", mode, err)
+		}
+	}
+	if got := Default().Mode; got != "shadow" {
+		t.Fatalf("Default().Mode = %q, want shadow", got)
+	}
+}
+
+func TestOutcomeDefaults(t *testing.T) {
+	c := Default()
+	if c.Outcome.HorizonBars != 12 {
+		t.Fatalf("HorizonBars = %d, want 12", c.Outcome.HorizonBars)
+	}
+	if c.Outcome.FeeBps != 20 {
+		t.Fatalf("FeeBps = %d, want 20", c.Outcome.FeeBps)
+	}
+	for key, want := range map[string]float64{
+		"outcome.horizonBars": 12,
+		"outcome.feeBps":      20,
+	} {
+		v, err := c.Get(key)
+		if err != nil {
+			t.Fatalf("Get(%q) = %v", key, err)
+		}
+		if f, ok := v.(float64); !ok || f != want {
+			t.Fatalf("Get(%q) = %v (%T), want %v", key, v, v, want)
+		}
 	}
 }
 
