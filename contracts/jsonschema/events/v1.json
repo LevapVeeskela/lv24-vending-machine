@@ -78,7 +78,16 @@
       "properties": {
         "kind": { "type": "string", "minLength": 1 },
         "channel": { "type": "string", "minLength": 1 },
-        "ok": { "type": "boolean" }
+        "ok": { "type": "boolean" },
+        "code": {
+          "description": "Gate verdict code covered by the alert; empty for non-provider notifications.",
+          "type": "string"
+        },
+        "uptoSeq": {
+          "description": "Highest journal seq covered by the delivered alert. A new faulty verdict or ABSTAIN streak must have a greater seq to alert again.",
+          "type": "integer",
+          "minimum": 0
+        }
       }
     },
     "OutcomeUnlabelable": {

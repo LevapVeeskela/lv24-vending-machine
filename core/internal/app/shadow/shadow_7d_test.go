@@ -276,9 +276,9 @@ func TestShadowSevenDays(t *testing.T) {
 
 	endDebug := runner.debugSize()
 	t.Logf("debugSize start=%d end=%d", startDebug, endDebug)
-	// debugSize must stay bounded across the week: the fixed keys are
-	// initialized at construction, and the only key added at runtime is the
-	// weekly rate-limit entry after the first weekly send.
+	// debugSize must stay bounded across the week: it counts only the retry
+	// state of undelivered notifications, which is bounded by the fixed set of
+	// alert series.
 	if endDebug > startDebug+1 {
 		t.Fatalf("debugSize grew unbounded: start=%d end=%d", startDebug, endDebug)
 	}

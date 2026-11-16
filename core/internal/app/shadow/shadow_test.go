@@ -232,6 +232,20 @@ func testConfig(statusPath string) Config {
 	return Config{LabelInterval: time.Minute, StatusPath: statusPath, CodeVersion: "v-test"}
 }
 
+// notifySentEvents decodes every notify.sent payload.
+func notifySentEvents(t *testing.T, jr *memJournal) []notifySentPayload {
+	t.Helper()
+	var out []notifySentPayload
+	for _, ev := range jr.eventsOf(domain.EventNotifySent) {
+		var p notifySentPayload
+		if err := json.Unmarshal(ev.Payload, &p); err != nil {
+			t.Fatalf("decode notify.sent seq %d: %v", ev.Seq, err)
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
 func newRunner(jr *memJournal, deps ports.Deps, cfg Config, labeler Labeler, signals SignalSource, evaluator Evaluator, reporter Reporter, notifier ports.Notifier) *Runner {
 	r, err := New(jr, labeler, signals, evaluator, reporter, notifier, deps, cfg)
 	if err != nil {
@@ -332,8 +346,9 @@ func TestModelChangedSendErrorRecordsOKFalse(t *testing.T) {
 		PreviousModel:  "model-v1",
 		ActualModel:    "model-v2",
 	})
+	now := baseTime
 	n := &fakeNotifier{err: errors.New("send boom")}
-	r := newRunner(jr, fixedDeps(), testConfig(""), nil, nil, nil, nil, n)
+	r := newRunner(jr, mutableDeps(&now), testConfig(""), nil, nil, nil, nil, n)
 	if err := r.Step(context.Background()); err != nil {
 		t.Fatalf("Step() = %v", err)
 	}
@@ -359,7 +374,19 @@ func TestModelChangedSendErrorRecordsOKFalse(t *testing.T) {
 		t.Fatalf("lastSeq = %d, want 0 (cursor must not pass a failed send)", got)
 	}
 
+	// The next cycle is inside the one-cycle backoff: no attempt, no record.
+	if err := r.Step(context.Background()); err != nil {
+		t.Fatalf("backoff Step() = %v", err)
+	}
+	if got := n.sent(); len(got) != 1 {
+		t.Fatalf("sends during backoff = %d, want 1", len(got))
+	}
+	if got := jr.eventsOf(domain.EventNotifySent); len(got) != 1 {
+		t.Fatalf("notify.sent during backoff = %d, want 1", len(got))
+	}
+
 	// A later retry with a healthy notifier delivers the same event.
+	now = now.Add(time.Minute)
 	n.err = nil
 	if err := r.Step(context.Background()); err != nil {
 		t.Fatalf("retry Step() = %v", err)
@@ -406,8 +433,17 @@ func TestThreeAbstainSendsOncePerHour(t *testing.T) {
 		t.Fatalf("sends = %d, want still 1 (rate limited)", len(got))
 	}
 
-	// Advance past the hour and add three more ABSTAINs.
+	// Two hours later without a new faulty verdict: no repeat.
 	now = now.Add(2 * time.Hour)
+	if err := r.Step(context.Background()); err != nil {
+		t.Fatalf("quiet Step() = %v", err)
+	}
+	if got := n.sent(); len(got) != 1 {
+		t.Fatalf("sends = %d, want no repeat without new ABSTAINs", len(got))
+	}
+
+	// Three more ABSTAINs make the streak newer than the delivered alert, so
+	// the hourly alert fires again.
 	for i := 0; i < 3; i++ {
 		seedAbstain(t, jr)
 	}
@@ -416,6 +452,14 @@ func TestThreeAbstainSendsOncePerHour(t *testing.T) {
 	}
 	if got := n.sent(); len(got) != 2 || got[1].Kind != "gate.unavailable" {
 		t.Fatalf("sends = %d, want 2 gate.unavailable", len(got))
+	}
+	events := notifySentEvents(t, jr)
+	if len(events) != 2 || events[0].Code != providerUnavailable || events[0].UptoSeq == 0 {
+		t.Fatalf("notify.sent = %+v, want two records with the outage code and seq", events)
+	}
+	if events[1].UptoSeq <= events[0].UptoSeq {
+		t.Fatalf("uptoSeq = %d -> %d, want the second alert to cover newer verdicts",
+			events[0].UptoSeq, events[1].UptoSeq)
 	}
 }
 
@@ -437,6 +481,53 @@ func TestOtherVerdictResetsStreak(t *testing.T) {
 	}
 }
 
+// TestProviderConfigAuthAfterConfigAlert: auth and misconfiguration are
+// separate alert series, so an auth failure in the hour after a configuration
+// alert is still delivered.
+func TestProviderConfigAuthAfterConfigAlert(t *testing.T) {
+	jr := &memJournal{}
+	seedEvent(t, jr, domain.EventGateVerdict, domain.GateVerdict{
+		Verdict: domain.VerdictAbstain,
+		Code:    providerMisconfigured,
+	})
+	now := baseTime
+	n := &fakeNotifier{}
+	r := newRunner(jr, mutableDeps(&now), testConfig(""), nil, nil, nil, nil, n)
+	if err := r.Step(context.Background()); err != nil {
+		t.Fatalf("first Step() = %v", err)
+	}
+	if got := n.sent(); len(got) != 1 || !strings.Contains(got[0].Text, providerMisconfigured) {
+		t.Fatalf("sends = %v, want one %s alert", got, providerMisconfigured)
+	}
+
+	now = now.Add(30 * time.Minute)
+	seedEvent(t, jr, domain.EventGateVerdict, domain.GateVerdict{
+		Verdict: domain.VerdictAbstain,
+		Code:    providerAuth,
+	})
+	if err := r.Step(context.Background()); err != nil {
+		t.Fatalf("second Step() = %v", err)
+	}
+	sends := n.sent()
+	if len(sends) != 2 || !strings.Contains(sends[1].Text, providerAuth) {
+		t.Fatalf("sends = %v, want an auth alert within the config hour", sends)
+	}
+	events := notifySentEvents(t, jr)
+	if len(events) != 2 {
+		t.Fatalf("notify.sent = %d, want 2", len(events))
+	}
+	if events[0].Code != providerMisconfigured || events[1].Code != providerAuth {
+		t.Fatalf("notify.sent codes = %q/%q, want %q/%q",
+			events[0].Code, events[1].Code, providerMisconfigured, providerAuth)
+	}
+	if events[0].UptoSeq == 0 || events[1].UptoSeq <= events[0].UptoSeq {
+		t.Fatalf("uptoSeq = %d/%d, want ordered non-zero coverage",
+			events[0].UptoSeq, events[1].UptoSeq)
+	}
+}
+
+// TestProviderConfigSendsOncePerHour: the same fault code alerts at most once
+// per hour and only when a newer faulty verdict exists.
 func TestProviderConfigSendsOncePerHour(t *testing.T) {
 	jr := &memJournal{}
 	seedEvent(t, jr, domain.EventGateVerdict, domain.GateVerdict{
@@ -458,26 +549,114 @@ func TestProviderConfigSendsOncePerHour(t *testing.T) {
 		t.Fatalf("text = %q, want the fault code", sends[0].Text)
 	}
 
-	// Within the hour: neither the same nor another fault code re-alerts.
+	// A new faulty verdict inside the hour waits.
+	now = now.Add(30 * time.Minute)
 	seedEvent(t, jr, domain.EventGateVerdict, domain.GateVerdict{
 		Verdict: domain.VerdictAbstain,
-		Code:    providerMisconfigured,
+		Code:    providerAuth,
 	})
 	if err := r.Step(context.Background()); err != nil {
 		t.Fatalf("Step() = %v", err)
 	}
 	if got := n.sent(); len(got) != 1 {
-		t.Fatalf("sends = %d, want still 1 (rate limited)", len(got))
+		t.Fatalf("sends = %d, want still 1 (hour not passed)", len(got))
 	}
 
-	// An hour later the trailing fault is announced again.
-	now = now.Add(2 * time.Hour)
+	// After the hour the new verdict is announced.
+	now = now.Add(31 * time.Minute)
 	if err := r.Step(context.Background()); err != nil {
 		t.Fatalf("Step() = %v", err)
 	}
 	sends = n.sent()
-	if len(sends) != 2 || !strings.Contains(sends[1].Text, providerMisconfigured) {
-		t.Fatalf("sends = %v, want a second alert for %s", sends, providerMisconfigured)
+	if len(sends) != 2 || !strings.Contains(sends[1].Text, providerAuth) {
+		t.Fatalf("sends = %v, want a second auth alert", sends)
+	}
+	events := notifySentEvents(t, jr)
+	if len(events) != 2 || events[1].UptoSeq <= events[0].UptoSeq {
+		t.Fatalf("notify.sent = %+v, want a newer uptoSeq", events)
+	}
+
+	// Two more hours without a new faulty verdict: no repeat.
+	now = now.Add(2 * time.Hour)
+	if err := r.Step(context.Background()); err != nil {
+		t.Fatalf("quiet Step() = %v", err)
+	}
+	if got := n.sent(); len(got) != 2 {
+		t.Fatalf("sends = %d, want no repeat without a new verdict", len(got))
+	}
+}
+
+// TestProviderConfigNoRepeatAfterSuccessAndRestart: a delivered fault alert is
+// never re-sent after a later successful verdict and a restart, because the
+// notify.sent record in the journal is the source of truth.
+func TestProviderConfigNoRepeatAfterSuccessAndRestart(t *testing.T) {
+	jr := &memJournal{}
+	seedEvent(t, jr, domain.EventGateVerdict, domain.GateVerdict{
+		Verdict: domain.VerdictAbstain,
+		Code:    providerAuth,
+	})
+	now := baseTime
+	n1 := &fakeNotifier{}
+	r1 := newRunner(jr, mutableDeps(&now), testConfig(""), nil, nil, nil, nil, n1)
+	if err := r1.Step(context.Background()); err != nil {
+		t.Fatalf("first Step() = %v", err)
+	}
+	if got := n1.sent(); len(got) != 1 {
+		t.Fatalf("first sends = %d, want 1", len(got))
+	}
+
+	// A successful verdict follows the fault, and the process restarts.
+	seedEvent(t, jr, domain.EventGateVerdict, domain.GateVerdict{
+		Verdict: domain.VerdictAllow,
+		Code:    "allow",
+	})
+	now = now.Add(2 * time.Hour)
+	n2 := &fakeNotifier{}
+	r2 := newRunner(jr, mutableDeps(&now), testConfig(filepath.Join(t.TempDir(), "status.json")),
+		nil, nil, nil, nil, n2)
+	if err := r2.Step(context.Background()); err != nil {
+		t.Fatalf("restarted Step() = %v", err)
+	}
+	if got := n2.sent(); len(got) != 0 {
+		t.Fatalf("restart sends = %v, want no repeat of the delivered fault", got)
+	}
+	if got := jr.eventsOf(domain.EventNotifySent); len(got) != 1 {
+		t.Fatalf("notify.sent = %d, want 1", len(got))
+	}
+}
+
+// TestFailedSendRecordsOneOKFalse: a failing Telegram channel is retried with
+// 1, 2, 4 ... cycle backoff, but the journal records only the first failure of
+// the series.
+func TestFailedSendRecordsOneOKFalse(t *testing.T) {
+	jr := &memJournal{}
+	for i := 0; i < 3; i++ {
+		seedAbstain(t, jr)
+	}
+	now := baseTime
+	n := &fakeNotifier{err: errors.New("telegram down")}
+	r := newRunner(jr, mutableDeps(&now), testConfig(""), nil, nil, nil, nil, n)
+	for i := 0; i < 50; i++ {
+		now = baseTime.Add(time.Duration(i) * time.Minute)
+		if err := r.Step(context.Background()); err != nil {
+			t.Fatalf("Step() cycle %d = %v", i, err)
+		}
+	}
+	if attempts := len(n.sent()); attempts <= 1 {
+		t.Fatalf("send attempts = %d, want the failure to be retried", attempts)
+	}
+	events := notifySentEvents(t, jr)
+	failed := 0
+	for _, ev := range events {
+		if !ev.OK {
+			failed++
+		}
+	}
+	if failed != 1 {
+		t.Fatalf("notify.sent ok=false = %d, want exactly 1: %+v", failed, events)
+	}
+	if len(events) != 1 {
+		t.Fatalf("notify.sent = %d, want only the first failure", len(events))
 	}
 }
 
@@ -835,8 +1014,8 @@ func TestDebugSizeStable(t *testing.T) {
 	n := &fakeNotifier{}
 	rep := &fakeReporter{rep: domain.Report{LabeledCount: 1, VerdictCounts: map[string]int{}}}
 	r := newRunner(jr, fixedDeps(), testConfig(""), nil, nil, nil, rep, n)
-	if got := r.debugSize(); got != 3 {
-		t.Fatalf("debugSize = %d, want 3 (fixed keys initialized)", got)
+	if got := r.debugSize(); got != 0 {
+		t.Fatalf("debugSize = %d, want 0 before any failure", got)
 	}
 	for i := 0; i < 5; i++ {
 		if err := r.Step(context.Background()); err != nil {

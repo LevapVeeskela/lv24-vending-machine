@@ -1073,11 +1073,18 @@ type NotifySent struct {
 	// Channel corresponds to the JSON schema field "channel".
 	Channel string `json:"channel"`
 
+	// Gate verdict code covered by the alert; empty for non-provider notifications.
+	Code *string `json:"code,omitempty,omitzero"`
+
 	// Kind corresponds to the JSON schema field "kind".
 	Kind string `json:"kind"`
 
 	// Ok corresponds to the JSON schema field "ok".
 	Ok bool `json:"ok"`
+
+	// Highest journal seq covered by the delivered alert. A new faulty verdict or
+	// ABSTAIN streak must have a greater seq to alert again.
+	UptoSeq *int `json:"uptoSeq,omitempty,omitzero"`
 }
 
 // UnmarshalJSON implements json.Unmarshaler.
@@ -1105,6 +1112,9 @@ func (j *NotifySent) UnmarshalJSON(value []byte) error {
 	}
 	if utf8.RuneCountInString(string(plain.Kind)) < 1 {
 		return fmt.Errorf("field %s length: must be >= %d", "kind", 1)
+	}
+	if plain.UptoSeq != nil && 0 > *plain.UptoSeq {
+		return fmt.Errorf("field %s: must be >= %v", "uptoSeq", 0)
 	}
 	*j = NotifySent(plain)
 	return nil

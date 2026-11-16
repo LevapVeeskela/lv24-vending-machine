@@ -79,7 +79,6 @@ const (
 	notifyUnavailable    = "gate.unavailable"
 	notifyProviderConfig = "gate.provider_config"
 	notifyWeekly         = "gate.weekly"
-	streakUnavailable    = "provider_unavailable"
 	notifyChannel        = "telegram"
 )
 
@@ -96,6 +95,81 @@ const (
 // trendScanDelay is how long after a bar close the trend scan runs.
 const trendScanDelay = 2 * time.Second
 
+// alertInterval is the minimum time between two deliveries of the same
+// journal-derived alert series.
+const alertInterval = time.Hour
+
+// retryCap bounds the exponential retry delay of an undelivered notification.
+const retryCap = time.Hour
+
+// notification is one pending message before it is rendered.
+type notification struct {
+	// seq is the journal seq the message covers; the cursor advances to it
+	// only after a successful send.
+	seq int64
+	// kind is the notify.sent kind (and the Telegram message class).
+	kind string
+	// code is the gate verdict code of a provider alert, empty otherwise.
+	code string
+	// uptoSeq is the highest verdict seq covered by a journal-derived alert.
+	uptoSeq int64
+	// text is the rendered message.
+	text string
+	// weekly requests rendering by the reporter before the send.
+	weekly bool
+}
+
+// retryState tracks the exponential retry of one undelivered notification.
+type retryState struct {
+	// failures is the number of consecutive failed sends.
+	failures int
+	// next is the earliest time of the next attempt.
+	next time.Time
+}
+
+// deliveredAlert is the last successful delivery of one notification series,
+// restored from its notify.sent event.
+type deliveredAlert struct {
+	at      time.Time
+	uptoSeq int64
+}
+
+// journalNotifications is the notification schedule derived from the journal.
+// It is rebuilt on every cycle, so a restart on the same journal cannot repeat
+// a delivered alert.
+type journalNotifications struct {
+	firstRequest time.Time
+	lastWeekly   time.Time
+	latestSeq    int64
+	// streak counts trailing provider_unavailable ABSTAINs; streakSeq is the
+	// seq of the latest one.
+	streak    int
+	streakSeq int64
+	// faults maps provider_auth/provider_misconfigured to the seq of the
+	// latest verdict with that code.
+	faults map[string]int64
+	// delivered maps a notification key to its last successful delivery.
+	delivered map[string]deliveredAlert
+}
+
+// notifyKey identifies one notification series for retries and delivery.
+func notifyKey(kind, code string) string {
+	if code == "" {
+		return kind
+	}
+	return kind + "\x00" + code
+}
+
+// alertNeeded reports whether a journal-derived alert series is due: there is
+// a verdict newer than the last delivered one and an hour passed since that
+// delivery. A never-delivered series is due immediately.
+func alertNeeded(now time.Time, last deliveredAlert, latestSeq int64) bool {
+	if latestSeq <= last.uptoSeq {
+		return false
+	}
+	return last.at.IsZero() || now.Sub(last.at) >= alertInterval
+}
+
 // Runner drives the shadow gate loop.
 type Runner struct {
 	jr        ports.Journal
@@ -110,12 +184,9 @@ type Runner struct {
 	mu sync.Mutex
 	// lastSeq is the highest journal seq already processed for notifications.
 	lastSeq int64
-	// streaks holds bounded consecutive-event counters keyed by metric.
-	streaks map[string]int
-	// lastSent holds the in-memory send time per rate-limited notification
-	// kind. It is a guard against hot loops only, never the source of truth:
-	// the weekly schedule is derived from the journal.
-	lastSent map[string]time.Time
+	// retry holds the exponential retry state of undelivered notifications,
+	// keyed by notifyKey. It stays bounded by the fixed set of alert series.
+	retry map[string]retryState
 	// trendOffset is the delay applied after a bar close; tests shorten it.
 	trendOffset time.Duration
 
@@ -143,17 +214,10 @@ func New(jr ports.Journal, labeler Labeler, signals SignalSource, evaluator Eval
 		notifier:  notifier,
 		deps:      deps,
 		cfg:       cfg,
-		streaks:   make(map[string]int),
-		lastSent:  make(map[string]time.Time),
+		retry:     make(map[string]retryState),
 
 		trendOffset: trendScanDelay,
 	}
-	// Initialize the fixed persistent keys so debugSize reflects the steady
-	// state from the very first step: the provider-unavailable streak counter
-	// and the in-memory rate limits. A zero time means "never sent".
-	r.streaks[streakUnavailable] = 0
-	r.lastSent[notifyUnavailable] = time.Time{}
-	r.lastSent[notifyProviderConfig] = time.Time{}
 	// Restore the notification cursor from a previous run so notifications
 	// only process events appended after the last persisted seq. A missing or
 	// corrupt status file leaves the cursor at zero (reprocess from scratch).
@@ -288,12 +352,13 @@ func (r *Runner) Status() Status {
 	}
 }
 
-// debugSize returns the total entries of the persistent maps: the streak
-// counters plus the rate-limit state. It must stay bounded across cycles.
+// debugSize returns the total entries of the persistent maps: the retry
+// state. It must stay bounded across cycles by the fixed set of notification
+// series.
 func (r *Runner) debugSize() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return len(r.streaks) + len(r.lastSent)
+	return len(r.retry)
 }
 
 // stepPhases runs one cycle under the caller-held mutex. doLabel runs the
@@ -359,26 +424,19 @@ func (r *Runner) stepPhases(ctx context.Context, doLabel, doTrend bool) {
 // notify walks new journal events, builds the notifications that are due,
 // sends at most one of them, and appends a notify.sent event for it.
 //
-// The cursor (lastSeq) only moves past an event once its notification was
-// delivered. A send error therefore leaves the cursor in front of the event so
-// the notification is retried later; events that need no notification are
-// skipped by advancing the cursor to the first pending event.
+// Every alert series is derived from the journal: a provider alert is due only
+// when a verdict newer than the last delivered alert exists and an hour passed
+// since that delivery, so a restart repeats nothing and a quiet journal stays
+// quiet. The cursor (lastSeq) only moves past a model-changed event once its
+// notification was delivered; an undelivered notification retries with a
+// 1, 2, 4 ... cycle backoff capped at one hour. Only the first failure of a
+// series is recorded as notify.sent with ok=false.
 func (r *Runner) notify(ctx context.Context) error {
-	type pending struct {
-		seq     int64
-		kind    string
-		text    string
-		weekly  bool
-		rateKey string
-	}
 	now := r.deps.Now()
-	var out []pending
+	var out []notification
 	var notifyErr error
 
-	// The weekly schedule, the outage streak and the trailing provider fault
-	// are derived from the journal, so a restarted Runner on the same journal
-	// cannot repeat a weekly summary.
-	firstRequest, lastWeekly, providerFault, stateErr := r.journalState(ctx)
+	state, stateErr := r.journalState(ctx)
 	if stateErr != nil {
 		notifyErr = stateErr
 	}
@@ -395,7 +453,7 @@ func (r *Runner) notify(ctx context.Context) error {
 		if err := json.Unmarshal(ev.Payload, &mc); err != nil {
 			return nil
 		}
-		out = append(out, pending{
+		out = append(out, notification{
 			seq:  ev.Seq,
 			kind: domain.EventDecisionModelChanged,
 			text: fmt.Sprintf("decision model changed: %s -> %s (requested %s)",
@@ -405,40 +463,49 @@ func (r *Runner) notify(ctx context.Context) error {
 	}); err != nil {
 		notifyErr = err
 	}
-
-	// Outage notification: only while the journal ends in a provider outage
-	// streak, and at most once per hour (in-memory rate limit).
-	if r.streaks[streakUnavailable] >= 3 {
-		last := r.lastSent[notifyUnavailable]
-		if last.IsZero() || now.Sub(last) >= time.Hour {
-			out = append(out, pending{
-				seq:     walkSeq,
-				kind:    notifyUnavailable,
-				text:    "gate unavailable: 3 consecutive ABSTAIN from the decision provider",
-				rateKey: notifyUnavailable,
-			})
-		}
+	head := state.latestSeq
+	if walkSeq > head {
+		head = walkSeq
 	}
 
-	// Provider configuration attention: an auth or misconfiguration verdict is
-	// an operator problem, not an outage streak. At most once per hour across
-	// both codes.
-	if providerFault != "" {
-		last := r.lastSent[notifyProviderConfig]
-		if last.IsZero() || now.Sub(last) >= time.Hour {
-			out = append(out, pending{
-				seq:     walkSeq,
-				kind:    notifyProviderConfig,
-				text:    providerConfigText(providerFault),
-				rateKey: notifyProviderConfig,
-			})
+	// Outage notification: the journal must end in a provider_unavailable
+	// ABSTAIN streak, and the latest verdict of that streak must be newer than
+	// the delivered alert. A quiet journal never repeats it.
+	if state.streak >= 3 &&
+		alertNeeded(now, state.delivered[notifyKey(notifyUnavailable, providerUnavailable)], state.streakSeq) {
+		out = append(out, notification{
+			seq:     head,
+			kind:    notifyUnavailable,
+			code:    providerUnavailable,
+			uptoSeq: state.streakSeq,
+			text:    "gate unavailable: 3 consecutive ABSTAIN from the decision provider",
+		})
+	}
+
+	// Provider configuration attention: auth and misconfiguration are separate
+	// operator problems with separate delivery clocks, so an auth failure in
+	// the hour after a configuration alert is still delivered.
+	for _, code := range []string{providerAuth, providerMisconfigured} {
+		seq := state.faults[code]
+		if seq == 0 {
+			continue
 		}
+		if !alertNeeded(now, state.delivered[notifyKey(notifyProviderConfig, code)], seq) {
+			continue
+		}
+		out = append(out, notification{
+			seq:     head,
+			kind:    notifyProviderConfig,
+			code:    code,
+			uptoSeq: seq,
+			text:    providerConfigText(code),
+		})
 	}
 
 	// Weekly summary: first gate request at least seven days ago and no
 	// successful weekly notification within the last seven days.
-	if r.reporter != nil && weeklyDue(now, firstRequest, lastWeekly) {
-		out = append(out, pending{seq: walkSeq, kind: notifyWeekly, weekly: true, rateKey: notifyWeekly})
+	if r.reporter != nil && weeklyDue(now, state.firstRequest, state.lastWeekly) {
+		out = append(out, notification{seq: head, kind: notifyWeekly, weekly: true})
 	}
 
 	if len(out) == 0 {
@@ -450,6 +517,12 @@ func (r *Runner) notify(ctx context.Context) error {
 	}
 
 	first := out[0]
+	key := notifyKey(first.kind, first.code)
+	if !r.sendDue(key, now) {
+		// The first pending notification is inside its retry backoff. Keeping
+		// it first preserves the journal order and the cursor.
+		return notifyErr
+	}
 	if first.weekly {
 		rep, err := r.reporter.Build(ctx)
 		if err != nil {
@@ -461,35 +534,82 @@ func (r *Runner) notify(ctx context.Context) error {
 	sendErr := r.notifier.Send(ctx, ports.Notification{Kind: first.kind, Text: first.text})
 	if sendErr != nil {
 		notifyErr = sendErr
+		if firstFailure := r.recordSendFailure(key, now); firstFailure {
+			if _, appendErr := r.appendNotifySent(ctx, first, false); appendErr != nil {
+				notifyErr = appendErr
+			}
+		}
+		return notifyErr
 	}
-	if _, appendErr := r.appendNotifySent(ctx, first.kind, sendErr == nil); appendErr != nil {
+	if _, appendErr := r.appendNotifySent(ctx, first, true); appendErr != nil {
 		notifyErr = appendErr
 	}
-	if sendErr == nil {
-		// Delivered: move the cursor past the source event only. Later events
-		// stay pending for the following steps; the notify.sent record is
-		// skipped by the walk and passed on the next clean sweep.
-		if first.seq > r.lastSeq {
-			r.lastSeq = first.seq
-		}
-		if first.rateKey != "" {
-			r.lastSent[first.rateKey] = now
-		}
+	r.resetSendFailure(key)
+	// Delivered: move the cursor past the source event only. Later events stay
+	// pending for the following steps; the notify.sent record is skipped by the
+	// walk and passed on the next clean sweep.
+	if first.seq > r.lastSeq {
+		r.lastSeq = first.seq
 	}
 	return notifyErr
 }
 
+// sendDue reports whether the notification series may be attempted now.
+func (r *Runner) sendDue(key string, now time.Time) bool {
+	st, ok := r.retry[key]
+	return !ok || !now.Before(st.next)
+}
+
+// recordSendFailure schedules the next retry of a failed series: one label
+// cycle after the first failure, doubling per consecutive failure, capped at
+// one hour so a retry happens at least hourly. It reports whether this was the
+// first failure of the series.
+func (r *Runner) recordSendFailure(key string, now time.Time) bool {
+	st := r.retry[key]
+	first := st.failures == 0
+	st.failures++
+	interval := r.cfg.LabelInterval
+	if interval <= 0 {
+		interval = defaultInterval
+	}
+	delay := interval
+	for i := 1; i < st.failures; i++ {
+		if delay >= retryCap {
+			break
+		}
+		delay *= 2
+	}
+	if delay > retryCap {
+		delay = retryCap
+	}
+	st.next = now.Add(delay)
+	r.retry[key] = st
+	return first
+}
+
+// resetSendFailure forgets the retry state of a delivered series.
+func (r *Runner) resetSendFailure(key string) {
+	delete(r.retry, key)
+}
+
 // journalState derives the notification schedule inputs from the whole journal:
 // the trailing provider-unavailable streak, the first gate.request timestamp,
-// the timestamp of the latest successful weekly notification, and the trailing
-// provider auth/misconfiguration code.
-func (r *Runner) journalState(ctx context.Context) (firstRequest, lastWeekly time.Time, providerFault string, err error) {
-	streak := 0
-	walkErr := r.jr.Walk(ctx, 0, "", func(ev domain.Event) error {
+// the timestamp of the latest successful weekly notification, the latest
+// verdict seq per provider fault code, and the delivery record of every alert
+// series.
+func (r *Runner) journalState(ctx context.Context) (journalNotifications, error) {
+	st := journalNotifications{
+		faults:    make(map[string]int64),
+		delivered: make(map[string]deliveredAlert),
+	}
+	err := r.jr.Walk(ctx, 0, "", func(ev domain.Event) error {
+		if ev.Seq > st.latestSeq {
+			st.latestSeq = ev.Seq
+		}
 		switch ev.Kind {
 		case domain.EventGateRequest:
-			if firstRequest.IsZero() {
-				firstRequest = ev.TS
+			if st.firstRequest.IsZero() {
+				st.firstRequest = ev.TS
 			}
 		case domain.EventGateVerdict:
 			var v domain.GateVerdict
@@ -498,31 +618,35 @@ func (r *Runner) journalState(ctx context.Context) (firstRequest, lastWeekly tim
 			}
 			switch {
 			case v.Verdict == domain.VerdictAbstain && v.Code == providerUnavailable:
-				streak++
-				providerFault = ""
+				st.streak++
+				st.streakSeq = ev.Seq
 			case v.Verdict == domain.VerdictAbstain && (v.Code == providerAuth || v.Code == providerMisconfigured):
-				streak = 0
-				providerFault = v.Code
+				st.streak = 0
+				if ev.Seq > st.faults[v.Code] {
+					st.faults[v.Code] = ev.Seq
+				}
 			default:
-				streak = 0
-				providerFault = ""
+				st.streak = 0
 			}
 		case domain.EventNotifySent:
 			var p notifySentPayload
 			if json.Unmarshal(ev.Payload, &p) != nil {
 				return nil
 			}
-			if p.Kind == notifyWeekly && p.OK {
-				lastWeekly = ev.TS
+			if !p.OK {
+				return nil
 			}
+			if p.Kind == notifyWeekly {
+				st.lastWeekly = ev.TS
+			}
+			st.delivered[notifyKey(p.Kind, p.Code)] = deliveredAlert{at: ev.TS, uptoSeq: p.UptoSeq}
 		}
 		return nil
 	})
-	if walkErr != nil {
-		return time.Time{}, time.Time{}, "", walkErr
+	if err != nil {
+		return journalNotifications{}, err
 	}
-	r.streaks[streakUnavailable] = streak
-	return firstRequest, lastWeekly, providerFault, nil
+	return st, nil
 }
 
 // providerConfigText renders the operator alert for a provider fault code
@@ -563,17 +687,26 @@ func weeklyText(rep domain.Report) string {
 }
 
 // notifySentPayload is the payload of a notify.sent event. It is the journal
-// record that drives the weekly schedule after a restart.
+// record that drives the alert and weekly schedules after a restart.
 type notifySentPayload struct {
 	Kind    string `json:"kind"`
 	Channel string `json:"channel"`
 	OK      bool   `json:"ok"`
+	// Code is the gate verdict code covered by a provider alert.
+	Code string `json:"code,omitempty"`
+	// UptoSeq is the highest journal seq covered by a delivered alert.
+	UptoSeq int64 `json:"uptoSeq,omitempty"`
 }
 
 // appendNotifySent appends one notify.sent event and returns its seq. The
-// caller decides whether to advance the notification cursor.
-func (r *Runner) appendNotifySent(ctx context.Context, kind string, ok bool) (int64, error) {
-	payload, err := json.Marshal(notifySentPayload{Kind: kind, Channel: notifyChannel, OK: ok})
+// caller decides whether to advance the notification cursor. A failed attempt
+// carries no uptoSeq: it covers nothing.
+func (r *Runner) appendNotifySent(ctx context.Context, n notification, ok bool) (int64, error) {
+	p := notifySentPayload{Kind: n.kind, Channel: notifyChannel, OK: ok, Code: n.code}
+	if ok {
+		p.UptoSeq = n.uptoSeq
+	}
+	payload, err := json.Marshal(p)
 	if err != nil {
 		return 0, err
 	}
