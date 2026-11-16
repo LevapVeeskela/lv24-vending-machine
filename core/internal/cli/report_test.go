@@ -160,3 +160,50 @@ func TestGateReportMissingDB(t *testing.T) {
 		t.Fatalf("gate report missing db = %d, want 3, stderr=%s", code, stderr.String())
 	}
 }
+
+func TestPrintReportHumanModelThreshold(t *testing.T) {
+	rep := domain.Report{
+		LabeledCount:  100,
+		Sufficient:    true,
+		VerdictCounts: map[string]int{"ALLOW": 60, "REJECT": 40},
+		PolicyHash:    strings.Repeat("a", 64),
+		Comparisons: &domain.ReportComparisons{
+			Groups: map[string]domain.GroupStats{
+				"all": {Count: 100, SumNetReturn: domain.MustParseDecimal("1.00"),
+					AvgNetReturn: domain.MustParseDecimal("0.01")},
+			},
+			ByModel: []domain.ModelBreakdown{
+				{Model: "big", Count: 30},
+				{Model: "small", Count: 29},
+			},
+		},
+	}
+	var buf strings.Builder
+	printReportHuman(&buf, rep)
+	got := buf.String()
+	if !strings.Contains(got, "big: n=30") {
+		t.Fatalf("report misses the >=30 model: %q", got)
+	}
+	if !strings.Contains(got, "model small: insufficient data (29 labeled)") {
+		t.Fatalf("report misses the model threshold: %q", got)
+	}
+	if !strings.Contains(got, "policy: aaaaaaaaaaaa") {
+		t.Fatalf("report misses the 12-char policy prefix: %q", got)
+	}
+	for _, want := range []string{"other policies: 0", "backfill: labeled=0 excluded=0",
+		"difference ALLOW-REJECT: insufficient data"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("report misses %q: %q", want, got)
+		}
+	}
+}
+
+func TestGateReportInvalidPolicy(t *testing.T) {
+	env, _, stderr := testEnv(t)
+	if code := runArgs(env, "gate", "report", "--policy", "not-a-hash"); code != 2 {
+		t.Fatalf("gate report invalid policy = %d, want 2, stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "invalid --policy") {
+		t.Fatalf("stderr misses policy error: %q", stderr.String())
+	}
+}
