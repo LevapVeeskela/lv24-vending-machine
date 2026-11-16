@@ -28,7 +28,7 @@ ADR: [0001 Go](../adr/0001-go-core.md) · [0002 contract-first](../adr/0002-cont
 
 По итогам ревью: [0008 wedge-first scope](../adr/0008-wedge-first-scope.md) (accepted) ·
 [0009 два режима оплаты ИИ](../adr/0009-byok-and-what-we-sell.md) (accepted) ·
-[0010 ограничения decision-моделей](../adr/0010-decision-model-guardrails.md) (proposed) ·
+[0010 ограничения decision-моделей](../adr/0010-decision-model-guardrails.md) (accepted) ·
 [0011 география и издатель](../adr/0011-geography-and-publisher.md) (accepted)
 
 Ревью: [вердикт](../review/00-verdict.md) · [находки](../review/01-findings.md) ·
@@ -76,6 +76,8 @@ vend serve            # desktop/web/mobile подключаются к этом�
 - Спека: draft v0.1; `00-vision.md` и `10-roadmap.md` — v0.2 по итогам скептического
   ревью, приняты владельцем 2026-11-16 (ветка `review/skeptical-v1`). Документы 01–09
   описывают целевую платформу; состав v1 сужен ADR-0008.
-- Известное расхождение: wire-пример в `04-providers.md §10` не совпадает с API
-  вендора — исправляется в M0 (ADR-0010).
-- Код: не начат. Первый шаг — интервью и клин M0 (см. `10-roadmap.md`).
+- Wire-пример в `04-providers.md §10` исправлен по документации вендора (ADR-0010).
+- `domain` и `ports` — публичные пакеты `core/domain` и `core/ports`, а не
+  `core/internal/…`: иначе модули провайдеров не могут их импортировать
+  (`02-monorepo.md §2`).
+- Код: M0 начат в ветке `feat/m0-wedge-core`; задание — `docs/plans/m0-wedge-core.md`.
