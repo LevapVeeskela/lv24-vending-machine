@@ -249,6 +249,51 @@ func TestHealthz(t *testing.T) {
 	}
 }
 
+func TestModeReporting(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cfg  string
+		want string
+	}{
+		{"explicit", "paper", "paper"},
+		{"default", "", "shadow"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newTestHandler(t, allowEvaluator(), Config{Version: "v-test", Mode: tc.cfg})
+			req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("healthz status = %d, want 200", rec.Code)
+			}
+			var hb struct {
+				Mode string `json:"mode"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &hb); err != nil {
+				t.Fatalf("decode healthz: %v", err)
+			}
+			if hb.Mode != tc.want {
+				t.Fatalf("healthz mode = %q, want %q", hb.Mode, tc.want)
+			}
+			rec = doGate(t, h, http.MethodPost, validRequest, "application/json", "Bearer "+testToken)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("gate status = %d, want 200 (%s)", rec.Code, rec.Body.String())
+			}
+			// The generated contract enum pins mode to "shadow", so the raw
+			// JSON field is checked here instead of GateVerdictResponse.
+			var gb struct {
+				Mode string `json:"mode"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &gb); err != nil {
+				t.Fatalf("decode gate: %v", err)
+			}
+			if gb.Mode != tc.want {
+				t.Fatalf("gate mode = %q, want %q", gb.Mode, tc.want)
+			}
+		})
+	}
+}
+
 func TestHappyPath(t *testing.T) {
 	h := newTestHandler(t, allowEvaluator(), Config{Version: "v-test"})
 	rec := doGate(t, h, http.MethodPost, validRequest, "application/json", "Bearer "+testToken)
@@ -343,6 +388,31 @@ func TestFlowErrorMapping(t *testing.T) {
 	}
 	if got := decodeErr(t, rec)["code"]; got != "internal" {
 		t.Fatalf("unavailable: code = %v", got)
+	}
+}
+
+func TestConflictMapping(t *testing.T) {
+	h := newTestHandler(t, &fakeEvaluator{
+		fn: func(_ context.Context, _ domain.GateRequest) (gateflow.Result, error) {
+			return gateflow.Result{}, domain.NewError(domain.CodeConflict, "signalId reused")
+		},
+	}, Config{})
+	rec := doGate(t, h, http.MethodPost, validRequest, "application/json", "Bearer "+testToken)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("conflict: status = %d, want 409 (%s)", rec.Code, rec.Body.String())
+	}
+	env := decodeErr(t, rec)
+	if env["code"] != "conflict" {
+		t.Fatalf("conflict: code = %v", env["code"])
+	}
+	if env["message"] != "signalId already used with a different request body" {
+		t.Fatalf("conflict: message = %v", env["message"])
+	}
+	if env["hint"] != "use a new signalId or send the identical body" {
+		t.Fatalf("conflict: hint = %v", env["hint"])
+	}
+	if env["retryable"] != false {
+		t.Fatalf("conflict: retryable = %v, want false", env["retryable"])
 	}
 }
 

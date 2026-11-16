@@ -101,6 +101,7 @@ func (r *runner) cmdServe(args []string) int {
 	h, err := api.New(api.Config{
 		Token:         token,
 		Version:       r.ver,
+		Mode:          cfg.Mode,
 		MaxBodyBytes:  64 << 10,
 		MaxConcurrent: 8,
 	}, flow, logger)

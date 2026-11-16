@@ -29,6 +29,8 @@ import (
 const (
 	defaultMaxBodyBytes = 64 << 10
 	defaultMaxConc      = 8
+	// defaultMode is reported when Config.Mode is empty.
+	defaultMode = "shadow"
 )
 
 // Config tunes the local HTTP API.
@@ -37,6 +39,9 @@ type Config struct {
 	Token string
 	// Version is reported by GET /healthz.
 	Version string
+	// Mode is reported by GET /healthz and in gate responses; empty means
+	// defaultMode.
+	Mode string
 	// MaxBodyBytes caps one request body; <=0 means defaultMaxBodyBytes.
 	MaxBodyBytes int64
 	// MaxConcurrent caps concurrent evaluations; <=0 means defaultMaxConc.
@@ -51,6 +56,7 @@ type Evaluator interface {
 // Handler serves the local API. Build it with New.
 type Handler struct {
 	version   string
+	mode      string
 	ev        Evaluator
 	logger    *slog.Logger
 	tokenHash [32]byte
@@ -78,8 +84,13 @@ func New(cfg Config, ev Evaluator, logger *slog.Logger) (*Handler, error) {
 	if maxConc <= 0 {
 		maxConc = defaultMaxConc
 	}
+	mode := cfg.Mode
+	if mode == "" {
+		mode = defaultMode
+	}
 	return &Handler{
 		version:   cfg.Version,
+		mode:      mode,
 		ev:        ev,
 		logger:    logger,
 		tokenHash: sha256.Sum256([]byte(cfg.Token)),
@@ -214,7 +225,7 @@ func (h *Handler) serveHealth(w http.ResponseWriter, r *http.Request) {
 			"method must be GET", "use GET /healthz", false)
 		return
 	}
-	writeJSON(w, http.StatusOK, healthBody{Status: "ok", Mode: "shadow", Version: h.version})
+	writeJSON(w, http.StatusOK, healthBody{Status: "ok", Mode: h.mode, Version: h.version})
 }
 
 // serveGate evaluates one gate request behind bearer auth.
@@ -253,6 +264,12 @@ func (h *Handler) serveGate(w *statusRecorder, r *http.Request) {
 	}
 	res, err := h.ev.Evaluate(r.Context(), req)
 	if err != nil {
+		if domain.CodeOf(err) == domain.CodeConflict {
+			writeError(w, http.StatusConflict, "conflict",
+				"signalId already used with a different request body",
+				"use a new signalId or send the identical body", false)
+			return
+		}
 		if domain.CodeOf(err) == domain.CodeInvalidRequest {
 			writeError(w, http.StatusBadRequest, "bad_request",
 				"invalid gate request", "fix the request fields and retry", false)
@@ -275,7 +292,7 @@ func (h *Handler) serveGate(w *statusRecorder, r *http.Request) {
 		signalID = req.SignalID
 	}
 	writeJSON(w, http.StatusOK, gateResponse{
-		Mode:     "shadow",
+		Mode:     h.mode,
 		SignalID: signalID,
 		Verdict:  res.Verdict,
 	})
