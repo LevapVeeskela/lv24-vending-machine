@@ -106,8 +106,13 @@ func New(cfg Config, deps ports.Deps) (*Provider, error) {
 		return nil, domain.WrapError(domain.CodeInvalidRequest,
 			"decision-drex: invalid price per billion", err)
 	}
+	base = strings.TrimRight(strings.TrimSpace(base), "/")
 	if strings.TrimSpace(cfg.BaseURL) != "" {
-		base = strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/")
+		clean, verr := validateBaseURL(cfg.BaseURL)
+		if verr != nil {
+			return nil, verr
+		}
+		base = clean
 	}
 	timeout := cfg.Timeout
 	if timeout == 0 {
@@ -120,6 +125,37 @@ func New(cfg Config, deps ports.Deps) (*Provider, error) {
 		price:    price,
 		client:   cloneClient(deps.HTTPClient),
 	}, nil
+}
+
+// validateBaseURL enforces the base URL policy before any network I/O:
+// the override must be an absolute http(s) URL without userinfo, query or
+// fragment. https is always allowed; http only for loopback hosts
+// (127.0.0.1, ::1). Anything else is CodeInvalidRequest.
+func validateBaseURL(raw string) (string, error) {
+	invalid := func() (string, error) {
+		return "", domain.NewError(domain.CodeInvalidRequest,
+			"decision-drex: invalid base URL")
+	}
+	trimmed := strings.TrimSpace(raw)
+	u, err := url.Parse(trimmed)
+	if err != nil || !u.IsAbs() {
+		return invalid()
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "https" && scheme != "http" {
+		return invalid()
+	}
+	if u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		return invalid()
+	}
+	host := u.Hostname()
+	if host == "" {
+		return invalid()
+	}
+	if scheme == "http" && host != "127.0.0.1" && host != "::1" {
+		return invalid()
+	}
+	return strings.TrimRight(trimmed, "/"), nil
 }
 
 // cloneClient copies base (or builds a default client) and disables redirects.
@@ -201,6 +237,7 @@ func (p *Provider) Decide(ctx context.Context, req domain.DecisionRequest) (doma
 	if timeout > 0 {
 		call.Timeout = timeout
 	}
+	start := time.Now()
 	resp, err := call.Do(httpReq)
 	if err != nil {
 		return domain.DecisionResponse{}, mapTransportError(ctx, err)
@@ -211,6 +248,10 @@ func (p *Provider) Decide(ctx context.Context, req domain.DecisionRequest) (doma
 	if err != nil {
 		return domain.DecisionResponse{}, mapTransportError(ctx, err)
 	}
+	elapsed := time.Since(start)
+	if elapsed < 0 {
+		elapsed = 0
+	}
 	if len(raw) > maxBodySize {
 		return domain.DecisionResponse{}, domain.NewError(domain.CodeInvalidOutput,
 			"decision-drex: response body exceeds 1 MiB")
@@ -219,7 +260,12 @@ func (p *Provider) Decide(ctx context.Context, req domain.DecisionRequest) (doma
 	if resp.StatusCode != http.StatusOK {
 		return domain.DecisionResponse{}, mapStatusError(resp.StatusCode, resp.Header.Get("Retry-After"), p.deps.Now(), raw)
 	}
-	return parseResponse(raw, req, p.price)
+	out, err := parseResponse(raw, req, p.price)
+	if err != nil {
+		return domain.DecisionResponse{}, err
+	}
+	out.Usage.LatencyMS = int64(elapsed / time.Millisecond)
+	return out, nil
 }
 
 // errNoSecret hides the secret-store failure detail from the message chain.
@@ -353,9 +399,15 @@ func parseRetryAfter(v string, now time.Time) (time.Duration, bool) {
 
 // validateRequest rejects malformed advisory requests before any I/O.
 func validateRequest(req domain.DecisionRequest) error {
-	if strings.TrimSpace(req.Model) == "" {
+	model := strings.TrimSpace(req.Model)
+	if model == "" {
 		return domain.NewError(domain.CodeInvalidRequest,
 			"decision-drex: request model is empty")
+	}
+	lowered := strings.ToLower(model)
+	if strings.HasSuffix(lowered, "-latest") || strings.HasSuffix(lowered, "-preview") {
+		return domain.NewError(domain.CodeInvalidRequest,
+			"decision-drex: request model alias is not allowed")
 	}
 	if len(req.Questions) == 0 {
 		return domain.NewError(domain.CodeInvalidRequest,
@@ -363,18 +415,41 @@ func validateRequest(req domain.DecisionRequest) error {
 	}
 	seen := make(map[string]struct{}, len(req.Questions))
 	for _, q := range req.Questions {
+		if strings.TrimSpace(q.ID) == "" {
+			return domain.NewError(domain.CodeInvalidRequest,
+				"decision-drex: question id is empty")
+		}
 		if _, dup := seen[q.ID]; dup {
 			return domain.NewError(domain.CodeInvalidRequest,
 				"decision-drex: duplicate question id")
 		}
 		seen[q.ID] = struct{}{}
+		if len(q.Options) > 0 {
+			oseen := make(map[string]struct{}, len(q.Options))
+			for _, o := range q.Options {
+				if strings.TrimSpace(o.Key) == "" {
+					return domain.NewError(domain.CodeInvalidRequest,
+						"decision-drex: option key is empty")
+				}
+				if _, dup := oseen[o.Key]; dup {
+					return domain.NewError(domain.CodeInvalidRequest,
+						"decision-drex: duplicate option key")
+				}
+				oseen[o.Key] = struct{}{}
+			}
+		}
 		switch q.Type {
 		case domain.QuestionChoice:
 			if len(q.Options) < 2 {
 				return domain.NewError(domain.CodeInvalidRequest,
 					"decision-drex: choice needs at least two options")
 			}
-		case domain.QuestionNoul, domain.QuestionScore:
+		case domain.QuestionScore:
+			if len(q.Options) < 1 {
+				return domain.NewError(domain.CodeInvalidRequest,
+					"decision-drex: score needs at least one option")
+			}
+		case domain.QuestionNoul:
 		default:
 			return domain.NewError(domain.CodeInvalidRequest,
 				"decision-drex: unknown question type")
@@ -503,6 +578,10 @@ func parseResponse(raw []byte, req domain.DecisionRequest, price domain.Decimal)
 		return domain.DecisionResponse{}, domain.NewError(domain.CodeInvalidOutput,
 			"decision-drex: answer count does not match question count")
 	}
+	if wr.Usage.InputTokens < 0 || wr.Usage.OutputTokens < 0 {
+		return domain.DecisionResponse{}, domain.NewError(domain.CodeInvalidOutput,
+			"decision-drex: usage token count is negative")
+	}
 	answers := make(map[string]domain.Answer, len(req.Questions))
 	for id, wa := range wr.Answers {
 		q, ok := byID[id]
@@ -525,22 +604,22 @@ func parseResponse(raw []byte, req domain.DecisionRequest, price domain.Decimal)
 		return domain.DecisionResponse{}, domain.WrapError(domain.CodeInvalidOutput,
 			"decision-drex: cannot compute cost", err)
 	}
-	var latency int64
+	var vendorLatency int64
 	switch {
 	case wr.EvaluationTimeMS != nil:
-		latency = int64(math.Round(*wr.EvaluationTimeMS))
+		vendorLatency = int64(math.Round(*wr.EvaluationTimeMS))
 	case wr.LatencyMS != nil:
-		latency = int64(math.Round(*wr.LatencyMS))
+		vendorLatency = int64(math.Round(*wr.LatencyMS))
 	}
 	out := domain.DecisionResponse{
 		Answers:        answers,
 		Model:          wr.Model,
 		RequestedModel: req.Model,
 		Usage: domain.Usage{
-			InputTokens:  wr.Usage.InputTokens,
-			OutputTokens: wr.Usage.OutputTokens,
-			CostUSD:      cost,
-			LatencyMS:    latency,
+			InputTokens:     wr.Usage.InputTokens,
+			OutputTokens:    wr.Usage.OutputTokens,
+			CostUSD:         cost,
+			VendorLatencyMS: vendorLatency,
 		},
 		RequestID: wr.RequestID,
 		Raw:       append(json.RawMessage(nil), raw...),
@@ -579,9 +658,34 @@ func convertAnswer(q domain.Question, wa wireAnswer) (domain.Answer, error) {
 			return domain.Answer{}, domain.NewError(domain.CodeInvalidOutput,
 				"decision-drex: score legend is empty")
 		}
+		if len(wa.Legend) != len(q.Options) {
+			return domain.Answer{}, domain.NewError(domain.CodeInvalidOutput,
+				"decision-drex: score legend length does not match options")
+		}
 		if len(wa.Probabilities) == 0 {
 			return domain.Answer{}, domain.NewError(domain.CodeInvalidOutput,
 				"decision-drex: score probabilities are empty")
+		}
+		if len(wa.Probabilities) != len(wa.Legend) {
+			return domain.Answer{}, domain.NewError(domain.CodeInvalidOutput,
+				"decision-drex: score probability count does not match legend")
+		}
+		sum := 0.0
+		for i := range wa.Legend {
+			p, ok := wa.Probabilities[strconv.Itoa(i)]
+			if !ok {
+				return domain.Answer{}, domain.NewError(domain.CodeInvalidOutput,
+					"decision-drex: score probabilities miss an index")
+			}
+			if math.IsNaN(p) || math.IsInf(p, 0) || p < 0 || p > 1 {
+				return domain.Answer{}, domain.NewError(domain.CodeInvalidOutput,
+					"decision-drex: score probability out of range [0, 1]")
+			}
+			sum += p
+		}
+		if math.Abs(sum-1) > 0.001 {
+			return domain.Answer{}, domain.NewError(domain.CodeInvalidOutput,
+				"decision-drex: score probabilities do not sum to 1")
 		}
 		s := *wa.Score
 		a.Score = &s

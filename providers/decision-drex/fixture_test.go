@@ -170,8 +170,11 @@ func TestCloudFixtureEnvelope(t *testing.T) {
 	if resp.RequestID != "req_9f2c7a1b4e" {
 		t.Fatalf("request id = %q", resp.RequestID)
 	}
-	if resp.Usage.LatencyMS != 104 {
-		t.Fatalf("latency = %d", resp.Usage.LatencyMS)
+	if resp.Usage.LatencyMS != 0 {
+		t.Fatalf("parseResponse must not set wall-clock latency, got %d", resp.Usage.LatencyMS)
+	}
+	if resp.Usage.VendorLatencyMS != 104 {
+		t.Fatalf("vendor latency = %d, want 104", resp.Usage.VendorLatencyMS)
 	}
 	want := domain.MustParseDecimal("0.0000852")
 	if resp.Usage.CostUSD.Cmp(want) != 0 {

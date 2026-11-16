@@ -24,3 +24,14 @@ func TestDecisionConformance(t *testing.T) {
 		return p
 	})
 }
+
+func TestDecisionBaseURLPolicy(t *testing.T) {
+	porttest.DecisionBaseURLConformance(t, func(opts porttest.DecisionOptions, deps ports.Deps) (ports.Decision, error) {
+		return decisiondrex.New(decisiondrex.Config{
+			Profile:         decisiondrex.ProfileDrex,
+			SecretRef:       porttest.DecisionSecretRef,
+			PricePerBillion: opts.PricePerBillion,
+			BaseURL:         opts.BaseURL,
+		}, deps)
+	})
+}

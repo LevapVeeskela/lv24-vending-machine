@@ -111,7 +111,9 @@ func DecisionConformance(t *testing.T, newProvider DecisionFactory) {
 	handler.Store(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	})
+	var hits atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
 		handler.Load().(func(http.ResponseWriter, *http.Request))(w, r)
 	}))
 	t.Cleanup(srv.Close)
@@ -178,8 +180,11 @@ func DecisionConformance(t *testing.T, newProvider DecisionFactory) {
 		if resp.Usage.InputTokens != 1000 || resp.Usage.OutputTokens != 12 {
 			t.Fatalf("usage = %+v", resp.Usage)
 		}
-		if resp.Usage.LatencyMS != 104 {
-			t.Fatalf("latency = %d", resp.Usage.LatencyMS)
+		if resp.Usage.VendorLatencyMS != 104 {
+			t.Fatalf("vendor latency = %d, want 104", resp.Usage.VendorLatencyMS)
+		}
+		if resp.Usage.LatencyMS < 0 {
+			t.Fatalf("measured latency = %d, want >= 0", resp.Usage.LatencyMS)
 		}
 		if resp.Raw == nil || !strings.Contains(string(resp.Raw), "req-test-001") {
 			t.Fatalf("raw response is not preserved")
@@ -580,6 +585,362 @@ func DecisionConformance(t *testing.T, newProvider DecisionFactory) {
 			t.Fatalf("error leaks secret: %v", err)
 		}
 	})
+
+	t.Run("request validation local", func(t *testing.T) {
+		noul := domain.Question{ID: "q", Type: domain.QuestionNoul, Instructions: "?"}
+		cases := map[string]domain.DecisionRequest{
+			"model alias latest": {
+				Model: "drex-max-latest", Questions: []domain.Question{noul},
+			},
+			"model alias latest upper": {
+				Model: "DREX-MAX-LATEST", Questions: []domain.Question{noul},
+			},
+			"model alias preview": {
+				Model: "jev-preview", Questions: []domain.Question{noul},
+			},
+			"model alias preview mixed": {
+				Model: "Drex-Max-Preview", Questions: []domain.Question{noul},
+			},
+			"empty question id": {
+				Model: "m",
+				Questions: []domain.Question{
+					{ID: "", Type: domain.QuestionNoul, Instructions: "?"},
+				},
+			},
+			"whitespace question id": {
+				Model: "m",
+				Questions: []domain.Question{
+					{ID: "   ", Type: domain.QuestionNoul, Instructions: "?"},
+				},
+			},
+			"duplicate question ids": {
+				Model:     "m",
+				Questions: []domain.Question{noul, noul},
+			},
+			"empty option key": {
+				Model: "m",
+				Questions: []domain.Question{{
+					ID: "c", Type: domain.QuestionChoice, Instructions: "pick",
+					Options: []domain.Option{{Key: "", Description: "x"}, {Key: "b", Description: "y"}},
+				}},
+			},
+			"whitespace option key": {
+				Model: "m",
+				Questions: []domain.Question{{
+					ID: "c", Type: domain.QuestionChoice, Instructions: "pick",
+					Options: []domain.Option{{Key: "  ", Description: "x"}, {Key: "b", Description: "y"}},
+				}},
+			},
+			"duplicate option keys": {
+				Model: "m",
+				Questions: []domain.Question{{
+					ID: "c", Type: domain.QuestionChoice, Instructions: "pick",
+					Options: []domain.Option{{Key: "a", Description: "x"}, {Key: "a", Description: "y"}},
+				}},
+			},
+			"score without options": {
+				Model: "m",
+				Questions: []domain.Question{
+					{ID: "s", Type: domain.QuestionScore, Instructions: "rate"},
+				},
+			},
+		}
+		for name, req := range cases {
+			t.Run(name, func(t *testing.T) {
+				before := hits.Load()
+				_, err := decide(req)
+				if domain.CodeOf(err) != domain.CodeInvalidRequest {
+					t.Fatalf("expected invalid_request, got %v", err)
+				}
+				if hits.Load() != before {
+					t.Fatalf("validation must happen before any HTTP for %s", name)
+				}
+			})
+		}
+	})
+
+	t.Run("score validation", func(t *testing.T) {
+		validAnswers := func() map[string]any {
+			return map[string]any{
+				"team": map[string]any{
+					"type": "choice", "choice": "alpha", "confidence": 0.55,
+					"probabilities": map[string]any{"alpha": 0.7, "beta": 0.2, "gamma": 0.1},
+				},
+				"refund": map[string]any{"type": "noul", "noul": 0.93},
+				"urgency": map[string]any{"type": "score", "score": 1.0,
+					"legend":        []any{"Routine", "Soon", "Urgent"},
+					"probabilities": map[string]any{"0": 0.3, "1": 0.3, "2": 0.4},
+					"confidence":    0.2},
+			}
+		}
+		cases := map[string]func(u map[string]any){
+			"empty legend": func(u map[string]any) {
+				u["legend"] = []any{}
+			},
+			"legend short": func(u map[string]any) {
+				u["legend"] = []any{"Routine", "Soon"}
+			},
+			"legend long": func(u map[string]any) {
+				u["legend"] = []any{"Routine", "Soon", "Urgent", "Critical"}
+			},
+			"probabilities empty": func(u map[string]any) {
+				u["probabilities"] = map[string]any{}
+			},
+			"probability count mismatch": func(u map[string]any) {
+				u["probabilities"] = map[string]any{"0": 0.5, "1": 0.5}
+			},
+			"extra key": func(u map[string]any) {
+				u["probabilities"].(map[string]any)["3"] = 0.0
+			},
+			"missing index": func(u map[string]any) {
+				delete(u["probabilities"].(map[string]any), "2")
+			},
+			"wrong key": func(u map[string]any) {
+				probs := u["probabilities"].(map[string]any)
+				delete(probs, "2")
+				probs["x"] = 0.4
+			},
+			"probability below zero": func(u map[string]any) {
+				u["probabilities"].(map[string]any)["0"] = -0.1
+			},
+			"probability above one": func(u map[string]any) {
+				u["probabilities"].(map[string]any)["0"] = 1.2
+			},
+			"sum not one": func(u map[string]any) {
+				u["probabilities"] = map[string]any{"0": 0.3, "1": 0.3, "2": 0.2}
+			},
+			"score missing": func(u map[string]any) {
+				delete(u, "score")
+			},
+			"score string": func(u map[string]any) {
+				u["score"] = "high"
+			},
+			"confidence string": func(u map[string]any) {
+				u["confidence"] = "high"
+			},
+		}
+		for name, mutate := range cases {
+			t.Run(name, func(t *testing.T) {
+				answers := validAnswers()
+				mutate(answers["urgency"].(map[string]any))
+				raw, _ := json.Marshal(map[string]any{
+					"model": "m", "answers": answers,
+					"usage": map[string]any{"input_tokens": 10, "output_tokens": 5},
+				})
+				setHandler(func(w http.ResponseWriter, _ *http.Request) {
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write(raw)
+				})
+				_, err := decide(baseReq())
+				if domain.CodeOf(err) != domain.CodeInvalidOutput {
+					t.Fatalf("%s: expected invalid_output, got %v", name, err)
+				}
+			})
+		}
+	})
+
+	t.Run("score confidence passthrough", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			body string
+		}{
+			{"arbitrary confidence kept", `{"model":"m","answers":{
+				"team":{"type":"choice","choice":"alpha","confidence":0.55,
+				"probabilities":{"alpha":0.7,"beta":0.2,"gamma":0.1}},
+				"refund":{"type":"noul","noul":0.93},
+				"urgency":{"type":"score","score":1.0,
+				"legend":["Routine","Soon","Urgent"],
+				"probabilities":{"0":0.3,"1":0.3,"2":0.4},"confidence":0.99}},
+				"usage":{"input_tokens":10,"output_tokens":5}}`},
+			{"missing confidence accepted", `{"model":"m","answers":{
+				"team":{"type":"choice","choice":"alpha","confidence":0.55,
+				"probabilities":{"alpha":0.7,"beta":0.2,"gamma":0.1}},
+				"refund":{"type":"noul","noul":0.93},
+				"urgency":{"type":"score","score":1.0,
+				"legend":["Routine","Soon","Urgent"],
+				"probabilities":{"0":0.3,"1":0.3,"2":0.4}}},
+				"usage":{"input_tokens":10,"output_tokens":5}}`},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				setHandler(func(w http.ResponseWriter, _ *http.Request) {
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte(tc.body))
+				})
+				resp, err := decide(baseReq())
+				if err != nil {
+					t.Fatalf("Decide: %v", err)
+				}
+				if tc.name == "arbitrary confidence kept" {
+					got := resp.Answers["urgency"].Confidence
+					if got == nil || *got != 0.99 {
+						t.Fatalf("confidence = %v, want 0.99 as sent", got)
+					}
+				}
+			})
+		}
+	})
+
+	t.Run("negative usage", func(t *testing.T) {
+		bodies := map[string]string{
+			"negative input tokens": `{"model":"m","answers":{
+				"team":{"type":"choice","choice":"alpha","confidence":0.55,
+				"probabilities":{"alpha":0.7,"beta":0.2,"gamma":0.1}},
+				"refund":{"type":"noul","noul":0.93},
+				"urgency":{"type":"score","score":1.0,
+				"legend":["Routine","Soon","Urgent"],
+				"probabilities":{"0":0.3,"1":0.3,"2":0.4},"confidence":0.2}},
+				"usage":{"input_tokens":-1,"output_tokens":5}}`,
+			"negative output tokens": `{"model":"m","answers":{
+				"team":{"type":"choice","choice":"alpha","confidence":0.55,
+				"probabilities":{"alpha":0.7,"beta":0.2,"gamma":0.1}},
+				"refund":{"type":"noul","noul":0.93},
+				"urgency":{"type":"score","score":1.0,
+				"legend":["Routine","Soon","Urgent"],
+				"probabilities":{"0":0.3,"1":0.3,"2":0.4},"confidence":0.2}},
+				"usage":{"input_tokens":10,"output_tokens":-5}}`,
+		}
+		for name, body := range bodies {
+			t.Run(name, func(t *testing.T) {
+				setHandler(func(w http.ResponseWriter, _ *http.Request) {
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte(body))
+				})
+				_, err := decide(baseReq())
+				if domain.CodeOf(err) != domain.CodeInvalidOutput {
+					t.Fatalf("%s: expected invalid_output, got %v", name, err)
+				}
+			})
+		}
+	})
+
+	t.Run("latency split", func(t *testing.T) {
+		setHandler(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(decisionOKBody("drex-max-v1.1", 1000, 104)))
+		})
+		resp, err := decide(baseReq())
+		if err != nil {
+			t.Fatalf("Decide: %v", err)
+		}
+		if resp.Usage.VendorLatencyMS != 104 {
+			t.Fatalf("vendor latency = %d, want 104", resp.Usage.VendorLatencyMS)
+		}
+		if resp.Usage.LatencyMS < 0 {
+			t.Fatalf("measured latency = %d, want >= 0", resp.Usage.LatencyMS)
+		}
+		if resp.Raw == nil || !strings.Contains(string(resp.Raw), "req-test-001") {
+			t.Fatalf("raw response is not preserved")
+		}
+
+		fallback := `{"model":"m","answers":{
+			"team":{"type":"choice","choice":"alpha","confidence":0.55,
+			"probabilities":{"alpha":0.7,"beta":0.2,"gamma":0.1}},
+			"refund":{"type":"noul","noul":0.93},
+			"urgency":{"type":"score","score":1.0,
+			"legend":["Routine","Soon","Urgent"],
+			"probabilities":{"0":0.3,"1":0.3,"2":0.4},"confidence":0.2}},
+			"usage":{"input_tokens":10,"output_tokens":5},
+			"request_id":"req-fallback","latency_ms":77}`
+		setHandler(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(fallback))
+		})
+		resp, err = decide(baseReq())
+		if err != nil {
+			t.Fatalf("Decide: %v", err)
+		}
+		if resp.Usage.VendorLatencyMS != 77 {
+			t.Fatalf("vendor latency = %d, want 77 from latency_ms", resp.Usage.VendorLatencyMS)
+		}
+		if resp.Usage.LatencyMS < 0 {
+			t.Fatalf("measured latency = %d, want >= 0", resp.Usage.LatencyMS)
+		}
+
+		absent := `{"model":"m","answers":{
+			"team":{"type":"choice","choice":"alpha","confidence":0.55,
+			"probabilities":{"alpha":0.7,"beta":0.2,"gamma":0.1}},
+			"refund":{"type":"noul","noul":0.93},
+			"urgency":{"type":"score","score":1.0,
+			"legend":["Routine","Soon","Urgent"],
+			"probabilities":{"0":0.3,"1":0.3,"2":0.4},"confidence":0.2}},
+			"usage":{"input_tokens":10,"output_tokens":5},
+			"request_id":"req-absent"}`
+		setHandler(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(absent))
+		})
+		resp, err = decide(baseReq())
+		if err != nil {
+			t.Fatalf("Decide: %v", err)
+		}
+		if resp.Usage.VendorLatencyMS != 0 {
+			t.Fatalf("vendor latency = %d, want 0 when absent", resp.Usage.VendorLatencyMS)
+		}
+		if resp.Usage.LatencyMS < 0 {
+			t.Fatalf("measured latency = %d, want >= 0", resp.Usage.LatencyMS)
+		}
+	})
+}
+
+// DecisionConstructor builds the provider under test for base URL policy
+// checks, reporting construction errors instead of failing the test.
+type DecisionConstructor func(opts DecisionOptions, deps ports.Deps) (ports.Decision, error)
+
+// DecisionBaseURLConformance checks the New() base URL policy shared by
+// decision adapters: absolute http(s) URLs without userinfo, query or
+// fragment; https is always allowed, http only for the 127.0.0.1 and ::1
+// loopback hosts.
+func DecisionBaseURLConformance(t *testing.T, build DecisionConstructor) {
+	t.Helper()
+
+	deps := ports.Deps{Secrets: mapSecretStore{DecisionSecretRef: "s"}}
+
+	allowed := []string{
+		"https://example.com",
+		"https://example.com/base/",
+		"http://127.0.0.1:11434/v1",
+		"http://127.0.0.1",
+		"http://[::1]:8080",
+		"http://[::1]",
+	}
+	for _, base := range allowed {
+		t.Run("allowed "+base, func(t *testing.T) {
+			if _, err := build(DecisionOptions{BaseURL: base}, deps); err != nil {
+				t.Fatalf("New(%q): expected success, got %v", base, err)
+			}
+		})
+	}
+
+	rejected := []string{
+		"http://localhost:11434/v1",
+		"http://localhost",
+		"http://0.0.0.0:8080",
+		"http://0.0.0.0",
+		"http://example.com",
+		"http://127.0.0.1.evil.com",
+		"http://[::2]",
+		"http://[::ffff:127.0.0.1]",
+		"https://example.com?x=1",
+		"https://example.com#frag",
+		"https://user@example.com",
+		"https://user:pass@example.com",
+		"ftp://example.com/v1",
+		"ws://example.com",
+		"example.com/v1",
+		"/relative/path",
+		"?x=1",
+	}
+	for _, base := range rejected {
+		t.Run("rejected "+base, func(t *testing.T) {
+			_, err := build(DecisionOptions{BaseURL: base}, deps)
+			if err == nil {
+				t.Fatalf("New(%q): expected invalid_request, got nil", base)
+			}
+			if domain.CodeOf(err) != domain.CodeInvalidRequest {
+				t.Fatalf("New(%q): expected invalid_request, got %v", base, err)
+			}
+		})
+	}
 }
 
 func readAll(t *testing.T, r *http.Request) []byte {
