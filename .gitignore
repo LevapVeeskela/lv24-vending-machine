@@ -32,6 +32,10 @@ node_modules/
 apps/*/dist/
 packages/*/dist/
 
+# Python
+__pycache__/
+*.pyc
+
 # Rust / Tauri
 target/
 apps/desktop/src-tauri/target/
