@@ -279,15 +279,13 @@ func TestModeReporting(t *testing.T) {
 			if rec.Code != http.StatusOK {
 				t.Fatalf("gate status = %d, want 200 (%s)", rec.Code, rec.Body.String())
 			}
-			// The generated contract enum pins mode to "shadow", so the raw
-			// JSON field is checked here instead of GateVerdictResponse.
-			var gb struct {
-				Mode string `json:"mode"`
-			}
+			// The contract enum now covers shadow|paper|sandbox, so the response
+			// decodes into GateVerdictResponse directly.
+			var gb contracts.GateVerdictResponse
 			if err := json.Unmarshal(rec.Body.Bytes(), &gb); err != nil {
 				t.Fatalf("decode gate: %v", err)
 			}
-			if gb.Mode != tc.want {
+			if string(gb.Mode) != tc.want {
 				t.Fatalf("gate mode = %q, want %q", gb.Mode, tc.want)
 			}
 		})

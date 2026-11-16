@@ -782,7 +782,7 @@ type GateVerdict struct {
 }
 
 type GateVerdictResponse struct {
-	// Mode corresponds to the JSON schema field "mode".
+	// Configured runtime mode of the gate.
 	Mode GateVerdictResponseMode `json:"mode"`
 
 	// SignalID corresponds to the JSON schema field "signalId".
@@ -794,10 +794,14 @@ type GateVerdictResponse struct {
 
 type GateVerdictResponseMode string
 
+const GateVerdictResponseModePaper GateVerdictResponseMode = "paper"
+const GateVerdictResponseModeSandbox GateVerdictResponseMode = "sandbox"
 const GateVerdictResponseModeShadow GateVerdictResponseMode = "shadow"
 
 var enumValues_GateVerdictResponseMode = []interface{}{
 	"shadow",
+	"paper",
+	"sandbox",
 }
 
 // UnmarshalJSON implements json.Unmarshaler.

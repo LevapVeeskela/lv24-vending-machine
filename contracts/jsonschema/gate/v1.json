@@ -60,7 +60,10 @@
       "additionalProperties": false,
       "required": ["mode", "signalId", "verdict"],
       "properties": {
-        "mode": { "enum": ["shadow"] },
+        "mode": {
+          "description": "Configured runtime mode of the gate.",
+          "enum": ["shadow", "paper", "sandbox"]
+        },
         "signalId": { "type": "string", "minLength": 1 },
         "verdict": { "$ref": "#/$defs/GateVerdict" }
       }
