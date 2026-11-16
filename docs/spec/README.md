@@ -26,9 +26,10 @@ ADR: [0001 Go](../adr/0001-go-core.md) · [0002 contract-first](../adr/0002-cont
 [0006 decision models](../adr/0006-decision-models.md) ·
 [0007 license & stores](../adr/0007-license-and-stores.md)
 
-Предложены ревью (proposed): [0008 wedge-first scope](../adr/0008-wedge-first-scope.md) ·
-[0009 BYOK и предмет продажи](../adr/0009-byok-and-what-we-sell.md) ·
-[0010 ограничения decision-моделей](../adr/0010-decision-model-guardrails.md)
+По итогам ревью: [0008 wedge-first scope](../adr/0008-wedge-first-scope.md) (accepted) ·
+[0009 два режима оплаты ИИ](../adr/0009-byok-and-what-we-sell.md) (accepted) ·
+[0010 ограничения decision-моделей](../adr/0010-decision-model-guardrails.md) (proposed) ·
+[0011 география и издатель](../adr/0011-geography-and-publisher.md) (accepted)
 
 Ревью: [вердикт](../review/00-verdict.md) · [находки](../review/01-findings.md) ·
 [фичи](../review/02-features.md) · [план v0.2](../review/03-plan-v2.md)
@@ -73,7 +74,7 @@ vend serve            # desktop/web/mobile подключаются к этом�
 
 - Ресёрч: 13 направлений, клоны и разборы в `ideas/` (вне репозитория; `ideas/INDEX.md`).
 - Спека: draft v0.1; `00-vision.md` и `10-roadmap.md` — v0.2 по итогам скептического
-  ревью (ветка `review/skeptical-v1`, ждёт решения владельца). Документы 01–09
+  ревью, приняты владельцем 2026-11-16 (ветка `review/skeptical-v1`). Документы 01–09
   описывают целевую платформу; состав v1 сужен ADR-0008.
 - Известное расхождение: wire-пример в `04-providers.md §10` не совпадает с API
   вендора — исправляется в M0 (ADR-0010).
