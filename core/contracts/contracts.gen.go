@@ -1517,6 +1517,10 @@ func (j *ReliabilityBucket) UnmarshalJSON(value []byte) error {
 
 // Summary of labeled outcomes and gate performance.
 type Report struct {
+	// Number of distinct UTC dates with at least one accepted gate request, matching
+	// the human window line.
+	ActiveDays *int `json:"activeDays,omitempty,omitzero"`
+
 	// Arena corresponds to the JSON schema field "arena".
 	Arena *ArenaReport `json:"arena,omitempty,omitzero"`
 
@@ -1535,6 +1539,10 @@ type Report struct {
 
 	// Comparisons corresponds to the JSON schema field "comparisons".
 	Comparisons *ReportComparisons `json:"comparisons,omitempty,omitzero"`
+
+	// Inclusive UTC-day span of accepted gate requests, matching the human window
+	// line.
+	Days *int `json:"days,omitempty,omitzero"`
 
 	// DecisionCostUSD corresponds to the JSON schema field "decisionCostUsd".
 	DecisionCostUSD Decimal `json:"decisionCostUsd"`
@@ -1814,6 +1822,9 @@ func (j *Report) UnmarshalJSON(value []byte) error {
 	if err := json.Unmarshal(value, &plain); err != nil {
 		return err
 	}
+	if plain.ActiveDays != nil && 0 > *plain.ActiveDays {
+		return fmt.Errorf("field %s: must be >= %v", "activeDays", 0)
+	}
 	if plain.AwaitingLabeling != nil && 0 > *plain.AwaitingLabeling {
 		return fmt.Errorf("field %s: must be >= %v", "awaitingLabeling", 0)
 	}
@@ -1822,6 +1833,9 @@ func (j *Report) UnmarshalJSON(value []byte) error {
 	}
 	if plain.BackfillLabeled != nil && 0 > *plain.BackfillLabeled {
 		return fmt.Errorf("field %s: must be >= %v", "backfillLabeled", 0)
+	}
+	if plain.Days != nil && 0 > *plain.Days {
+		return fmt.Errorf("field %s: must be >= %v", "days", 0)
 	}
 	if 0 > plain.LabeledCount {
 		return fmt.Errorf("field %s: must be >= %v", "labeledCount", 0)

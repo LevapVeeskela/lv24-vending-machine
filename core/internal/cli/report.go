@@ -107,17 +107,21 @@ func (r *runner) cmdGateReport(args []string) int {
 		return r.fail(jsonOut, exitGeneral, codeGeneral, err.Error(),
 			"check the database file is a valid sqlite database", false, nil)
 	}
-	if *share {
-		return r.printShare(ctx, jr, rep, *shareOut)
-	}
-	if jsonOut {
-		r.printJSON(rep)
-		return exitOK
-	}
 	win, err := journalWindow(ctx, jr)
 	if err != nil {
 		return r.fail(jsonOut, exitGeneral, codeGeneral, err.Error(),
 			"check the database file is a valid sqlite database", false, nil)
+	}
+	// The window belongs to the report output: the human line and the JSON
+	// fields days/activeDays always carry the same numbers.
+	rep.Days = win.days
+	rep.ActiveDays = win.active
+	if *share {
+		return r.printShare(rep, *shareOut, win)
+	}
+	if jsonOut {
+		r.printJSON(rep)
+		return exitOK
 	}
 	printReportHuman(r.stdout, rep, b.Days(), win)
 	return exitOK
@@ -239,12 +243,7 @@ func shortPolicy(hash string) string {
 
 // printShare writes the sanitized markdown summary either to stdout or to
 // path, and never echoes journal content beyond aggregate counts.
-func (r *runner) printShare(ctx context.Context, jr ports.Journal, rep domain.Report, path string) int {
-	win, err := journalWindow(ctx, jr)
-	if err != nil {
-		return r.fail(false, exitGeneral, codeGeneral, err.Error(),
-			"check the database file is a valid sqlite database", false, nil)
-	}
+func (r *runner) printShare(rep domain.Report, path string, win reportWindow) int {
 	body := shareMarkdown(rep, r.ver, win)
 	if path == "" {
 		fmt.Fprint(r.stdout, body)

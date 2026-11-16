@@ -266,6 +266,8 @@ func TestParityReport(t *testing.T) {
 		OtherLabelParams:     2,
 		BackfillLabeled:      5,
 		BackfillExcluded:     2,
+		Days:                 7,
+		ActiveDays:           5,
 		Assumptions: &domain.ReportAssumptions{
 			HorizonBars:      12,
 			FeeBpsRoundTrip:  20,
@@ -341,6 +343,9 @@ func TestParityReport(t *testing.T) {
 	}
 	if c.LabeledCount != 42 || !c.Sufficient || c.VerdictCounts["ALLOW"] != 25 {
 		t.Fatalf("round-trip mismatch: %+v", c)
+	}
+	if c.Days == nil || *c.Days != 7 || c.ActiveDays == nil || *c.ActiveDays != 5 {
+		t.Fatalf("window lost on the wire: %+v", c)
 	}
 	if string(c.DecisionCostUSD) != "0.0003024" {
 		t.Fatalf("money lost on the wire: %+v", c)

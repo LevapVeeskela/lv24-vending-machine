@@ -6,6 +6,8 @@
   "decisionCostUsd": "0.0003024",
   "latencyP50Ms": 11,
   "latencyP95Ms": 38,
+  "days": 7,
+  "activeDays": 5,
   "otherLabelParams": 2,
   "assumptions": {
     "horizonBars": 12,

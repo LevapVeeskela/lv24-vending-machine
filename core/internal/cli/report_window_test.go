@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -100,5 +101,36 @@ func TestGateReportWindowEmptyJournal(t *testing.T) {
 	}
 	if !strings.Contains(human, "window: days=0 active=0") {
 		t.Fatalf("human report misses the window: %q", human)
+	}
+}
+
+// TestGateReportJSONWindow requires the JSON window fields to mirror the human
+// window line.
+func TestGateReportJSONWindow(t *testing.T) {
+	env, stdout, stderr, cfgPath, dataDir := initTestEnv(t)
+	day0 := time.Date(2026, 11, 10, 10, 0, 0, 0, time.UTC)
+	appendGateRequest(t, env, dataDir, "sig-1", day0, day0)
+	appendGateRequest(t, env, dataDir, "sig-2", day0, day0.Add(13*time.Hour))
+	appendGateRequest(t, env, dataDir, "sig-3", day0, day0.AddDate(0, 0, 2))
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := runArgs(env, "gate", "report", "--json",
+		"--config", cfgPath, "--data-dir", dataDir); code != 0 {
+		t.Fatalf("gate report --json = %d, stderr=%s", code, stderr.String())
+	}
+	var rep struct {
+		Days          int            `json:"days"`
+		ActiveDays    int            `json:"activeDays"`
+		VerdictCounts map[string]int `json:"verdictCounts"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &rep); err != nil {
+		t.Fatalf("decode report JSON: %v\n%s", err, stdout.String())
+	}
+	if rep.Days != 3 || rep.ActiveDays != 2 {
+		t.Fatalf("json window = days %d active %d, want 3/2", rep.Days, rep.ActiveDays)
+	}
+	if rep.VerdictCounts == nil {
+		t.Fatalf("json report lost verdictCounts: %s", stdout.String())
 	}
 }
