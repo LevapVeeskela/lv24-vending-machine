@@ -1,0 +1,192 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lv24.by/contracts/jsonschema/report/v1.json",
+  "title": "Report",
+  "description": "Summary of labeled outcomes and gate performance.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["generatedAt", "labeledCount", "sufficient", "verdictCounts", "decisionCostUsd", "latencyP50Ms", "latencyP95Ms"],
+  "properties": {
+    "generatedAt": {
+      "description": "See common $defs/Timestamp. Inlined so the generated Go field is time.Time.",
+      "type": "string",
+      "format": "date-time"
+    },
+    "labeledCount": { "type": "integer", "minimum": 0 },
+    "awaitingLabeling": {
+      "description": "Entry signals with neither a labeled outcome nor an outcome.unlabelable record yet.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "noOutcomeByDeadline": {
+      "description": "Entry signals recorded as unlabelable when their labeling deadline passed.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "sufficient": { "type": "boolean" },
+    "verdictCounts": {
+      "type": "object",
+      "additionalProperties": { "type": "integer", "minimum": 0 }
+    },
+    "decisionCostUsd": { "$ref": "../common/v1.json#/$defs/Decimal" },
+    "latencyP50Ms": { "type": "integer", "minimum": 0 },
+    "latencyP95Ms": { "type": "integer", "minimum": 0 },
+    "comparisons": { "$ref": "#/$defs/ReportComparisons" },
+    "policyHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "otherPolicyDecisions": { "type": "integer", "minimum": 0 },
+    "otherLabelParams": {
+      "description": "Number of labeled outcomes produced with a different horizon/fee pair than the report assumptions.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "backfillLabeled": { "type": "integer", "minimum": 0 },
+    "backfillExcluded": { "type": "integer", "minimum": 0 },
+    "assumptions": { "$ref": "#/$defs/ReportAssumptions" },
+    "arena": { "$ref": "#/$defs/ArenaReport" }
+  },
+  "$defs": {
+    "ReportComparisons": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["allEntriesReturn", "allowReturn", "rejectedAvgReturn", "brier", "ece", "reliability", "byModel"],
+      "properties": {
+        "allEntriesReturn": { "$ref": "../common/v1.json#/$defs/Decimal" },
+        "allowReturn": { "$ref": "../common/v1.json#/$defs/Decimal" },
+        "rejectedAvgReturn": { "$ref": "../common/v1.json#/$defs/Decimal" },
+        "brier": { "type": "number", "minimum": 0, "maximum": 1 },
+        "ece": { "type": "number", "minimum": 0, "maximum": 1 },
+        "reliability": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ReliabilityBucket" }
+        },
+        "byModel": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ModelBreakdown" }
+        },
+        "groups": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/GroupStats" }
+        },
+        "difference": { "$ref": "#/$defs/DifferenceStats" },
+        "baseRate": { "type": "number", "minimum": 0, "maximum": 1 },
+        "constantBrier": { "type": "number", "minimum": 0, "maximum": 1 },
+        "brierSkillScore": { "type": "number" },
+        "auc": { "type": "number", "minimum": 0, "maximum": 1 },
+        "calibrationCount": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "ReliabilityBucket": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["lowerBound", "count", "meanPredicted", "observedRate"],
+      "properties": {
+        "lowerBound": { "type": "number", "minimum": 0, "maximum": 1 },
+        "count": { "type": "integer", "minimum": 0 },
+        "meanPredicted": { "type": "number", "minimum": 0, "maximum": 1 },
+        "observedRate": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "ModelBreakdown": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model", "count", "brier", "ece", "netReturnSum", "costUsd"],
+      "properties": {
+        "model": { "type": "string", "minLength": 1 },
+        "count": { "type": "integer", "minimum": 0 },
+        "brier": { "type": "number", "minimum": 0, "maximum": 1 },
+        "ece": { "type": "number", "minimum": 0, "maximum": 1 },
+        "netReturnSum": { "$ref": "../common/v1.json#/$defs/Decimal" },
+        "costUsd": { "$ref": "../common/v1.json#/$defs/Decimal" },
+        "avgNetReturn": { "$ref": "../common/v1.json#/$defs/Decimal" }
+      }
+    },
+    "GroupStats": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["count", "sumNetReturn", "avgNetReturn"],
+      "properties": {
+        "count": { "type": "integer", "minimum": 0 },
+        "sumNetReturn": { "$ref": "../common/v1.json#/$defs/Decimal" },
+        "avgNetReturn": { "$ref": "../common/v1.json#/$defs/Decimal" }
+      }
+    },
+    "DifferenceStats": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mean", "low", "high", "containsZero", "bootstrapReps", "days"],
+      "properties": {
+        "mean": { "$ref": "../common/v1.json#/$defs/Decimal" },
+        "low": { "$ref": "../common/v1.json#/$defs/Decimal" },
+        "high": { "$ref": "../common/v1.json#/$defs/Decimal" },
+        "containsZero": { "type": "boolean" },
+        "bootstrapReps": { "type": "integer", "minimum": 0 },
+        "days": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "ReportAssumptions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["horizonBars", "feeBpsRoundTrip", "priceSource", "equalSize", "noSlippage", "noFunding"],
+      "properties": {
+        "horizonBars": { "type": "integer" },
+        "feeBpsRoundTrip": { "type": "integer" },
+        "priceSource": { "type": "string" },
+        "equalSize": { "type": "boolean" },
+        "noSlippage": { "type": "boolean" },
+        "noFunding": { "type": "boolean" },
+        "entryLagMedian": {
+          "description": "Median entry lag as a fraction of one bar.",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "entryLagP95": {
+          "description": "95th percentile entry lag as a fraction of one bar.",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "entryLagMedianMs": {
+          "description": "Median entry lag in milliseconds, over outcomes that recorded entryLagMs.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "entryLagP95Ms": {
+          "description": "95th percentile entry lag in milliseconds.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "entryShifted": {
+          "description": "Number of labeled outcomes whose entry bar was shifted.",
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "ArenaModelStats": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model", "verdicts", "avgAllowReturn", "auc", "costUsd"],
+      "properties": {
+        "model": { "type": "string", "minLength": 1 },
+        "verdicts": { "type": "integer", "minimum": 0 },
+        "avgAllowReturn": { "$ref": "../common/v1.json#/$defs/Decimal" },
+        "auc": { "type": "number", "minimum": 0, "maximum": 1 },
+        "costUsd": { "$ref": "../common/v1.json#/$defs/Decimal" }
+      }
+    },
+    "ArenaReport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["decisions", "agreementShare", "models"],
+      "properties": {
+        "decisions": { "type": "integer", "minimum": 0 },
+        "agreementShare": { "type": "number", "minimum": 0, "maximum": 1 },
+        "models": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ArenaModelStats" }
+        }
+      }
+    }
+  }
+}

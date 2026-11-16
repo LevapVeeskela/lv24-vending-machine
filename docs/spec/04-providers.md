@@ -362,21 +362,27 @@ type DecisionResponse struct {
 }
 ```
 
-Wire-формат (эталон — Drex `POST /v1/systemone`, Jev совместим):
+Wire-формат System One (эталон — Drex `POST /v1/systemone`, Jev совместим).
+Исправлено в v0.2 по документации вендора (ADR-0010; источники —
+[API reference](https://console.nace.ai/docs/drex/api-reference/systemone) и
+`docs/request-format.md` репозитория `nace-ai/drex-decision-models`):
 
 ```json
 {
   "model": "drex-max-v1.1",
-  "state": {"text": "BTC/USDT 1h: close 59812.5, ema200 58210.5, ..."},
-  "assets": {"chart_1h": "<base64 png>"},
+  "state": {"symbol": "BTC/USDT", "tf": "1h", "close": "59812.5", "ema200": "58210.5", "volume_z": 2.3},
   "questions": {
     "action": {
       "type": "choice",
-      "instructions": "Выбери действие на следующем баре",
-      "criteria": "учитывай тренд, объём, funding",
-      "options": {"buy": {}, "sell": {}, "hold": {}}
+      "instructions": "Какое действие на следующем баре?",
+      "criteria": {
+        "buy": "тренд вверх подтверждён объёмом",
+        "sell": "тренд вниз подтверждён объёмом",
+        "hold": "нет подтверждённого направления"
+      }
     },
-    "size_ok": {"type": "noul", "instructions": "Нотионал в пределах политики?"}
+    "size_ok": {"type": "noul", "instructions": "Нотионал в пределах политики?"},
+    "setup": {"type": "score", "instructions": "Качество сетапа", "criteria": ["слабый", "рабочий", "сильный"]}
   }
 }
 ```
@@ -387,35 +393,59 @@ Wire-формат (эталон — Drex `POST /v1/systemone`, Jev совмес�
 {
   "model": "drex-max-v1.1",
   "answers": {
-    "action": {"choice": "buy", "probabilities": {"buy": 0.62, "sell": 0.11, "hold": 0.27}, "confidence": 0.43},
-    "size_ok": {"noul": "yes", "probabilities": {"yes": 0.91, "no": 0.04, "unsure": 0.05}, "confidence": 0.82}
+    "action": {"type": "choice", "choice": "buy", "confidence": 0.43,
+               "probabilities": {"buy": 0.62, "sell": 0.11, "hold": 0.27}},
+    "size_ok": {"type": "noul", "noul": 0.91},
+    "setup": {"type": "score", "score": 1.3362, "legend": ["слабый", "рабочий", "сильный"],
+              "probabilities": {"0": 0.2489, "1": 0.166, "2": 0.5851}, "confidence": 0.6681}
   },
-  "usage": {"input_tokens": 1420, "output_tokens": 12}
+  "usage": {"input_tokens": 1420, "output_tokens": 12},
+  "request_id": "…",
+  "evaluation_time_ms": 104
 }
 ```
 
 Ключевые детали контракта:
 
-- Порядок ключей в `options` задаёт порядок вариантов; адаптер сохраняет его.
-- `confidence` — **концентрация**, а не P(правоты):
+- Варианты всех типов передаются в `criteria`: объект «ключ → описание» для
+  `choice`, упорядоченный массив уровней для `score`, необязательные
+  `criteria.true`/`criteria.false` для `noul`. Поля `options` на проводе нет.
+- Порядок ключей `criteria` задаёт порядок вариантов. Go-`map` порядок теряет,
+  поэтому в порте варианты — срез, а JSON запроса адаптер собирает сам.
+- `noul` в ответе — число от 0 до 1 (вероятность «да»), без `probabilities`.
+  Облачный Drex добавляет `confidence = max(noul, 1 − noul)`; локальный сервер — нет.
+- `confidence` для `choice` — **концентрация**, а не P(правоты):
   `C = (p_max − 1/n) / (1 − 1/n)`. При двух вариантах `C = 0.5` ⇔ `p_max = 0.75`.
   Порог в политике ставится на `p_max` исполняемого варианта, отдельно на вопрос.
-- Батч: несколько `requests` в одном вызове (до 1024) — для сканов watchlist.
-- Изображения — через `assets` + отдельный заголовок (у Drex
-  `TypeSafe-Danger-Zone-Images`), лимит на размер и число.
-- `output_tokens` — токены сериализованного ответа, обычно не тарифицируются;
-  вход тарифицируется, стоимость пишется в `usage.cost`.
-- Модель пинится `drex-max-v1.1`; `drex-latest`/алиасы в prod запрещены, иначе
-  решения невоспроизводимы.
+  Адаптер пересчитывает `C` и сверяет с ответом. Для `score` формула вендора
+  различается между облаком и локальным сервером — её не пересчитываем.
+- Изображения: поле `images` (до 8) в JSON либо multipart с `assets`; только для
+  Drex Max. Заголовок `TypeSafe-Danger-Zone-Images` у Drex принимается, но не
+  обязателен; для Jev ресёрч указывает его обязательным — перепроверить по
+  документации TypeSafe при реализации изображений.
+- Батч до 1024 запросов (`requests`) — свойство локального `serve.py`. У облачного
+  API отдельный асинхронный Batches со скидкой.
+- `output_tokens` — токены сериализованного ответа, не тарифицируются; тарифицируется
+  только `input_tokens` (изображения входят в него). Цена хранится decimal-строкой
+  за 1B токенов (ADR-0009).
+- Ответ содержит **фактическую** модель. Запрошенный id не гарантирует
+  неизменность: вендор заменял модель под тем же id, а снятые id обслуживает
+  преемник. В журнал пишется модель из ответа; смена — событие
+  `decision.model_changed` (ADR-0010). Алиасы (`drex-latest`, `jev-latest`) в prod
+  запрещены.
+- Ошибки облачного API: 401 `authentication_error`, 402 `insufficient_credit`,
+  422 `invalid_request_error`, 429 `rate_limit_error`, 500, 503, 529 `overloaded`.
 
 Адаптер `decision-drex` работает с `POST /v1/systemone` (state + questions +
-images, ответ — вероятности), `decision-jev` — wire-compatible (меняется base URL
-и SDK-заголовки). Один код, два профиля конфигурации.
+images, ответ — вероятности); профиль `jev` — wire-compatible (меняются base URL
+и заголовки). Один код, два профиля конфигурации.
 
 Обязательные свойства адаптера:
 - таймаут и `circuit breaker`; при недоступности — `ErrUnavailable`;
-- ответ валидируется схемой (сумма вероятностей, известные опции);
-- `confidence` считается из распределения (max prob, margin между top-2);
+- ответ `choice` валидируется: набор ключей `probabilities` равен набору
+  вариантов, значения конечны и лежат в [0, 1], `|Σp − 1| ≤ 0.001`,
+  `choice` — argmax, пересчитанная `confidence` отличается не более чем на 0.02;
+  нарушение — `invalid_output`, а не «попробуем разобрать»;
 - всё, что ушло и вернулось, сохраняется в `decision_inputs`/`raw` (хэш + redacted).
 
 Политика поверх провайдера (не внутри): порог уверенности, fallback на другую

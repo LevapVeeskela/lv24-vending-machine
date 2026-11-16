@@ -1,0 +1,21 @@
+{
+  "signalId": "sig-001",
+  "decisionId": "01J9ZQ8W3E12AB3456789CDEFG",
+  "instrument": { "venue": "binance", "symbol": "BTCUSDT" },
+  "side": "buy",
+  "timeframe": "1h",
+  "entryTs": "2026-11-16T06:00:00Z",
+  "entryPrice": "97500.50",
+  "exitTs": "2026-11-16T12:00:00Z",
+  "exitPrice": "98200.75",
+  "horizonBars": 6,
+  "feeBps": 5,
+  "grossReturn": "0.007184",
+  "netReturn": "0.006684",
+  "mfe": "0.009100",
+  "mae": "-0.002300",
+  "candlesHash": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+  "labeledAt": "2026-11-16T12:05:00Z",
+  "entryLagMs": 120000,
+  "entryShifted": false
+}

@@ -1,0 +1,18 @@
+{
+  "verdict": "ALLOW",
+  "code": "allow",
+  "reasons": ["all gate checks passed"],
+  "checks": [
+    { "name": "intent", "passed": true, "detail": "entry intent well-formed" },
+    { "name": "provider", "passed": true, "detail": "decision provider reachable" },
+    { "name": "answers", "passed": true, "detail": "all questions answered" },
+    { "name": "data_quality", "passed": true, "detail": "no stale candles" },
+    { "name": "risk_check", "passed": true, "detail": "within daily loss limit" },
+    { "name": "directional", "passed": true, "detail": "signal aligns with trend filter" },
+    { "name": "confidence", "passed": true, "detail": "confidence 0.4 above threshold 0.3" }
+  ],
+  "decisionId": "01J9ZQ8W3E12AB3456789CDEFG",
+  "model": "dre-x-1",
+  "policyHash": "b9ae3472b8ff26cc2889f5db91eb555ed09a935a112f16984ea1014a69e59b4f",
+  "decidedAt": "2026-11-16T06:00:01Z"
+}

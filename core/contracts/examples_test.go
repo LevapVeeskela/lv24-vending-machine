@@ -1,0 +1,116 @@
+package contracts
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+// examplesDir is fixed relative to this test file: the test binary runs with
+// cwd=core/contracts, so ../../contracts/examples points at the repo examples.
+func TestContractExamples(t *testing.T) {
+	examplesDir := filepath.Join("..", "..", "contracts", "examples")
+
+	newOf := map[string]func() any{
+		"decision-request.json":         func() any { return &DecisionRequest{} },
+		"decision-response-choice.json": func() any { return &DecisionResponse{} },
+		"decision-response-noul.json":   func() any { return &DecisionResponse{} },
+		"decision-response-score.json":  func() any { return &DecisionResponse{} },
+		"decision-model-changed.json":   func() any { return &DecisionModelChanged{} },
+		"gate-request.json":             func() any { return &GateRequest{} },
+		"gate-verdict.json":             func() any { return &GateVerdict{} },
+		"gate-verdict-response.json":    func() any { return &GateVerdictResponse{} },
+		"outcome.json":                  func() any { return &Outcome{} },
+		"outcome-unlabelable.json":      func() any { return &OutcomeUnlabelable{} },
+		"report.json":                   func() any { return &Report{} },
+		"event.json":                    func() any { return &Event{} },
+		"arena-decision.json":           func() any { return &ArenaDecision{} },
+		"notify-sent.json":              func() any { return &NotifySent{} },
+	}
+
+	invalid := map[string]func() any{
+		// invalid-decision-request.json: missing required "model".
+		"invalid-decision-request.json": func() any { return &DecisionRequest{} },
+		// invalid-decision-response.json: missing required "model".
+		"invalid-decision-response.json": func() any { return &DecisionResponse{} },
+		// invalid-gate-verdict-response.json: "mode" outside the shadow enum.
+		"invalid-gate-verdict-response.json": func() any { return &GateVerdictResponse{} },
+		// invalid-model-changed.json: missing required "actualModel".
+		"invalid-model-changed.json": func() any { return &DecisionModelChanged{} },
+		// invalid-outcome.json: "side" outside buy|sell enum.
+		"invalid-outcome.json": func() any { return &Outcome{} },
+		// invalid-outcome-unlabelable.json: empty "reason" violates minLength 1.
+		"invalid-outcome-unlabelable.json": func() any { return &OutcomeUnlabelable{} },
+		// invalid-report.json: "brier" above maximum 1.
+		"invalid-report.json": func() any { return &Report{} },
+		// invalid-gate-request.json: "side" outside buy|sell enum.
+		"invalid-gate-request.json": func() any { return &GateRequest{} },
+		// invalid-gate-verdict.json: "verdict" outside enum.
+		"invalid-gate-verdict.json": func() any { return &GateVerdict{} },
+		// invalid-event.json: "hash" is not 64 hex chars.
+		"invalid-event.json": func() any { return &Event{} },
+		// invalid-question.json: "type" outside choice|noul|score enum.
+		"invalid-question.json": func() any { return &Question{} },
+		// invalid-option.json: missing required "key".
+		"invalid-option.json": func() any { return &Option{} },
+		// invalid-answer.json: "noul" above maximum 1.
+		"invalid-answer.json": func() any { return &Answer{} },
+		// invalid-usage.json: missing required "inputTokens".
+		"invalid-usage.json": func() any { return &Usage{} },
+		// invalid-decimal.json: "1e5" violates the Decimal pattern.
+		"invalid-decimal.json": func() any { return new(Decimal) },
+		// invalid-instrument-ref.json: missing required "symbol".
+		"invalid-instrument-ref.json": func() any { return &InstrumentRef{} },
+		// invalid-arena-decision.json: missing required "decisionId".
+		"invalid-arena-decision.json": func() any { return &ArenaDecision{} },
+		// invalid-notify-sent.json: missing required "ok".
+		"invalid-notify-sent.json": func() any { return &NotifySent{} },
+	}
+
+	files, err := filepath.Glob(filepath.Join(examplesDir, "*.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) == 0 {
+		t.Fatalf("no examples found in %s", examplesDir)
+	}
+
+	for _, f := range files {
+		name := filepath.Base(f)
+		mkValid, ok := newOf[name]
+		mkInvalid, okInv := invalid[name]
+		if !ok && !okInv {
+			t.Errorf("example %s is not covered by the decode table; add it", name)
+			continue
+		}
+		data, err := os.ReadFile(f)
+		if err != nil {
+			t.Errorf("read %s: %v", name, err)
+			continue
+		}
+		if ok {
+			v := mkValid()
+			if err := json.Unmarshal(data, v); err != nil {
+				t.Errorf("valid example %s failed to decode: %v", name, err)
+			}
+		}
+		if okInv {
+			v := mkInvalid()
+			if err := json.Unmarshal(data, v); err == nil {
+				t.Errorf("invalid example %s decoded without error, want error", name)
+			}
+		}
+	}
+
+	for name := range newOf {
+		if _, err := os.Stat(filepath.Join(examplesDir, name)); err != nil {
+			t.Errorf("table entry %s has no file in %s", name, examplesDir)
+		}
+	}
+	for name := range invalid {
+		if _, err := os.Stat(filepath.Join(examplesDir, name)); err != nil {
+			t.Errorf("table entry %s has no file in %s", name, examplesDir)
+		}
+	}
+}

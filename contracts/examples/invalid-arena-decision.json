@@ -1,0 +1,17 @@
+{
+  "model": "dre-x-1",
+  "response": {
+    "answers": {
+      "direction": { "type": "choice", "choice": "long" }
+    },
+    "model": "dre-x-1"
+  },
+  "verdict": {
+    "verdict": "ALLOW",
+    "code": "allow",
+    "reasons": [],
+    "checks": [],
+    "policyHash": "b9ae3472b8ff26cc2889f5db91eb555ed09a935a112f16984ea1014a69e59b4f",
+    "decidedAt": "2026-11-16T06:00:00Z"
+  }
+}

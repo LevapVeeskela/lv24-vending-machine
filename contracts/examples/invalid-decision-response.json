@@ -1,0 +1,11 @@
+{
+  "answers": {
+    "direction": {
+      "type": "choice",
+      "choice": "long",
+      "probabilities": { "long": 1.5, "flat": -0.5 }
+    }
+  },
+  "requestedModel": "dre-x-1",
+  "usage": { "inputTokens": 120, "outputTokens": 40 }
+}

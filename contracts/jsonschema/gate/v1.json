@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lv24.by/contracts/jsonschema/gate/v1.json",
+  "title": "GateRequest",
+  "description": "RiskGate evaluation request for a signal.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["signalId", "instrument", "side", "intentKind", "timeframe", "ts", "price", "source", "state"],
+  "properties": {
+    "signalId": { "type": "string", "minLength": 1 },
+    "instrument": { "$ref": "../common/v1.json" },
+    "side": { "enum": ["buy", "sell"] },
+    "intentKind": { "enum": ["entry", "exit"] },
+    "timeframe": { "type": "string", "minLength": 1 },
+    "ts": {
+      "description": "Moment the signal became known (the close of the signal bar), not the bar open.",
+      "type": "string",
+      "format": "date-time"
+    },
+    "price": { "$ref": "../common/v1.json#/$defs/Decimal" },
+    "source": { "type": "string", "minLength": 1 },
+    "state": {
+      "description": "Numeric feature vector.",
+      "type": "object",
+      "additionalProperties": { "type": "number" }
+    }
+  },
+  "$defs": {
+    "GateVerdict": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["verdict", "code", "reasons", "checks", "policyHash", "decidedAt"],
+      "properties": {
+        "verdict": { "enum": ["ALLOW", "REJECT", "ABSTAIN", "SKIP"] },
+        "code": { "type": "string" },
+        "reasons": { "type": "array", "items": { "type": "string" } },
+        "checks": { "type": "array", "items": { "$ref": "#/$defs/Check" } },
+        "decisionId": { "type": "string" },
+        "model": { "type": "string" },
+        "policyHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "decidedAt": {
+          "description": "See common $defs/Timestamp. Inlined so the generated Go field is time.Time.",
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "Check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "passed"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "passed": { "type": "boolean" },
+        "detail": { "type": "string" }
+      }
+    },
+    "GateVerdictResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "signalId", "verdict"],
+      "properties": {
+        "mode": {
+          "description": "Configured runtime mode of the gate.",
+          "enum": ["shadow", "paper", "sandbox"]
+        },
+        "signalId": { "type": "string", "minLength": 1 },
+        "verdict": { "$ref": "#/$defs/GateVerdict" }
+      }
+    }
+  }
+}

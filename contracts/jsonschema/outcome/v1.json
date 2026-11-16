@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lv24.by/contracts/jsonschema/outcome/v1.json",
+  "title": "Outcome",
+  "description": "Labeled trading outcome for one signal.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["signalId", "instrument", "side", "timeframe", "entryTs", "entryPrice", "exitTs", "exitPrice", "horizonBars", "feeBps", "grossReturn", "netReturn", "mfe", "mae", "candlesHash", "labeledAt"],
+  "properties": {
+    "signalId": { "type": "string", "minLength": 1 },
+    "decisionId": { "type": "string" },
+    "instrument": { "$ref": "../common/v1.json" },
+    "side": { "enum": ["buy", "sell"] },
+    "timeframe": { "type": "string", "minLength": 1 },
+    "entryTs": {
+      "description": "See common $defs/Timestamp. Inlined so the generated Go field is time.Time.",
+      "type": "string",
+      "format": "date-time"
+    },
+    "entryPrice": { "$ref": "../common/v1.json#/$defs/Decimal" },
+    "exitTs": {
+      "description": "See common $defs/Timestamp. Inlined so the generated Go field is time.Time.",
+      "type": "string",
+      "format": "date-time"
+    },
+    "exitPrice": { "$ref": "../common/v1.json#/$defs/Decimal" },
+    "horizonBars": { "type": "integer", "minimum": 0 },
+    "feeBps": {
+      "description": "One-way fee in basis points. netReturn subtracts the round trip fee, 2 * feeBps / 10000.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "grossReturn": {
+      "description": "Signed return from the entry bar open to the exit bar close, before fees.",
+      "$ref": "../common/v1.json#/$defs/Decimal"
+    },
+    "netReturn": {
+      "description": "Signed return from the entry bar open to the exit bar close, minus the round-trip fee.",
+      "$ref": "../common/v1.json#/$defs/Decimal"
+    },
+    "mfe": { "$ref": "../common/v1.json#/$defs/Decimal" },
+    "mae": { "$ref": "../common/v1.json#/$defs/Decimal" },
+    "candlesHash": {
+      "description": "Lowercase hex SHA-256 of the canonical JSON of exactly the used bars. Decimal fields are normalized to 12 decimal places; timestamps are UTC RFC3339Nano.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "labeledAt": {
+      "description": "See common $defs/Timestamp. Inlined so the generated Go field is time.Time.",
+      "type": "string",
+      "format": "date-time"
+    },
+    "receivedAt": {
+      "description": "Journal time when gate.request was accepted (event ts).",
+      "type": "string",
+      "format": "date-time"
+    },
+    "backfill": {
+      "description": "True when the signal arrived later than one timeframe interval; the entry bar rule ignores receivedAt.",
+      "type": "boolean"
+    },
+    "priceSource": {
+      "description": "Candle provider id used for labeling.",
+      "type": "string"
+    },
+    "entryLagMs": {
+      "description": "Delay between the signal timestamp and the actual entry bar open, in milliseconds.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "entryShifted": {
+      "description": "True when the entry bar was moved forward because the configured entry bar was not usable.",
+      "type": "boolean"
+    }
+  }
+}

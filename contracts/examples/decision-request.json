@@ -1,0 +1,20 @@
+{
+  "model": "dre-x-1",
+  "state": { "rsi14": 62.5, "atrPct": 0.8 },
+  "questions": [
+    {
+      "id": "direction",
+      "type": "choice",
+      "instructions": "Choose the trade direction.",
+      "options": [
+        { "key": "long", "description": "Open or hold a long position" },
+        { "key": "flat", "description": "Stay out of the market" },
+        { "key": "short", "description": "Open or hold a short position" }
+      ]
+    },
+    {
+      "id": "volatility",
+      "type": "noul"
+    }
+  ]
+}

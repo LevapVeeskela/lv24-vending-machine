@@ -1,0 +1,70 @@
+version: '3'
+
+# Every task runs one command that can be executed directly without `task`.
+tasks:
+  gen:
+    desc: Generate Go types from JSON Schema (runs from tools/ with relative paths)
+    cmds:
+      - cd tools && go tool go-jsonschema --tags json --capitalization ID --capitalization USD -p contracts -t -o ../core/contracts/contracts.gen.go ../contracts/jsonschema/common/v1.json ../contracts/jsonschema/decision/v1.json ../contracts/jsonschema/gate/v1.json ../contracts/jsonschema/outcome/v1.json ../contracts/jsonschema/report/v1.json ../contracts/jsonschema/events/v1.json
+
+  gen:check:
+    desc: Fail if generated contracts drift from committed files
+    cmds:
+      - go -C core test ./contracts -run TestGeneratedContractsMatch
+
+  build:
+    desc: Build all workspace modules
+    cmds:
+      - go build all
+
+  test:
+    desc: Test all workspace modules
+    cmds:
+      - task: test:core
+      - task: test:providers
+      - task: test:tools
+
+  test:core:
+    desc: Test the core module
+    cmds:
+      - go -C core test ./...
+
+  test:providers:
+    desc: Test provider modules
+    cmds:
+      - task: test:providers:decision
+      - task: test:providers:marketdata
+      - task: test:providers:notify
+
+  test:providers:decision:
+    desc: Test the decision-drex provider
+    cmds:
+      - go -C providers/decision-drex test ./...
+
+  test:providers:marketdata:
+    desc: Test the marketdata-binance provider
+    cmds:
+      - go -C providers/marketdata-binance test ./...
+
+  test:providers:notify:
+    desc: Test the notify-telegram provider
+    cmds:
+      - go -C providers/notify-telegram test ./...
+
+  test:tools:
+    desc: Test the tools module
+    cmds:
+      - go -C tools test ./...
+
+  lint:imports:
+    desc: Check layer import rules
+    cmds:
+      - go run ./tools/lintimports
+
+  check:
+    desc: gen:check + lint + test + build
+    cmds:
+      - task: gen:check
+      - task: lint:imports
+      - task: test
+      - task: build

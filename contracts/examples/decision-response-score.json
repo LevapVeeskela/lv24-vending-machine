@@ -1,0 +1,14 @@
+{
+  "answers": {
+    "trend": {
+      "type": "score",
+      "score": 0.75,
+      "legend": ["bearish", "neutral", "bullish"],
+      "probabilities": { "0": 0.15, "1": 0.25, "2": 0.6 },
+      "confidence": 0.8
+    }
+  },
+  "model": "dre-x-1",
+  "requestedModel": "dre-x-1",
+  "usage": { "inputTokens": 110, "outputTokens": 25, "costUsd": "0.0009" }
+}

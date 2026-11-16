@@ -1,0 +1,8 @@
+{
+  "answers": {
+    "volatility": { "type": "noul", "noul": 0.35, "confidence": 0.65 }
+  },
+  "model": "dre-x-1",
+  "requestedModel": "dre-x-1",
+  "usage": { "inputTokens": 100, "outputTokens": 20 }
+}

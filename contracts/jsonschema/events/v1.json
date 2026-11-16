@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lv24.by/contracts/jsonschema/events/v1.json",
+  "title": "Event",
+  "description": "Journal event envelope per 06-risk-execution.md section 11.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["seq", "eventId", "kind", "ts", "schemaVersion", "payload", "codeVersion", "prevHash", "hash"],
+  "properties": {
+    "seq": { "type": "integer", "minimum": 0 },
+    "eventId": { "type": "string", "minLength": 1 },
+    "kind": { "type": "string", "minLength": 1 },
+    "ts": {
+      "description": "See common $defs/Timestamp. Inlined so the generated Go field is time.Time.",
+      "type": "string",
+      "format": "date-time"
+    },
+    "schemaVersion": { "type": "integer", "minimum": 1 },
+    "payload": {
+      "description": "Arbitrary event object. The only object allowing additional properties.",
+      "type": "object"
+    },
+    "codeVersion": { "type": "string", "minLength": 1 },
+    "prevHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "runId": { "type": "string" },
+    "decisionId": { "type": "string" },
+    "policyHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "snapshotHash": { "type": "string" }
+  },
+  "$defs": {
+    "GateRequestPayload": {
+      "$ref": "../gate/v1.json",
+      "description": "Payload of gate.request."
+    },
+    "DecisionResponsePayload": {
+      "$ref": "../decision/v1.json#/$defs/DecisionResponse",
+      "description": "Payload of decision.response."
+    },
+    "GateVerdictPayload": {
+      "$ref": "../gate/v1.json#/$defs/GateVerdict",
+      "description": "Payload of gate.verdict."
+    },
+    "OutcomeLabeledPayload": {
+      "$ref": "../outcome/v1.json",
+      "description": "Payload of outcome.labeled."
+    },
+    "DecisionModelChanged": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requestedModel", "previousModel", "actualModel", "detectedAt"],
+      "properties": {
+        "requestedModel": { "type": "string", "minLength": 1 },
+        "previousModel": { "type": "string", "minLength": 1 },
+        "actualModel": { "type": "string", "minLength": 1 },
+        "detectedAt": {
+          "description": "See common $defs/Timestamp. Inlined so the generated Go field is time.Time.",
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "ArenaDecision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["decisionId", "model", "response", "verdict"],
+      "properties": {
+        "decisionId": { "type": "string", "minLength": 1 },
+        "model": { "type": "string", "minLength": 1 },
+        "response": { "$ref": "../decision/v1.json#/$defs/DecisionResponse" },
+        "verdict": { "$ref": "../gate/v1.json#/$defs/GateVerdict" }
+      }
+    },
+    "NotifySent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "channel", "ok"],
+      "properties": {
+        "kind": { "type": "string", "minLength": 1 },
+        "channel": { "type": "string", "minLength": 1 },
+        "ok": { "type": "boolean" },
+        "code": {
+          "description": "Gate verdict code covered by the alert; empty for non-provider notifications.",
+          "type": "string"
+        },
+        "uptoSeq": {
+          "description": "Highest journal seq covered by the delivered alert. A new faulty verdict or ABSTAIN streak must have a greater seq to alert again.",
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "OutcomeUnlabelable": {
+      "description": "Payload of outcome.unlabelable: a signal that produced no Outcome.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["signalId", "decisionId", "reason"],
+      "properties": {
+        "signalId": { "type": "string", "minLength": 1 },
+        "decisionId": {
+          "description": "Empty when the signal never reached a decision.",
+          "type": "string"
+        },
+        "reason": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}
