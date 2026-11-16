@@ -32,6 +32,9 @@ const (
 	// DefaultSeed is the deterministic bootstrap seed used when
 	// Config.Seed is zero.
 	DefaultSeed = 42
+	// MinBootstrapDays is the smallest number of distinct UTC entry days
+	// that yields a trustworthy 95% bootstrap interval.
+	MinBootstrapDays = 5
 	// avgScale is the decimal scale of every averaged money value.
 	avgScale = 12
 	// dayLayout is the UTC key used to resample bootstrap days.
@@ -72,6 +75,7 @@ type Builder struct {
 	includeBackfill bool
 	reps            int
 	seed            int64
+	days            int
 }
 
 // New builds a Builder over jr. deps supplies the clock for GeneratedAt.
@@ -193,6 +197,10 @@ type arenaAcc struct {
 	cost       domain.Decimal
 	points     []calPoint
 }
+
+// Days returns the number of distinct UTC entry days used by the last
+// Build bootstrap (0 when no comparison ran).
+func (b *Builder) Days() int { return b.days }
 
 // Build walks the journal once and computes the report. An empty journal
 // yields a zero report without an error.
@@ -455,23 +463,23 @@ func (b *Builder) compare(labeled []labeledOutcome, decisions map[string]decisio
 	for _, l := range labeled {
 		nr := l.outcome.NetReturn
 		comp.AllEntriesReturn = comp.AllEntriesReturn.Add(nr)
+		// "all" covers every included labeled outcome, including SKIP,
+		// so its count always equals LabeledCount.
+		groups["all"].add(nr)
 		switch l.verdict {
 		case string(domain.VerdictAllow):
 			comp.AllowReturn = comp.AllowReturn.Add(nr)
 			groups[string(domain.VerdictAllow)].add(nr)
-			groups["all"].add(nr)
 			day := dayAggFor(days, l.outcome)
 			day.allowSum = day.allowSum.Add(nr)
 			day.allowCount++
 		case string(domain.VerdictReject):
 			groups[string(domain.VerdictReject)].add(nr)
-			groups["all"].add(nr)
 			day := dayAggFor(days, l.outcome)
 			day.rejectSum = day.rejectSum.Add(nr)
 			day.rejectN++
 		case string(domain.VerdictAbstain):
 			groups[string(domain.VerdictAbstain)].add(nr)
-			groups["all"].add(nr)
 		}
 		var fact float64
 		if nr.Sign() > 0 {
@@ -518,6 +526,7 @@ func (b *Builder) compare(labeled []labeledOutcome, decisions map[string]decisio
 	comp.AUC = auc(global)
 	comp.CalibrationCount = len(global)
 	comp.ECE = fillReliability(comp.Reliability, global)
+	b.days = len(days)
 	comp.Difference = b.difference(
 		groups[string(domain.VerdictAllow)],
 		groups[string(domain.VerdictReject)],
@@ -566,6 +575,11 @@ func (b *Builder) difference(allow, reject *groupAcc, days map[string]*dayAgg) *
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
+	// Too few distinct entry days make the interval unreliable, so no
+	// CI is emitted; the caller still has the point mean.
+	if len(keys) < MinBootstrapDays {
+		return nil
+	}
 	rng := rand.New(rand.NewSource(b.seed))
 	draws := make([]domain.Decimal, 0, b.reps)
 	for i := 0; i < b.reps; i++ {

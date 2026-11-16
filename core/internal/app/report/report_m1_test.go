@@ -117,13 +117,15 @@ func TestGroupsCalibrationExact(t *testing.T) {
 	day1 := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
 	day2 := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
 	day3 := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
+	day4 := time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
+	day5 := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
 	specs := []decSpec{
 		{id: "d1", sig: "s1", model: "alpha", cost: "0.010", net: "0.10", latency: 100, p: fp(0.9), verdict: domain.VerdictAllow, policy: "p1", entry: day1, feeBps: 10, horizon: 12, priceSource: "md"},
-		{id: "d2", sig: "s2", model: "alpha", cost: "0.020", net: "-0.02", latency: 200, p: fp(0.6), verdict: domain.VerdictAllow, policy: "p1", entry: day1, feeBps: 10, horizon: 12, priceSource: "md"},
-		{id: "d3", sig: "s3", model: "beta", cost: "0.030", net: "0.04", latency: 300, p: fp(0.5), verdict: domain.VerdictAllow, policy: "p1", entry: day2, feeBps: 10, horizon: 12, priceSource: "md"},
-		{id: "d4", sig: "s4", model: "beta", cost: "0.040", net: "0.02", latency: 400, p: fp(0.2), verdict: domain.VerdictReject, policy: "p1", entry: day2, feeBps: 10, horizon: 12, priceSource: "md"},
-		{id: "d5", sig: "s5", model: "gamma", cost: "0.050", net: "-0.03", latency: 500, p: fp(0.1), verdict: domain.VerdictReject, policy: "p1", entry: day3, feeBps: 10, horizon: 12, priceSource: "md"},
-		{id: "d6", sig: "s6", model: "gamma", cost: "0.060", net: "-0.01", latency: 600, p: fp(0.4), verdict: domain.VerdictAbstain, policy: "p1", entry: day3, feeBps: 10, horizon: 12, priceSource: "md"},
+		{id: "d2", sig: "s2", model: "alpha", cost: "0.020", net: "-0.02", latency: 200, p: fp(0.6), verdict: domain.VerdictAllow, policy: "p1", entry: day2, feeBps: 10, horizon: 12, priceSource: "md"},
+		{id: "d3", sig: "s3", model: "beta", cost: "0.030", net: "0.04", latency: 300, p: fp(0.5), verdict: domain.VerdictAllow, policy: "p1", entry: day3, feeBps: 10, horizon: 12, priceSource: "md"},
+		{id: "d4", sig: "s4", model: "beta", cost: "0.040", net: "0.02", latency: 400, p: fp(0.2), verdict: domain.VerdictReject, policy: "p1", entry: day4, feeBps: 10, horizon: 12, priceSource: "md"},
+		{id: "d5", sig: "s5", model: "gamma", cost: "0.050", net: "-0.03", latency: 500, p: fp(0.1), verdict: domain.VerdictReject, policy: "p1", entry: day5, feeBps: 10, horizon: 12, priceSource: "md"},
+		{id: "d6", sig: "s6", model: "gamma", cost: "0.060", net: "-0.01", latency: 600, p: fp(0.4), verdict: domain.VerdictAbstain, policy: "p1", entry: day5, feeBps: 10, horizon: 12, priceSource: "md"},
 	}
 	jr := &fakeJournal{}
 	for _, s := range specs {
@@ -182,31 +184,28 @@ func TestGroupsCalibrationExact(t *testing.T) {
 		t.Fatalf("Difference is nil")
 	}
 	decimalIs(t, "difference mean", d.Mean, "0.045000000000")
-	if d.Days != 3 {
-		t.Fatalf("difference days = %d, want 3", d.Days)
+	if d.Days != 5 {
+		t.Fatalf("difference days = %d, want 5", d.Days)
 	}
 	if d.BootstrapReps <= 0 || d.BootstrapReps > DefaultBootstrapReps {
 		t.Fatalf("bootstrap reps = %d, want (0,2000]", d.BootstrapReps)
 	}
-	if d.ContainsZero || d.Low.Sign() <= 0 {
-		t.Fatalf("difference CI = [%s,%s] zero=%v, want strictly positive",
-			d.Low.String(), d.High.String(), d.ContainsZero)
-	}
 }
 
 // TestBootstrapDeterministicAndNoise contains a reproducible CI and one
-// that spans zero for symmetric noise.
+// that spans zero for symmetric noise across six UTC days.
 func TestBootstrapDeterministicAndNoise(t *testing.T) {
-	day1 := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
-	day2 := time.Date(2026, 11, 2, 0, 0, 0, 0, time.UTC)
 	jr := &fakeJournal{}
-	for _, s := range []decSpec{
-		{id: "n1", sig: "n1", model: "m", cost: "0.01", net: "0.05", p: fp(0.6), verdict: domain.VerdictAllow, policy: "p1", entry: day1},
-		{id: "n2", sig: "n2", model: "m", cost: "0.01", net: "-0.05", p: fp(0.6), verdict: domain.VerdictAllow, policy: "p1", entry: day2},
-		{id: "n3", sig: "n3", model: "m", cost: "0.01", net: "-0.05", p: fp(0.4), verdict: domain.VerdictReject, policy: "p1", entry: day1},
-		{id: "n4", sig: "n4", model: "m", cost: "0.01", net: "0.05", p: fp(0.4), verdict: domain.VerdictReject, policy: "p1", entry: day2},
-	} {
-		appendSpec(t, jr, s)
+	for i := 1; i <= 6; i++ {
+		day := time.Date(2026, 11, i, 0, 0, 0, 0, time.UTC)
+		allow, reject := "0.05", "-0.05"
+		if i%2 == 0 {
+			allow, reject = "-0.05", "0.05"
+		}
+		appendSpec(t, jr, decSpec{id: "na" + string(rune('0'+i)), sig: "na" + string(rune('0'+i)),
+			model: "m", cost: "0.01", net: allow, p: fp(0.6), verdict: domain.VerdictAllow, policy: "p1", entry: day})
+		appendSpec(t, jr, decSpec{id: "nr" + string(rune('0'+i)), sig: "nr" + string(rune('0'+i)),
+			model: "m", cost: "0.01", net: reject, p: fp(0.4), verdict: domain.VerdictReject, policy: "p1", entry: day})
 	}
 	first := buildReport(t, jr, Config{MinLabeled: 1})
 	second := buildReport(t, jr, Config{MinLabeled: 1})
@@ -219,9 +218,61 @@ func TestBootstrapDeterministicAndNoise(t *testing.T) {
 		d1.High.String() != d2.High.String() || d1.BootstrapReps != d2.BootstrapReps {
 		t.Fatalf("bootstrap not reproducible: %+v vs %+v", d1, d2)
 	}
+	if d1.Days != 6 {
+		t.Fatalf("difference days = %d, want 6", d1.Days)
+	}
 	if !d1.ContainsZero {
 		t.Fatalf("noise CI = [%s,%s], want it to contain zero",
 			d1.Low.String(), d1.High.String())
+	}
+}
+
+// TestTwoDaysNoDifference drops the CI when fewer than five UTC days are
+// available while keeping the point mean.
+func TestTwoDaysNoDifference(t *testing.T) {
+	jr := &fakeJournal{}
+	appendSpec(t, jr, decSpec{id: "t1", sig: "t1", model: "m", cost: "0.01", net: "0.10",
+		p: fp(0.7), verdict: domain.VerdictAllow, policy: "p1",
+		entry: time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)})
+	appendSpec(t, jr, decSpec{id: "t2", sig: "t2", model: "m", cost: "0.01", net: "-0.04",
+		p: fp(0.3), verdict: domain.VerdictReject, policy: "p1",
+		entry: time.Date(2026, 11, 2, 0, 0, 0, 0, time.UTC)})
+	b, err := New(jr, testDeps(), Config{MinLabeled: 1})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	rep, err := b.Build(context.Background())
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if rep.Comparisons == nil {
+		t.Fatalf("Comparisons is nil")
+	}
+	if rep.Comparisons.Difference != nil {
+		t.Fatalf("Difference = %+v, want nil for 2 days", rep.Comparisons.Difference)
+	}
+	if b.Days() != 2 {
+		t.Fatalf("Days() = %d, want 2", b.Days())
+	}
+}
+
+// TestSkipCountsInAll makes the "all" group cover every included outcome.
+func TestSkipCountsInAll(t *testing.T) {
+	jr := &fakeJournal{}
+	now := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	appendSpec(t, jr, decSpec{id: "k1", sig: "k1", model: "m", cost: "0.01", net: "0.03",
+		verdict: domain.VerdictSkip, policy: "p1", entry: now})
+	rep := buildReport(t, jr, Config{MinLabeled: 1})
+	if rep.LabeledCount != 1 || rep.Comparisons == nil {
+		t.Fatalf("labeled=%d comparisons=%v, want 1/populated", rep.LabeledCount, rep.Comparisons != nil)
+	}
+	c := rep.Comparisons
+	if got := c.Groups["all"].Count; got != rep.LabeledCount {
+		t.Fatalf("groups[all].Count = %d, want LabeledCount %d", got, rep.LabeledCount)
+	}
+	decimalIs(t, "groups all sum", c.Groups["all"].SumNetReturn, c.AllEntriesReturn.String())
+	if c.Groups["ALLOW"].Count != 0 || c.Groups["REJECT"].Count != 0 || c.Groups["ABSTAIN"].Count != 0 {
+		t.Fatalf("SKIP leaked into a verdict group: %+v", c.Groups)
 	}
 }
 

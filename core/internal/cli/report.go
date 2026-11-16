@@ -103,7 +103,7 @@ func (r *runner) cmdGateReport(args []string) int {
 		r.printJSON(rep)
 		return exitOK
 	}
-	printReportHuman(r.stdout, rep)
+	printReportHuman(r.stdout, rep, b.Days())
 	return exitOK
 }
 
@@ -124,7 +124,7 @@ func isPolicyHash(s string) bool {
 // printReportHuman prints the assumptions and base stats always, the
 // comparison block only when the report holds enough labeled outcomes,
 // and per-model metrics only at or above the model threshold.
-func printReportHuman(w io.Writer, rep domain.Report) {
+func printReportHuman(w io.Writer, rep domain.Report, days int) {
 	if a := rep.Assumptions; a != nil {
 		fmt.Fprintf(w, "assumptions: horizon=%d bars, fees=%d bps round-trip, "+
 			"price source=%s, equal size, no slippage, no funding\n",
@@ -168,6 +168,11 @@ func printReportHuman(w io.Writer, rep domain.Report) {
 		if d.ContainsZero {
 			fmt.Fprintf(w, "разница не отличима от шума\n")
 		}
+	} else if allow, reject := c.Groups["ALLOW"], c.Groups["REJECT"]; allow.Count > 0 && reject.Count > 0 {
+		mean := allow.AvgNetReturn.Sub(reject.AvgNetReturn)
+		fmt.Fprintf(w, "difference ALLOW-REJECT: mean=%s\n", mean.String())
+		fmt.Fprintf(w, "insufficient days for a 95%% interval (%d days, need %d)\n",
+			days, report.MinBootstrapDays)
 	} else {
 		fmt.Fprintf(w, "difference ALLOW-REJECT: insufficient data\n")
 	}

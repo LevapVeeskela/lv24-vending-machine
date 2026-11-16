@@ -179,7 +179,7 @@ func TestPrintReportHumanModelThreshold(t *testing.T) {
 		},
 	}
 	var buf strings.Builder
-	printReportHuman(&buf, rep)
+	printReportHuman(&buf, rep, 0)
 	got := buf.String()
 	if !strings.Contains(got, "big: n=30") {
 		t.Fatalf("report misses the >=30 model: %q", got)
@@ -205,5 +205,31 @@ func TestGateReportInvalidPolicy(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "invalid --policy") {
 		t.Fatalf("stderr misses policy error: %q", stderr.String())
+	}
+}
+
+func TestPrintReportHumanInsufficientDays(t *testing.T) {
+	rep := domain.Report{
+		LabeledCount:  10,
+		Sufficient:    true,
+		VerdictCounts: map[string]int{"ALLOW": 5, "REJECT": 5},
+		Comparisons: &domain.ReportComparisons{
+			Groups: map[string]domain.GroupStats{
+				"ALLOW":  {Count: 5, AvgNetReturn: domain.MustParseDecimal("0.04")},
+				"REJECT": {Count: 5, AvgNetReturn: domain.MustParseDecimal("-0.005")},
+			},
+		},
+	}
+	var buf strings.Builder
+	printReportHuman(&buf, rep, 2)
+	got := buf.String()
+	if !strings.Contains(got, "difference ALLOW-REJECT: mean=0.045") {
+		t.Fatalf("report misses the point mean: %q", got)
+	}
+	if !strings.Contains(got, "insufficient days for a 95% interval (2 days, need 5)") {
+		t.Fatalf("report misses the days warning: %q", got)
+	}
+	if strings.Contains(got, "ci95=") {
+		t.Fatalf("report must not print a CI for 2 days: %q", got)
 	}
 }
