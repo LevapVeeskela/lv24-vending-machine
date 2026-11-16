@@ -14,6 +14,19 @@
 - [ ] Ветка `feat/m0-wedge-core` (или её итог) влита в `main`; рабочее дерево
       чистое.
 - [ ] Локально зелёное `task check` (gen:check + lint:imports + test + build).
+      Утилита `task` может быть не установлена; те же проверки обычными
+      командами из корня репозитория:
+
+  ```bash
+  go -C core test ./contracts -run TestGeneratedContractsMatch   # gen:check
+  go run ./tools/lintimports                                     # lint:imports
+  go -C core test ./...
+  go -C providers/decision-drex test ./...
+  go -C providers/marketdata-binance test ./...
+  go -C providers/notify-telegram test ./...
+  go -C tools test ./...
+  go build all                                                   # build
+  ```
 - [ ] `go run ./tools/release` ещё не запускался на грязном дереве.
 - [ ] Владелец подтвердил дату публикации: она станет датой старта G1.
 
@@ -22,7 +35,8 @@
 - [ ] Влить проверенную ветку в `main` (merge или squash — как принято в
       репозитории).
 - [ ] Убедиться, что `git status` чистый, а `git log -1` — ожидаемый коммит.
-- [ ] Повторить `task check` на `main` после слияния.
+- [ ] Повторить `task check` (или те же команды из шага 0) на `main` после
+      слияния.
 - [ ] Не пушить и не создавать PR/MR агенту; если push делает владелец,
       проверить, что он не запускает платный CI (политика нулевых расходов).
 

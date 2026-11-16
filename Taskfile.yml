@@ -34,6 +34,7 @@ tasks:
     cmds:
       - task: test:providers:decision
       - task: test:providers:marketdata
+      - task: test:providers:notify
 
   test:providers:decision:
     desc: Test the decision-drex provider
@@ -44,6 +45,11 @@ tasks:
     desc: Test the marketdata-binance provider
     cmds:
       - go -C providers/marketdata-binance test ./...
+
+  test:providers:notify:
+    desc: Test the notify-telegram provider
+    cmds:
+      - go -C providers/notify-telegram test ./...
 
   test:tools:
     desc: Test the tools module

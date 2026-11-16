@@ -100,9 +100,10 @@ server refuses to start without it. Use two different random values.
 ```
 
 The server binds loopback only. It also starts the background shadow runner:
-every `outcome.labelIntervalSec` (default 300) it labels pending outcomes,
-scans configured signals, and writes `shadow-status.json` into the data
-directory. Keep the process running.
+every `outcome.labelIntervalSec` (default 300) it labels pending outcomes, sends
+notifications, and writes `shadow-status.json` into the data directory; with
+`signals.trend` enabled, trend scans run two seconds after each trend bar
+closes. Keep the process running.
 
 ### 5. Send a gate request
 
@@ -165,10 +166,11 @@ the first bar opening at or after the signal time and closing after the gate
 verdict (the receipt time when the journal has no verdict), exactly
 `outcome.horizonBars` consecutive bars, entry at the first open, exit at
 the last close, net of `2 × outcome.feeBps` (default `feeBps: 10` per side, 20
-round-trip). If that first bar opened more than 10% of one bar before the
-signal became actionable, the entry moves to the next bar and the outcome
-records `entryShifted`; `entryLagMs` is the delay from the entry-bar open to
-that moment. Raw provider candles come from `providers.marketdata`, so this
+round-trip). If that first bar opened more than `min(10% of one bar, 30
+seconds)` before the signal became actionable, the entry moves to the next bar
+and the outcome records `entryShifted`; without a spare bar the signal waits
+for a later cycle. `entryLagMs` is the delay from the entry-bar open to that
+moment. Raw provider candles come from `providers.marketdata`, so this
 step needs network access to the exchange.
 
 Signals that arrive later than one timeframe (`receivedAt − ts > timeframe`)

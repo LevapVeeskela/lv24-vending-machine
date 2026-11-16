@@ -17,12 +17,12 @@
 
 ### 1. Скачать
 
-Откройте страницу релизов:
+Откройте список релизов:
 
-- <https://github.com/LevapVeeskela/lv24-vending-machine/releases/latest>
-- предрелиз `0.1.0-m1` лежит в списке
-  <https://github.com/LevapVeeskela/lv24-vending-machine/releases>
-  (ссылка `latest` у GitHub ведёт только на стабильный релиз, не на предрелиз).
+- <https://github.com/LevapVeeskela/lv24-vending-machine/releases> — список
+  релизов; пре-релиз `0.1.0-m1` публикуется здесь.
+- <https://github.com/LevapVeeskela/lv24-vending-machine/releases/latest> —
+  появится только после стабильного выпуска и на пре-релиз не ведёт.
 
 Скачайте файл для своей платформы и манифест контрольных сумм:
 
@@ -113,7 +113,7 @@ Rename-Item .\vend_windows_amd64.exe vend.exe
 ```
 
 `init` печатает пути конфига и данных, `doctor` проверяет их без сети. Дальше —
-[quickstart.ru.md](quickstart.ru.md) или живая проверка на 30–40 минут в
+[quickstart.ru.md](quickstart.ru.md) или живая проверка на 15 минут в
 [runbook-live-smoke.md](runbook-live-smoke.md).
 
 ## Неподписанные бинарники

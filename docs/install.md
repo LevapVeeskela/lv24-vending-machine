@@ -17,12 +17,12 @@ Two paths to a working `vend`:
 
 ### 1. Download
 
-Open the Releases page:
+Open the releases list:
 
-- <https://github.com/LevapVeeskela/lv24-vending-machine/releases/latest>
-- the `0.1.0-m1` pre-release is listed under
-  <https://github.com/LevapVeeskela/lv24-vending-machine/releases>
-  (GitHub's `latest` link only points at a stable release, not a pre-release).
+- <https://github.com/LevapVeeskela/lv24-vending-machine/releases> — the
+  releases list; the `0.1.0-m1` pre-release is published here.
+- <https://github.com/LevapVeeskela/lv24-vending-machine/releases/latest> —
+  appears only after a stable release and does not point at a pre-release.
 
 Download the asset for your platform and the checksum manifest:
 
@@ -113,7 +113,7 @@ Then create the config and journal:
 ```
 
 `init` prints the config and data paths; `doctor` checks them offline. Continue
-with [quickstart](quickstart.md) (or the 30–40 minute live check in
+with [quickstart](quickstart.md) (or the 15 minute live check in
 [runbook-live-smoke.md](runbook-live-smoke.md)).
 
 ## Unsigned binaries
