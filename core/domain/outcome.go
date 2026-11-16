@@ -14,11 +14,15 @@ type Outcome struct {
 	ExitTS      time.Time  `json:"exitTs"`
 	ExitPrice   Decimal    `json:"exitPrice"`
 	HorizonBars int        `json:"horizonBars"`
-	FeeBps      int        `json:"feeBps"`
-	GrossReturn Decimal    `json:"grossReturn"`
-	NetReturn   Decimal    `json:"netReturn"`
-	MFE         Decimal    `json:"mfe"`
-	MAE         Decimal    `json:"mae"`
-	CandlesHash string     `json:"candlesHash"`
-	LabeledAt   time.Time  `json:"labeledAt"`
+	// FeeBps is the one-way fee in basis points; NetReturn subtracts the
+	// round-trip fee, 2 * feeBps / 10000.
+	FeeBps      int     `json:"feeBps"`
+	GrossReturn Decimal `json:"grossReturn"`
+	NetReturn   Decimal `json:"netReturn"`
+	MFE         Decimal `json:"mfe"`
+	MAE         Decimal `json:"mae"`
+	// CandlesHash is the lowercase hex SHA-256 of the canonical JSON of
+	// exactly the used bars (decimals normalized to 12 decimal places).
+	CandlesHash string    `json:"candlesHash"`
+	LabeledAt   time.Time `json:"labeledAt"`
 }

@@ -850,7 +850,8 @@ func (j *Option) UnmarshalJSON(value []byte) error {
 
 // Labeled trading outcome for one signal.
 type Outcome struct {
-	// CandlesHash corresponds to the JSON schema field "candlesHash".
+	// Lowercase hex SHA-256 of the canonical JSON of exactly the used bars. Decimal
+	// fields are normalized to 12 decimal places; timestamps are UTC RFC3339Nano.
 	CandlesHash string `json:"candlesHash"`
 
 	// DecisionID corresponds to the JSON schema field "decisionId".
@@ -868,10 +869,11 @@ type Outcome struct {
 	// See common $defs/Timestamp. Inlined so the generated Go field is time.Time.
 	ExitTs time.Time `json:"exitTs"`
 
-	// FeeBps corresponds to the JSON schema field "feeBps".
+	// One-way fee in basis points. netReturn subtracts the round trip fee, 2 * feeBps
+	// / 10000.
 	FeeBps int `json:"feeBps"`
 
-	// GrossReturn corresponds to the JSON schema field "grossReturn".
+	// Signed return from the entry bar open to the exit bar close, before fees.
 	GrossReturn Decimal `json:"grossReturn"`
 
 	// HorizonBars corresponds to the JSON schema field "horizonBars".
@@ -889,7 +891,8 @@ type Outcome struct {
 	// Mfe corresponds to the JSON schema field "mfe".
 	Mfe Decimal `json:"mfe"`
 
-	// NetReturn corresponds to the JSON schema field "netReturn".
+	// Signed return from the entry bar open to the exit bar close, minus the
+	// round-trip fee.
 	NetReturn Decimal `json:"netReturn"`
 
 	// Side corresponds to the JSON schema field "side".
