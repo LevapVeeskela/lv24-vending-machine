@@ -1,0 +1,11 @@
+{
+  "signalId": "sig-test-001",
+  "instrument": {"venue": "binance", "symbol": "BTCUSDT"},
+  "side": "buy",
+  "intentKind": "entry",
+  "timeframe": "1h",
+  "ts": "2026-11-16T06:00:00Z",
+  "price": "67432.50",
+  "source": "test",
+  "state": {"rsi": 55.5, "volatility": 1.2}
+}

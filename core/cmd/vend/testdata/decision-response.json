@@ -1,0 +1,31 @@
+{
+  "answers": {
+    "data_quality": {
+      "type": "choice",
+      "choice": "ok",
+      "probabilities": {"ok": 0.95, "insufficient": 0.05},
+      "confidence": 0.9
+    },
+    "signal_alignment": {
+      "type": "choice",
+      "choice": "aligned",
+      "probabilities": {"aligned": 0.8, "neutral": 0.15, "conflict": 0.05},
+      "confidence": 0.7
+    },
+    "market_regime": {
+      "type": "choice",
+      "choice": "favorable",
+      "probabilities": {"favorable": 0.7, "neutral": 0.2, "adverse": 0.1},
+      "confidence": 0.55
+    },
+    "risk_check": {
+      "type": "choice",
+      "choice": "pass",
+      "probabilities": {"pass": 0.9, "block": 0.1},
+      "confidence": 0.8
+    }
+  },
+  "model": "drex-max-v1.1",
+  "usage": {"inputTokens": 1000, "outputTokens": 200, "costUsd": "0.00006"},
+  "requestId": "req-fixture-allow"
+}
