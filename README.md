@@ -4,10 +4,14 @@
 ИИ-агентами.** Крипто-биржи и брокеры, LLM и decision-модели (Drex/Jev),
 локальный терминал, веб и мобильный пульт.
 
-> Статус: **M0 (wedge core) готов, M1 часть 1 готова 2026-11-16** (локальный
-> shadow-гейт, разметка исходов, отчёт только по журналу). НЕ сделано: Telegram,
-> источник trend-сигналов, арена моделей, рецепты Freqtrade/TradingView, релизные
-> бинарники, `--share`. Тесты — офлайн; живые вызовы — только ключом владельца.
+> Статус: **M1 часть 2 (2026-11-16)** — shadow-раннер (фоновая разметка,
+> `vend status`), trend-сигналы, Telegram-уведомления, арена моделей,
+> `--share`, policy-фильтр и метрики отчёта, локальный релизный инструмент.
+> M1 часть 1 — локальный HTTP-гейт, разметка исходов, отчёт только по журналу;
+> M0 — ядро, провайдеры, журнал.
+> **НЕ сделано:** адаптер TradingView webhook, desktop/web/mobile, paper/live,
+> команды Telegram (двусторонний бот). Тесты — офлайн; живые вызовы — только
+> ключом владельца.
 
 ## Идея
 
@@ -32,7 +36,7 @@
 
 | Слой | Технология |
 |---|---|
-| Core + CLI | Go 1.27 (`vend`, `vendd`) |
+| Core + CLI | Go 1.27 (`vend`; `vendd` — цель) |
 | Desktop | Tauri 2 + React 19 + TypeScript (FSD) |
 | Web | React 19 + TypeScript (общий `packages/ui-web`) |
 | Mobile | Flutter + Riverpod |
@@ -41,48 +45,54 @@
 
 ## Документация
 
+- [Быстрый старт (EN)](docs/quickstart.md) · [Быстрый старт (RU)](docs/quickstart.ru.md)
 - [Спецификация](docs/spec/README.md)
+- [Ядро и CLI](docs/spec/03-core-cli.md)
 - [Архитектура](docs/spec/01-architecture.md)
 - [Провайдеры](docs/spec/04-providers.md)
 - [Агенты и ИИ](docs/spec/05-agents.md)
 - [Риск и исполнение](docs/spec/06-risk-execution.md)
 - [План](docs/spec/10-roadmap.md)
+- [Изменения](CHANGELOG.md)
 - [ADR](docs/adr/)
 
-## Рабочий quickstart (реализовано в M1)
+## Рабочий quickstart (M1)
+
+Офлайн, без ключа:
 
 ```bash
-go build -o vend ./core/cmd/vend   # из корня workspace
+go build -o vend ./core/cmd/vend
 vend init
 vend gate test --request contracts/examples/gate-request.json \
   --fixture core/cmd/vend/testdata/decision-response.json
 vend journal verify
-VENDING_SECRET_CONN_LOCAL_APITOKEN=<token> vend serve   # 127.0.0.1:8420
-curl -X POST http://127.0.0.1:8420/v1/gate \
-  -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
-  -d @contracts/examples/gate-request.json
-vend outcomes label --candles <file>
 vend gate report
-vend journal verify
 ```
+
+Путь за 15 минут с ключом decision-провайдера, фоновой разметкой, `vend status`
+и `gate report --share` — в [quickstart](docs/quickstart.md) /
+[quickstart.ru](docs/quickstart.ru.md).
 
 Тесты офлайн; живые вызовы провайдеров — только ключом владельца.
 
-## Целевой UX (не реализовано в M1)
+## Целевой UX (не реализовано)
 
 ```bash
 vend init --template crypto-paper
 vend provider connect exchange-binance --id binance-main
 vend run start grid-btc --account binance-main --symbol BTC/USDT --mode paper
 vend agent explain <decision-id>
-vend serve            # desktop / web / mobile подключаются к API
+vend serve            # desktop/web/mobile подключаются к API
 ```
 
 ## Безопасность
 
-- Paper-режим по умолчанию; live — явный unlock с TTL и подтверждением.
-- Ключи — в ОС-keychain, не в конфиге и не в БД; приложение не видит их в UI.
-- Kill switch, approve-очередь, reconciliation с биржей, аудит каждого решения.
+- Shadow-режим по умолчанию (ордера не отправляются); paper/live — отдельные
+  этапы, live требует явного unlock с TTL и подтверждением.
+- Ключи — только через `secretRef` и переменные окружения (в M1 — env;
+  ОС-keychain — следующий шаг), не в конфиге и не в БД; приложение не видит их в UI.
+- Журнал с hash-chain; kill switch, approve-очередь и reconciliation с биржей —
+  обязательные условия для live (не реализованы).
 - Никакой гарантии доходности: это инструмент, а не инвестиционная рекомендация.
 
 ## Лицензия

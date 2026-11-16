@@ -43,15 +43,17 @@ ADR: [0001 Go](../adr/0001-go-core.md) · [0002 contract-first](../adr/0002-cont
 5. **Decision-модели (Drex/Jev) — отдельный порт**, не «LLM с JSON».
 6. **Local-first**: SQLite + sidecar в desktop; Postgres + сервер — тот же код.
 7. **Contract-first**: OpenAPI + JSON Schema, кодоген в Go/TS/Dart, drift-тест.
-8. **Paper по умолчанию**, live — явный unlock с TTL и подтверждением.
+8. **Shadow по умолчанию** (ордеров нет), paper/live — отдельные этапы; live — явный unlock с TTL и подтверждением.
 9. **Журнал с hash-chain**: каждое решение объяснимо и воспроизводимо.
 10. **Расширяемость**: стратегии — WASM, агенты — YAML-паки, провайдеры — Go-модули.
 
-## Быстрый старт: рабочий (реализовано в M1) и целевой UX
+## Быстрый старт: рабочий (M1) и целевой UX
 
-Рабочий (M1 часть 1) — см. `README.md` (сборка `vend`, `init`, `gate test --fixture`,
-`journal verify`, shadow-сервер с `VENDING_SECRET_CONN_LOCAL_APITOKEN` и `curl` POST,
-`outcomes label --candles <file>`, `gate report`).
+Рабочий (M1 часть 2) — [quickstart](../quickstart.md) / [quickstart.ru](../quickstart.ru.md):
+сборка `vend`, `init`, офлайн `gate test --fixture`, `journal verify`,
+shadow-сервер с `VENDING_SECRET_CONN_LOCAL_APITOKEN` и `curl` POST, фоновая
+разметка исходов, `vend status`, `gate report [--share]`, локальная сборка
+релиза.
 
 Целевой UX (не реализовано):
 
@@ -78,10 +80,17 @@ vend serve            # desktop/web/mobile подключаются к этом�
 
 ## Статус
 
-- M0 (wedge core) готов; M1 часть 1 готова 2026-11-16: локальный HTTP-гейт
-  (`POST /v1/gate`, shadow), разметка исходов, отчёт только по журналу.
-- НЕ сделано: Telegram, источник trend-сигналов, арена моделей, рецепты
-  Freqtrade/TradingView, релизные бинарники, `--share`.
+- M0 (wedge core) готов: ядро, провайдеры decision/marketdata, журнал с
+  hash-chain, конфиг, `doctor`, `gate test`, `journal verify`.
+- M1 часть 1 (2026-11-16): локальный HTTP-гейт (`POST /v1/gate`, shadow),
+  идемпотентность `signalId` (409 на другое тело), разметка исходов, отчёт
+  только по журналу.
+- M1 часть 2 (2026-11-16): shadow-раннер (фоновая разметка, статус-файл,
+  `vend status`), trend-сигналы, Telegram-уведомления, арена моделей
+  (gateflow + агрегация в отчёте), `--policy`/`--include-backfill`, bootstrap
+  CI/BSS/AUC, `--share`, локальный релизный инструмент.
+- НЕ сделано: адаптер TradingView webhook (рецепт — цель), desktop/web/mobile,
+  paper/live, команды Telegram (двусторонний бот).
 - Ресёрч: 13 направлений, клоны и разборы в `ideas/` (вне репозитория; `ideas/INDEX.md`).
 - Спека: draft v0.1; `00-vision.md` и `10-roadmap.md` — v0.2 по итогам скептического
   ревью, приняты владельцем 2026-11-16 (ветка `review/skeptical-v1`). Документы 01–09
@@ -90,4 +99,5 @@ vend serve            # desktop/web/mobile подключаются к этом�
 - `domain` и `ports` — публичные пакеты `core/domain` и `core/ports`, а не
   `core/internal/…`: иначе модули провайдеров не могут их импортировать
   (`02-monorepo.md §2`).
-- Код: M0 начат в ветке `feat/m0-wedge-core`; задание — `docs/plans/m0-wedge-core.md`.
+- Код: ветка `feat/m0-wedge-core`; задание — `docs/plans/m0-wedge-core.md`,
+  изменения — [CHANGELOG](../../CHANGELOG.md).

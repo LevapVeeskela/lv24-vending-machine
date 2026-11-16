@@ -1,11 +1,14 @@
 # 03. Ядро и CLI
 
 Статус: M0 (wedge core) готов; M1 часть 1 готова 2026-11-16 (локальный shadow-гейт,
-разметка исходов, отчёт только по журналу). Зависит от: `01-architecture.md`, `02-monorepo.md`.
+разметка исходов, отчёт только по журналу); M1 часть 2 готова 2026-11-16
+(shadow-раннер, trend-сигналы, Telegram, арена моделей, `--share`, policy-фильтр,
+локальный релизный инструмент). Зависит от: `01-architecture.md`, `02-monorepo.md`.
 
-> Реализовано в M0/M1 — см. §2.0. Остальные подразделы §2 (§2.1–§2.8, часть §2.9–§2.10)
-> описывают целевую платформу и **не реализованы**: Telegram, trend-источник сигналов,
-> арена моделей, рецепты Freqtrade/TradingView, релизные бинарники, `--share`.
+> Реализовано в M0/M1 — см. §2.0. Подразделы §2.1–§2.10 описывают целевую
+> платформу; из них реализованы только отмеченные `journal head/verify` и `serve`,
+> остальное — **не реализовано**: адаптер TradingView webhook, desktop/web/mobile,
+> paper/live, команды Telegram (двусторонний бот).
 > Не вызывать реальные API в тестах; живые вызовы — только ключом владельца.
 
 ## 1. Два бинарника
@@ -19,6 +22,9 @@
 бэктест), либо обращается к локальному API `vendd`. Это даёт одинаковое поведение
 desktop/web/mobile и CLI — все ходят в один контракт.
 
+> В M1 существует только `vend`: его `serve` поднимает локальный API и фоновый
+> раннер; отдельный демон `vendd`, `run/` и планировщик — цель следующих этапов.
+
 Жизненный цикл:
 
 ```
@@ -29,8 +35,8 @@ vendd --config path --addr 127.0.0.1:8420
 ```
 
 Состояние: `~/.local/share/lv24-vending/` (`%LOCALAPPDATA%` на Windows, `~/Library/
-Application Support` на macOS): `vending.db`, `run/` (pid, unix-socket), `logs/`,
-`cache/`, `packs/`.
+Application Support` на macOS): `vending.db` и `shadow-status.json` в M1; `run/`
+(pid, unix-socket), `logs/`, `cache/`, `packs/` — целевая платформа.
 
 ## 2. Команды
 
@@ -42,60 +48,95 @@ vend init [--config FILE] [--data-dir DIR] [--force] [--json]
 vend config path|get KEY|validate [--config FILE] [--data-dir DIR] [--json]
 vend doctor [--config FILE] [--data-dir DIR] [--json]
 vend gate test --request FILE [--fixture FILE] [--save-raw FILE] [--config FILE] [--data-dir DIR] [--json]
-vend gate report [--json] [--config FILE] [--data-dir DIR]
+vend gate report [--policy HASH] [--include-backfill] [--share [--out FILE]] [--json] [--config FILE] [--data-dir DIR]
 vend serve [--addr 127.0.0.1:8420] [--config FILE] [--data-dir DIR]
 vend outcomes label [--candles FILE] [--json] [--config FILE] [--data-dir DIR]
-vend journal head [--json]
-vend journal verify [--json]
+vend status [--json] [--config FILE] [--data-dir DIR]
+vend journal head [--json] [--data-dir DIR]
+vend journal verify [--json] [--data-dir DIR]
 ```
 
 Глобальные флаги `--config FILE`, `--data-dir DIR`, `--json` принимаются в любом
 месте аргументов (`--flag value` или `--flag=value`, одинарный или двойной дефис);
 `--` прекращает их разбор. Приоритет путей: флаг > `VENDING_CONFIG_FILE` /
-`VENDING_DATA_DIR` > ОС-default. Конфиг — JSON (`apiVersion: "vending.lv24/v1"`,
-режим `shadow|paper|sandbox`; `live` отклоняется валидацией):
+`VENDING_DATA_DIR` > ОС-default. Конфиг — JSON
+(`apiVersion: "vending.lv24/v1"`, режим `shadow|paper|sandbox`; `live`
+отклоняется валидацией):
 
 ```json
 {
   "apiVersion": "vending.lv24/v1",
   "mode": "shadow",
   "gate": { "version": "gate-v1", "minPass": 0.55, "minBlock": 0.5 },
-  "outcome": { "horizonBars": 12, "feeBps": 20 },
+  "outcome": { "horizonBars": 12, "feeBps": 10, "labelIntervalSec": 300 },
   "providers": {
     "decision": {
       "id": "decision-drex", "model": "drex-max-v1.1", "profile": "drex",
       "baseUrl": "", "secretRef": "conn/drex/apiKey", "pricePerBillion": "60"
     },
     "marketdata": { "id": "marketdata-binance", "baseUrl": "https://api.binance.com" }
+  },
+  "notify": {
+    "telegram": { "enabled": false, "chatId": "", "secretRef": "conn/telegram/botToken" }
+  },
+  "signals": {
+    "trend": {
+      "enabled": false, "symbols": ["BTCUSDT"], "timeframe": "1h",
+      "fast": 12, "slow": 26, "sides": ["buy"]
+    }
+  },
+  "arena": {
+    "enabled": false, "profile": "drex", "model": "drex-max-v1.1",
+    "baseUrl": "", "secretRef": "conn/drex/apiKey", "pricePerBillion": "60"
   }
 }
 ```
 
+Значения выше — defaults `vend init`. Валидация: `gate.minPass`/`minBlock` в
+(0, 1]; `outcome.horizonBars` 1–1000; `outcome.feeBps` 0–10000 (за одну
+сторону, отчёт печатает round-trip = 2×); `outcome.labelIntervalSec` 1–86400;
+`providers.decision.model` — конкретный id без `*-latest`; `profile` — `drex`
+или `jev`; `providers.marketdata.baseUrl` — http(s); `notify.telegram` при
+`enabled` требует `chatId` и `secretRef`; `signals.trend` при `enabled` требует
+непустые `symbols`, `timeframe`, `0 < fast < slow`, `sides` из `buy|sell`;
+`arena` при `enabled` требует `profile` `drex|jev`, конкретный `model` (без
+`*-latest`/`*-preview`), `secretRef`, `pricePerBillion > 0` и `baseUrl` —
+https либо loopback http (`127.0.0.1`, `::1`).
+
+Режим из конфига — фактический: он возвращается в `GET /healthz` и в ответе
+гейта. M1 ничего не исполняет (ордеров нет); `paper`/`sandbox` — задел
+следующих этапов.
+
 Окружение: `VENDING_CONFIG_FILE`, `VENDING_DATA_DIR`; секрет провайдера —
 `VENDING_SECRET_<REF>`, где REF — `secretRef` в верхнем регистре с заменой каждого
 символа вне `[A-Za-z0-9]` на `_` (пример: `conn/drex/apiKey` →
-`VENDING_SECRET_CONN_DREX_APIKEY`). Токен локального API —
+`VENDING_SECRET_CONN_DREX_APIKEY`, `conn/telegram/botToken` →
+`VENDING_SECRET_CONN_TELEGRAM_BOTTOKEN`). Токен локального API —
 `VENDING_SECRET_CONN_LOCAL_APITOKEN` (обязателен, без него сервер не стартует).
-Реальных значений в документации нет — только `<token>` и `<path>`.
+Реальных значений в документации нет — только `<token>`, `<chat-id>` и `<path>`.
 
 `vend serve`: слушает только `127.0.0.1`, default `127.0.0.1:8420`; токен обязателен;
 тело ≤ 64 КиБ; только `application/json`; максимум 8 параллельных вычислений;
 таймауты чтения/записи/idle; graceful shutdown; ошибки — `{code,message,hint,
 retryable,details?}`; access-лог содержит только method/path/status/duration.
+`serve` также запускает фоновый shadow-раннер (§2.0.1) и останавливает его до
+закрытия журнала.
 
 API (локальный, loopback):
 
 - `GET /healthz` → `{"status":"ok","mode":"shadow","version":"..."}` (без auth).
 - `POST /v1/gate` с `Authorization: Bearer <token>`, `Content-Type: application/json`,
   телом = GateRequest (`signalId`, `instrument{venue,symbol}`, `side` buy|sell,
-  `intentKind` entry|exit, `timeframe`, `ts`, `price`, `source`, `state` — обязательный
-  объект конечных чисел). Ответ 200:
+  `intentKind` entry|exit, `timeframe`, `ts`, `price`, `source`, `state` — объект
+  конечных чисел). Ответ 200:
   `{"mode":"shadow","signalId":"...","verdict":{"verdict":"ALLOW|REJECT|ABSTAIN|SKIP",
   "code":"...","reasons":[...],"checks":[...],"decisionId":"...","model":"...",
   "policyHash":"<64 hex>","decidedAt":"..."}}`.
-  Идемпотентность по `signalId`: повтор возвращает записанный вердикт с тем же
-  `decisionId` без обращения к провайдеру. Ошибка провайдера всё равно записывает
-  ABSTAIN; HTTP для вычисленного вердикта — 200.
+  Идемпотентность по `signalId`: повтор с идентичным телом возвращает записанный
+  вердикт с тем же `decisionId` без обращения к провайдеру; повтор с **другим**
+  телом — HTTP 409 `conflict` (ничего не пишется, нужен новый `signalId`).
+  Ошибка провайдера всё равно записывает ABSTAIN; HTTP для вычисленного
+  вердикта — 200.
 
 События журнала на один сигнал: `gate.request` → `decision.response` (когда провайдер
 ответил) → опционально `decision.model_changed` → `gate.verdict`; все связаны одним
@@ -104,21 +145,42 @@ API (локальный, loopback):
 
 `gate test --fixture` проигрывает записанный ответ decision offline;
 `--save-raw` пишет сырое тело вендора (0600) и завершается ошибкой при идемпотентном
-повторе (сырого тела нет).
+повторе (сырого тела нет). С `--json` печатается только объект вердикта.
 
-`outcomes label`: для каждого `gate.request` без метки — первый CLOSED бар с
-OpenTime ≥ ts сигнала; ровно N подряд идущих баров (таймфрейм m/h/d/w); вход = open
+`outcomes label`: для каждого entry-запроса (`intentKind: entry`) без метки —
+первый бар с OpenTime ≥ ts сигнала, закрывшийся после приёма (не-backfill); ровно
+N подряд идущих баров (таймфрейм m/h/d/w); вход = open
 первого бара, выход = close бара N; gross со знаком side; net = gross − 2·feeBps/10000;
-MFE/MAE; candlesHash = 64 hex SHA-256 использованных баров (Decimals нормализованы к
-12 знакам); `--candles FILE` — offline JSON-массив объектов свечей, без него —
-настроенный marketdata-провайдер; повтор не дублирует метки.
+MFE/MAE; `receivedAt` = время приёма сигнала; сигнал, пришедший позже чем через
+один таймфрейм (`receivedAt − ts > timeframe`), помечается `backfill` и может
+войти в бар, уже закрывшийся к моменту приёма; candlesHash = 64 hex
+SHA-256 использованных баров (Decimals нормализованы к 12 знакам); `--candles
+FILE` — offline JSON-массив объектов свечей, без него — настроенный
+marketdata-провайдер; повтор не дублирует метки.
 
-`gate report`: только журнал, без сети. Всегда: счётчики вердиктов, число размеченных,
-суммарная стоимость решений, latency p50/p95 (по usage.latencyMs). Меньше 100
-размеченных — «insufficient data», сравнений НЕТ. При ≥ 100: сумма net всех входов vs
-только ALLOW, средний доход REJECT, Brier и ECE для p(pass) vs net>0, 10-бакетная
-кривая надёжности, разбивка по моделям. Деньги — только Decimal (строки); float —
-только вероятности/метрики.
+`gate report`: только журнал, без сети. Всегда: счётчики вердиктов, число
+размеченных, policy hash (и число решений других политик), backfill
+`labeled/excluded`, суммарная стоимость решений, latency p50/p95 (по
+usage.latencyMs), блок арены при наличии `arena.decision`. Меньше 100
+размеченных — `insufficient data`, сравнений НЕТ. При ≥ 100: суммы и средние net
+по группам all/ALLOW/REJECT/ABSTAIN, bootstrap-разница ALLOW−REJECT (95 % CI,
+2000 прогонов, seed 42; интервал считается только при ≥ 5 различных UTC-днях
+входа, иначе печатается точечная средняя и `insufficient days`), Brier, base
+rate, constant Brier, Brier skill score,
+AUC, ECE, 10-бакетная кривая надёжности, разбивка по моделям (от 30 меток на
+модель). Флаги: `--policy <64-hex>` — метки и сравнения только для выбранной
+политики (счётчики вердиктов остаются по всему журналу, число решений других
+политик печатается отдельно);
+`--include-backfill` — включить поздние метки в сравнение (по умолчанию они
+только считаются). `--share` печатает обезличенную markdown-сводку (агрегаты,
+метрики, допущения; без символов/цен/путей/идентификаторов), `--out FILE`
+пишет её с правами 0600; `--share` несовместим с `--json`, `--out` требует
+`--share`. Деньги — только Decimal (строки); float — только вероятности/метрики.
+
+`vend status`: снимок `shadow-status.json` (версия, policyHash, последняя
+ошибка цикла, updatedAt) плюс пересчёт событий и меток по журналу. Без
+запущенного раннера `policy: none`, `last label: never`. `--json` отдаёт те же
+поля машинно.
 
 Хэши журнала: все `hash`, `prevHash`, `policyHash`, `candlesHash` — 64 строчных hex БЕЗ
 префикса `sha256:`. Правило цепочки:
@@ -129,12 +191,60 @@ MFE/MAE; candlesHash = 64 hex SHA-256 использованных баров (D
 полный набор вопросов (id, инструкции, ключи/описания опций). Детали гарантий —
 в `06-risk-execution.md` §11.
 
-### 2.0.1 Целевая платформа (не реализовано)
+### 2.0.1 Фоновый shadow-раннер
 
-Нижеследующие подразделы §2.1–§2.10 описывают целевую платформу и не реализованы
-в M0/M1. Они сохранены как план; не использовать их команды в работе.
+`vend serve` запускает раннер: первый цикл сразу, далее каждые
+`outcome.labelIntervalSec` (default 300). Цикл: (a) разметка исходов,
+(b) скан trend-сигналов и оценка каждого через gateflow, (c) уведомления,
+(d) атомарная запись `shadow-status.json` в каталог данных (0600). Ошибка
+любой фазы не останавливает цикл: она попадает в `lastCycleError` и в лог, а
+следующий цикл повторяется. При остановке `serve` раннер завершает текущий шаг
+до закрытия журнала.
+
+`signals.trend` (при `enabled`): локальный источник без своего I/O; читает
+закрытые свечи настроенного marketdata, считает EMA fast/slow и выдаёт вход
+только на пересечении на последнем закрытом баре; `signalId` детерминирован
+(`trend:<symbol>:<timeframe>:<closeTimeUnix>:<side>`), поэтому повторный скан
+идемпотентен. Не более одного сигнала на символ за скан.
+
+### 2.0.2 Уведомления и арена
+
+`notify.telegram` (при `enabled`) шлёт через Bot API: смену фактической модели
+(`decision.model_changed`), 3 подряд ABSTAIN с кодом `provider_unavailable`
+(не чаще одного сообщения в час) и недельную сводку counts (`decisions`,
+`labeled`, `ALLOW/REJECT/ABSTAIN`) не чаще раза в 7 суток. Каждое отправленное
+уведомление пишется событием `notify.sent {kind,channel,ok}`. Провайдер держит
+локальный лимит: одно сообщение в минуту. Токен бота берётся по `secretRef`
+(`VENDING_SECRET_*`), `chatId` (`<chat-id>`: числовой id или
+`@channelusername`) секретом не является. Тексты — только агрегаты,
+без символов, цен, путей и идентификаторов.
+
+Арена (`arena.enabled`) — второе, совещательное мнение: gateflow вызывает
+второй decision-провайдер отдельно, с дедлайном 20 с, вне пути основного ответа;
+медленная или упавшая арена не меняет и не задерживает вердикт. Результат —
+одно событие `arena.decision {decisionId, model, response, verdict}`; отчёт
+агрегирует решения, согласие моделей, средний доход ALLOW, AUC и стоимость по
+моделям. Арена удваивает стоимость решения (два вызова провайдера на сигнал),
+поэтому включать её стоит осознанно.
+
+### 2.0.3 Локальная сборка релиза
+
+`go run ./tools/release` из корня репозитория собирает `vend` под
+windows/amd64, linux/amd64+arm64, darwin/amd64+arm64 в `dist/` и пишет
+`dist/SHA256SUMS`. Сборка локальная и воспроизводимая: `CGO_ENABLED=0`,
+`-trimpath`, без VCS-штампа, версия `0.1.0-m1`; ничего не публикуется и не
+загружается. Неполный набор артефактов манифест не создаёт.
+
+### 2.0.4 Целевая платформа (не реализовано)
+
+Нижеследующие подразделы §2.1–§2.10 описывают целевую платформу. Полностью не
+реализованы §2.2–§2.8; в §2.1 и §2.9–§2.10 реализованы только отмеченные
+команды. Они сохранены как план; не использовать остальные команды в работе.
 
 ### 2.1 Онбординг
+
+Реализованы `vend version` и `vend doctor` (§2.0); интерактивный init,
+шаблоны, `update` и `completion` — цель.
 
 ```bash
 vend init                       # интерактивно: режим, биржа, ключи, агенты
@@ -261,6 +371,9 @@ vend backtest walkforward grid-btc --windows 6 --train 0.7
 
 ### 2.9 Журнал
 
+Реализованы только `journal head` и `journal verify` (см. §2.0); остальное —
+цель.
+
 ```bash
 vend journal tail [--follow] [--kind decision|order|risk|fill]
 vend journal query --from 2026-11-01 --run <id> --jsonl
@@ -270,6 +383,9 @@ vend journal verify                                  # проверка hash-cha
 ```
 
 ### 2.10 Сервер и live
+
+Реализован только `vend serve` на loopback без `--open` (§2.0); `live` и
+desktop/web/mobile — цель.
 
 ```bash
 vend serve [--addr 127.0.0.1:8420] [--open]
@@ -311,10 +427,12 @@ switch, рестарте демона и изменении ключей.
 
 ```bash
 vend config path
-vend config get risk.limits.maxOrderNotional
+vend config get providers.decision.model
 vend config validate
 ```
 
+`config get` принимает точечный путь по фактической схеме конфига; ключи
+`config set`, `config diff` и иерархия scope (будущее) не реализованы.
 Будущее (не реализовано): `config set ... --scope ...`, `config diff --scope ...`,
 иерархия scope `global → account → run` с переопределением, запись денежных изменений
 в `audit_log` с автором и diff. Эти команды и механики — целевая платформа.
