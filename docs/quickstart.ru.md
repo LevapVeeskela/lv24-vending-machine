@@ -107,6 +107,9 @@ $env:VENDING_SECRET_CONN_LOCAL_APITOKEN = '<token>'
 включённом `signals.trend` скан trend идёт через 2 секунды после закрытия
 каждого бара trend. Процесс должен оставаться запущенным.
 
+Перед неделей проверьте объём сигналов вашего конфига: `vend signals estimate
+--days 7` (см. [run-7-days.md](run-7-days.md)).
+
 ### 5. Отправить запрос в гейт
 
 ```bash

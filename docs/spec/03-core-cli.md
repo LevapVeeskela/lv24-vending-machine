@@ -6,7 +6,8 @@ core) готов; M1 часть 1 готова 2026-11-16 (локальный sh
 trend-сигналы, Telegram, арена моделей, `--share`, policy-фильтр, локальный
 релизный инструмент). RC добавляет `doctor --live`, канонические символы,
 `entryLagMs`/`entryShifted`, `outcome.unlabelable`, группировку отчёта по
-(horizon, fee), обновлённый `--share` и операционную документацию. Зависит от:
+(horizon, fee), обновлённый `--share`, оценку объёма `signals estimate`, поля
+окна `days`/`activeDays` в JSON-отчёте и операционную документацию. Зависит от:
 `01-architecture.md`, `02-monorepo.md`.
 
 > Реализовано в M0/M1 — см. §2.0. Подразделы §2.1–§2.10 описывают целевую
@@ -60,6 +61,7 @@ vend gate test --request FILE [--fixture FILE] [--save-raw FILE] [--config FILE]
 vend gate report [--policy HASH] [--include-backfill] [--share [--out FILE]] [--json] [--config FILE] [--data-dir DIR]
 vend serve [--addr 127.0.0.1:8420] [--config FILE] [--data-dir DIR]
 vend outcomes label [--candles FILE] [--json] [--config FILE] [--data-dir DIR]
+vend signals estimate [--days N] [--json] [--config FILE] [--data-dir DIR]
 vend status [--json] [--config FILE] [--data-dir DIR]
 vend journal head [--json] [--data-dir DIR]
 vend journal verify [--json] [--data-dir DIR]
@@ -250,7 +252,9 @@ labeling`, `no outcome by deadline`, `source rejected`), счётчики
 долях бара и в секундах) и
 entry shifted, ссылку на GitHub Discussions; без символов/площадок/цен/state/
 путей/идентификаторов и сумм доходности. `--out FILE` пишет её с правами 0600;
-`--share` несовместим с `--json`, `--out` требует `--share`. Деньги — только
+`--share` несовместим с `--json`, `--out` требует `--share`. В `--json` те же
+числа окна отдаются необязательными полями `days` и `activeDays`; существующие
+поля не менялись. Деньги — только
 Decimal (строки); float — только вероятности/метрики.
 
 `vend status`: снимок `shadow-status.json` (версия, policyHash, последняя
@@ -292,6 +296,22 @@ Decimal (строки); float — только вероятности/метри
 на пропущенных барах не теряются. `signalId` детерминирован
 (`trend:<symbol>:<timeframe>:<closeTimeUnix>:<side>`), поэтому повторная
 оценка того же бара идемпотентна.
+
+`vend signals estimate [--days N]` — офлайн-оценка объёма до недели: для каждого
+символа `signals.trend` запрашивает у настроенного marketdata-провайдера
+закрытые свечи за N суток (1–30, по умолчанию 7) плюс прогрев EMA, считает
+пересечения тем же чистым расчётом, что и боевой скан (`trend.Crossings`), с
+учётом `signals.trend.sides` и печатает по строке на символ
+`SYMBOL signals=N per_day=X.X`, затем `total: signals=N per_day=X.X`,
+`target: 15 per day (100 labeled in 7 days)`, `verdict: enough|low` и
+`past frequency does not predict future frequency`. Команда не открывает
+журнал, не вызывает decision-провайдера и Telegram и не требует секретов.
+Выключенный `signals.trend` или пустые `symbols` — код 2 (usage) с подсказкой;
+ошибка провайдера по одному символу печатается строкой `SYMBOL error=<code>`,
+остальные символы считаются, код возврата 6. `--json` отдаёт один объект
+`{days, targetPerDay, symbols:[{symbol, signals, perDay, error?}],
+total:{signals, perDay}, verdict}`; отдельная схема для него в `contracts/` не
+заводится — служебные ответы CLI (version, doctor, status) схем не имеют.
 
 ### 2.0.2 Уведомления и арена
 
