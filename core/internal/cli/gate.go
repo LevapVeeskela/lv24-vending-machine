@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"math"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/LevapVeeskela/lv24-vending-machine/core/domain"
@@ -171,6 +172,8 @@ func (r *runner) cmdGateTest(args []string) int {
 			return r.fail(jsonOut, exitGeneral, codeGeneral, werr.Error(),
 				"check the output path is writable and retry", false, nil)
 		}
+		// Best effort: an existing file must not keep wide permissions.
+		_ = os.Chmod(*saveRaw, 0o600)
 	}
 
 	if jsonOut {
@@ -308,14 +311,35 @@ func validateFixtureAnswer(q domain.Question, a domain.Answer) error {
 		}
 		return nil
 	case domain.QuestionScore:
+		n := len(q.Options)
 		if a.Score == nil || math.IsNaN(*a.Score) || math.IsInf(*a.Score, 0) {
 			return fmt.Errorf("invalid fixture: question %q: score is missing or not finite", q.ID)
 		}
 		if len(a.Legend) == 0 {
 			return fmt.Errorf("invalid fixture: question %q: score legend is empty", q.ID)
 		}
+		if len(a.Legend) != n {
+			return fmt.Errorf("invalid fixture: question %q: score legend length does not match options", q.ID)
+		}
 		if len(a.Probabilities) == 0 {
 			return fmt.Errorf("invalid fixture: question %q: score probabilities are empty", q.ID)
+		}
+		if len(a.Probabilities) != len(a.Legend) {
+			return fmt.Errorf("invalid fixture: question %q: score probability count does not match legend", q.ID)
+		}
+		sum := 0.0
+		for i := range a.Legend {
+			p, ok := a.Probabilities[strconv.Itoa(i)]
+			if !ok {
+				return fmt.Errorf("invalid fixture: question %q: score probabilities miss an index", q.ID)
+			}
+			if math.IsNaN(p) || math.IsInf(p, 0) || p < 0 || p > 1 {
+				return fmt.Errorf("invalid fixture: question %q: score probability out of range [0, 1]", q.ID)
+			}
+			sum += p
+		}
+		if math.Abs(sum-1) > 0.001 {
+			return fmt.Errorf("invalid fixture: question %q: score probabilities do not sum to 1", q.ID)
 		}
 		return nil
 	default:

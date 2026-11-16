@@ -6,6 +6,7 @@ import (
 	"errors"
 	"math"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -472,6 +473,7 @@ func TestInvalidRequestRejectedBeforeIO(t *testing.T) {
 		"ts":        func(r *domain.GateRequest) { r.TS = time.Time{} },
 		"price":     func(r *domain.GateRequest) { r.Price = domain.MustParseDecimal("0") },
 		"state":     func(r *domain.GateRequest) { r.State = map[string]float64{"x": math.Inf(1)} },
+		"stateNil":  func(r *domain.GateRequest) { r.State = nil },
 	}
 	_ = bad
 	for name, mut := range cases {
@@ -508,6 +510,134 @@ func TestInvalidRequestRejectedBeforeIO(t *testing.T) {
 
 func nan() float64 { return math.NaN() }
 
+func TestClientDisconnectKeepsRecordedVerdict(t *testing.T) {
+	inner := &memJournal{}
+	var mu sync.Mutex
+	var errs []error
+	jr := &ctxCheckJournal{Journal: inner, mu: &mu, errs: &errs}
+	prov := &fnDecision{fn: func(context.Context, domain.DecisionRequest) (domain.DecisionResponse, error) {
+		return allowResp(), nil
+	}}
+	f, _ := New(jr, prov, testDeps("dec-1"), testConfig())
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // client is gone before the call starts
+	res, err := f.Evaluate(ctx, entryReq())
+	if err != nil {
+		t.Fatalf("Evaluate() = %v", err)
+	}
+	if res.Verdict.Verdict != domain.VerdictAllow {
+		t.Fatalf("verdict = %v, want ALLOW", res.Verdict.Verdict)
+	}
+	if n := inner.count(); n != 3 {
+		t.Fatalf("events = %d, want 3", n)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for _, e := range errs {
+		if e != nil {
+			t.Fatalf("Append saw canceled context: %v", e)
+		}
+	}
+	if len(errs) != 3 {
+		t.Fatalf("append observations = %d, want 3", len(errs))
+	}
+}
+
+// ctxCheckJournal records the context error seen by every Append.
+type ctxCheckJournal struct {
+	ports.Journal
+	mu   *sync.Mutex
+	errs *[]error
+}
+
+func (j *ctxCheckJournal) Append(ctx context.Context, ev domain.Event) (domain.Event, error) {
+	j.mu.Lock()
+	*j.errs = append(*j.errs, ctx.Err())
+	j.mu.Unlock()
+	return j.Journal.Append(ctx, ev)
+}
+
+func TestConcurrentDuplicateSignalSharesOneExecution(t *testing.T) {
+	jr := &memJournal{}
+	release := make(chan struct{})
+	started := make(chan struct{}, 1)
+	var once int32
+	prov := &fnDecision{fn: func(ctx context.Context, _ domain.DecisionRequest) (domain.DecisionResponse, error) {
+		if atomic.AddInt32(&once, 1) == 1 {
+			started <- struct{}{}
+		}
+		select {
+		case <-release:
+			return allowResp(), nil
+		case <-ctx.Done():
+			return domain.DecisionResponse{}, ctx.Err()
+		}
+	}}
+	var mu sync.Mutex
+	next := 0
+	deps := ports.Deps{
+		Clock: func() time.Time { return fixedTime },
+		NewID: func() string {
+			mu.Lock()
+			defer mu.Unlock()
+			next++
+			return "dec-" + itoa(next)
+		},
+	}
+	f, _ := New(jr, prov, deps, testConfig())
+
+	// A different signal with a fast provider must not be serialized.
+	fastProv := &fnDecision{fn: func(context.Context, domain.DecisionRequest) (domain.DecisionResponse, error) {
+		return allowResp(), nil
+	}}
+	ff, _ := New(jr, fastProv, deps, testConfig())
+
+	type out struct {
+		res Result
+		err error
+	}
+	first := make(chan out, 1)
+	second := make(chan out, 1)
+	go func() {
+		res, err := f.Evaluate(context.Background(), entryReq())
+		first <- out{res, err}
+	}()
+	<-started // first call is inside the provider
+	go func() {
+		res, err := f.Evaluate(context.Background(), entryReq())
+		second <- out{res, err}
+	}()
+
+	other := entryReq()
+	other.SignalID = "sig-other"
+	otherRes, otherErr := ff.Evaluate(context.Background(), other)
+	if otherErr != nil || otherRes.Verdict.Verdict != domain.VerdictAllow {
+		t.Fatalf("different signal blocked: %+v, %v", otherRes, otherErr)
+	}
+	close(release)
+
+	a := <-first
+	b := <-second
+	if a.err != nil || b.err != nil {
+		t.Fatalf("errors: %v, %v", a.err, b.err)
+	}
+	if a.res.Verdict.DecisionID != b.res.Verdict.DecisionID ||
+		a.res.Verdict.Verdict != domain.VerdictAllow || b.res.Verdict.Verdict != domain.VerdictAllow {
+		t.Fatalf("results differ: %+v vs %+v", a.res.Verdict, b.res.Verdict)
+	}
+	if n := prov.calls; n != 1 {
+		t.Fatalf("provider calls = %d, want 1", n)
+	}
+	decisions := map[string]bool{}
+	evs, _ := jr.Query(context.Background(), 0, "")
+	for _, ev := range evs {
+		decisions[ev.DecisionID] = true
+	}
+	// sig-1 contributes 3 events with one decision id; sig-other 3 more.
+	if len(evs) != 6 || len(decisions) != 2 {
+		t.Fatalf("events = %d decisions = %d, want 6 events over 2 decisions", len(evs), len(decisions))
+	}
+}
 func TestNewRejectsBadConfig(t *testing.T) {
 	if _, err := New(nil, nil, testDeps(), testConfig()); err == nil {
 		t.Fatalf("New(nil journal) = nil, want error")

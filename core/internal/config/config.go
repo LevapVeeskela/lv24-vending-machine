@@ -196,11 +196,11 @@ func Save(path string, c Config) error {
 	}
 	raw = append(raw, '\n')
 	if dir := filepath.Dir(path); dir != "" {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return fmt.Errorf("config: mkdir %s: %w", dir, err)
 		}
 	}
-	if err := os.WriteFile(path, raw, 0o644); err != nil {
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		return fmt.Errorf("config: write %s: %w", path, err)
 	}
 	return nil
