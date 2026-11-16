@@ -1225,3 +1225,19 @@ func TestLocalRateLimitIsNotDeliveryFailure(t *testing.T) {
 		t.Fatalf("second delivery took %v after the first, want <= 70s", got)
 	}
 }
+
+// TestLastLabelAtRestoredFromJournal: a restarted runner must not lose the
+// timestamp of the last outcome.labeled event.
+func TestLastLabelAtRestoredFromJournal(t *testing.T) {
+	jr := &memJournal{}
+	labelAt := baseTime.Add(-2 * time.Hour)
+	seedEventAt(t, jr, domain.EventOutcomeLabeled, labelAt, domain.Outcome{SignalID: "sig-old"})
+	r := newRunner(jr, fixedDeps(), testConfig(""), nil, nil, nil, nil, nil)
+	got := r.Status().LastLabelAt
+	if got.IsZero() {
+		t.Fatalf("lastLabelAt zero, want restored %v", labelAt)
+	}
+	if !got.Equal(labelAt) {
+		t.Fatalf("lastLabelAt = %v, want %v", got, labelAt)
+	}
+}

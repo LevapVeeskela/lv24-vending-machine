@@ -227,6 +227,18 @@ func New(jr ports.Journal, labeler Labeler, signals SignalSource, evaluator Eval
 			}
 		}
 	}
+	// Restore the last labeling time from the journal: lastLabelAt is an
+	// in-memory snapshot field, and a restart must not make an old label look
+	// like it never happened. A journal read failure is not fatal here; the
+	// next cycle records it in the status like every other phase error.
+	if err := jr.Walk(context.Background(), 0, domain.EventOutcomeLabeled, func(ev domain.Event) error {
+		if at := ev.TS.UTC(); at.After(r.lastLabelAt) {
+			r.lastLabelAt = at
+		}
+		return nil
+	}); err != nil && deps.Logger != nil {
+		deps.Logger.Warn("shadow: cannot restore last label time", "err", sanitizeErr(err))
+	}
 	return r, nil
 }
 
