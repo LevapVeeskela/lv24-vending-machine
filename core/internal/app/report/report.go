@@ -126,16 +126,22 @@ type verdictInfo struct {
 // labeledOutcome pairs an outcome with its gate verdict and decision ID.
 // seq is the journal sequence of the surviving outcome.labeled event.
 type labeledOutcome struct {
-	outcome    domain.Outcome
-	verdict    string
-	decisionID string
-	seq        int64
+	outcome     domain.Outcome
+	verdict     string
+	decisionID  string
+	seq         int64
+	lagMS       int64
+	lagRecorded bool
 }
 
-// outcomeEvent is one deduplicated outcome.labeled event with its seq.
+// outcomeEvent is one deduplicated outcome.labeled event with its seq. The
+// optional entryLagMs field is decoded separately so an outcome written
+// before the field existed is not mistaken for a zero lag.
 type outcomeEvent struct {
-	outcome domain.Outcome
-	seq     int64
+	outcome     domain.Outcome
+	lagMS       int64
+	lagRecorded bool
+	seq         int64
 }
 
 // labelPair is the (horizon, fee) pair of the labeling parameters.
@@ -233,15 +239,25 @@ func (b *Builder) Build(ctx context.Context) (domain.Report, error) {
 	signalToDecision := map[string]string{}
 	var outcomes []outcomeEvent
 	var arenas []arenaPayload
+	// Labeling progress across the whole journal: entry signals still waiting
+	// for an outcome, and signals recorded as unlabelable at their deadline.
+	entrySignals := map[string]struct{}{}
+	labeledSignals := map[string]struct{}{}
+	unlabelableSignals := map[string]struct{}{}
+	missedDeadline := map[string]struct{}{}
 
 	if err := b.jr.Walk(ctx, 0, "", func(ev domain.Event) error {
 		switch ev.Kind {
 		case domain.EventGateRequest:
 			var req struct {
-				SignalID string `json:"signalId"`
+				SignalID   string            `json:"signalId"`
+				IntentKind domain.IntentKind `json:"intentKind"`
 			}
 			if err := json.Unmarshal(ev.Payload, &req); err != nil {
 				return nil
+			}
+			if req.SignalID != "" && req.IntentKind == domain.IntentEntry {
+				entrySignals[req.SignalID] = struct{}{}
 			}
 			if req.SignalID != "" && ev.DecisionID != "" {
 				signalToDecision[req.SignalID] = ev.DecisionID
@@ -292,7 +308,28 @@ func (b *Builder) Build(ctx context.Context) (domain.Report, error) {
 			if err := json.Unmarshal(ev.Payload, &o); err != nil {
 				return nil
 			}
-			outcomes = append(outcomes, outcomeEvent{outcome: o, seq: ev.Seq})
+			lagMS, lagRecorded := entryLagField(ev.Payload)
+			outcomes = append(outcomes, outcomeEvent{
+				outcome:     o,
+				lagMS:       lagMS,
+				lagRecorded: lagRecorded,
+				seq:         ev.Seq,
+			})
+			if o.SignalID != "" {
+				labeledSignals[o.SignalID] = struct{}{}
+			}
+		case domain.EventOutcomeUnlabelable:
+			var u domain.OutcomeUnlabelable
+			if err := json.Unmarshal(ev.Payload, &u); err != nil {
+				return nil
+			}
+			if u.SignalID == "" {
+				return nil
+			}
+			unlabelableSignals[u.SignalID] = struct{}{}
+			if u.Reason == "timeout" {
+				missedDeadline[u.SignalID] = struct{}{}
+			}
 		case domain.EventArenaDecision:
 			var a arenaPayload
 			if err := json.Unmarshal(ev.Payload, &a); err != nil {
@@ -370,10 +407,12 @@ func (b *Builder) Build(ctx context.Context) (domain.Report, error) {
 			}
 		}
 		labeled = append(labeled, labeledOutcome{
-			outcome:    o,
-			verdict:    v.verdict,
-			decisionID: did,
-			seq:        oe.seq,
+			outcome:     o,
+			verdict:     v.verdict,
+			decisionID:  did,
+			seq:         oe.seq,
+			lagMS:       oe.lagMS,
+			lagRecorded: oe.lagRecorded,
 		})
 	}
 
@@ -394,9 +433,24 @@ func (b *Builder) Build(ctx context.Context) (domain.Report, error) {
 		}
 	}
 
+	// A signal still waiting for labeling has neither a labeled outcome nor a
+	// recorded unlabelable outcome yet.
+	awaiting := 0
+	for sig := range entrySignals {
+		if _, ok := labeledSignals[sig]; ok {
+			continue
+		}
+		if _, ok := unlabelableSignals[sig]; ok {
+			continue
+		}
+		awaiting++
+	}
+
 	rep := domain.Report{
 		GeneratedAt:          b.deps.Now().UTC(),
 		LabeledCount:         len(labeled),
+		AwaitingLabeling:     awaiting,
+		NoOutcomeByDeadline:  len(missedDeadline),
 		VerdictCounts:        counts,
 		DecisionCostUSD:      costTotal,
 		LatencyP50MS:         nearestRank(latencies, 0.5),
@@ -792,36 +846,57 @@ func assumptions(labeled, compared []labeledOutcome, pair labelPair) *domain.Rep
 	default:
 		priceSource = "mixed"
 	}
-	median, p95, shifted := entryLagStats(labeled)
+	median, p95, medianMS, p95MS, shifted := entryLagStats(labeled)
 	return &domain.ReportAssumptions{
-		HorizonBars:     pair.horizon,
-		FeeBpsRoundTrip: 2 * pair.feeBps,
-		PriceSource:     priceSource,
-		EqualSize:       true,
-		NoSlippage:      true,
-		NoFunding:       true,
-		EntryLagMedian:  median,
-		EntryLagP95:     p95,
-		EntryShifted:    shifted,
+		HorizonBars:      pair.horizon,
+		FeeBpsRoundTrip:  2 * pair.feeBps,
+		PriceSource:      priceSource,
+		EqualSize:        true,
+		NoSlippage:       true,
+		NoFunding:        true,
+		EntryLagMedian:   median,
+		EntryLagP95:      p95,
+		EntryLagMedianMS: medianMS,
+		EntryLagP95MS:    p95MS,
+		EntryShifted:     shifted,
 	}
 }
 
+// entryLagField reports the optional entryLagMs value and whether the field
+// was present at all. An absent field must not be read as a zero lag: outcomes
+// written before the field existed are not evidence of a perfect entry.
+func entryLagField(payload []byte) (int64, bool) {
+	var aux struct {
+		domain.Outcome
+		EntryLagMS *int64 `json:"entryLagMs"`
+	}
+	if err := json.Unmarshal(payload, &aux); err != nil || aux.EntryLagMS == nil {
+		return 0, false
+	}
+	return *aux.EntryLagMS, true
+}
+
 // entryLagStats returns the median and nearest-rank p95 entry lag as a
-// fraction of one bar, plus the count of shifted entries. Outcomes with an
-// unparseable timeframe or without a lag stay out of the fractions but
-// still count as shifted. Fractions are clamped to [0, 1] because the
-// contract bounds them.
-func entryLagStats(labeled []labeledOutcome) (median, p95 float64, shifted int) {
+// fraction of one bar and in milliseconds, plus the count of shifted entries.
+// Only outcomes that recorded entryLagMs contribute to the lag statistics;
+// every included outcome still counts as shifted. Fractions are clamped to
+// [0, 1] because the contract bounds them.
+func entryLagStats(labeled []labeledOutcome) (median, p95 float64, medianMS, p95MS int64, shifted int) {
 	fracs := make([]float64, 0, len(labeled))
+	lags := make([]int64, 0, len(labeled))
 	for _, l := range labeled {
 		if l.outcome.EntryShifted {
 			shifted++
 		}
-		interval, ok := timeframeDuration(l.outcome.Timeframe)
-		if !ok || l.outcome.EntryLagMS < 0 {
+		if !l.lagRecorded || l.lagMS < 0 {
 			continue
 		}
-		frac := float64(l.outcome.EntryLagMS) / float64(interval/time.Millisecond)
+		lags = append(lags, l.lagMS)
+		interval, err := domain.ParseTimeframe(l.outcome.Timeframe)
+		if err != nil {
+			continue
+		}
+		frac := float64(l.lagMS) / float64(interval/time.Millisecond)
 		if math.IsNaN(frac) || math.IsInf(frac, 0) {
 			continue
 		}
@@ -833,11 +908,13 @@ func entryLagStats(labeled []labeledOutcome) (median, p95 float64, shifted int) 
 		}
 		fracs = append(fracs, frac)
 	}
+	medianMS = medianInt64(lags)
+	p95MS = nearestRankInt64(lags, 0.95)
 	if len(fracs) == 0 {
-		return 0, 0, shifted
+		return 0, 0, medianMS, p95MS, shifted
 	}
 	sort.Float64s(fracs)
-	return medianFloat(fracs), nearestRankFloat(fracs, 0.95), shifted
+	return medianFloat(fracs), nearestRankFloat(fracs, 0.95), medianMS, p95MS, shifted
 }
 
 // medianFloat returns the middle value of a sorted slice, averaging the two
@@ -870,39 +947,38 @@ func nearestRankFloat(sorted []float64, p float64) float64 {
 	return sorted[rank-1]
 }
 
-// timeframeDuration parses a bar length of integer magnitude plus unit m/h/d/w.
-// It mirrors the labeler's accepted timeframes so the report can express an
-// entry lag as a fraction of one bar without importing the labeling slice.
-func timeframeDuration(tf string) (time.Duration, bool) {
-	i := 0
-	for i < len(tf) && tf[i] >= '0' && tf[i] <= '9' {
-		i++
+// medianInt64 returns the middle value of a sorted copy, averaging the two
+// middle values for an even length. Empty input yields 0.
+func medianInt64(vals []int64) int64 {
+	n := len(vals)
+	if n == 0 {
+		return 0
 	}
-	if i == 0 || i >= len(tf) {
-		return 0, false
+	cp := append([]int64(nil), vals...)
+	sort.Slice(cp, func(i, j int) bool { return cp[i] < cp[j] })
+	if n%2 == 1 {
+		return cp[n/2]
 	}
-	n, err := strconv.Atoi(tf[:i])
-	if err != nil || n <= 0 {
-		return 0, false
+	return (cp[n/2-1] + cp[n/2]) / 2
+}
+
+// nearestRankInt64 returns the nearest-rank percentile of a sorted copy:
+// rank = ceil(p*n), 1-indexed. Empty input yields 0.
+func nearestRankInt64(vals []int64, p float64) int64 {
+	n := len(vals)
+	if n == 0 {
+		return 0
 	}
-	var unit time.Duration
-	switch tf[i:] {
-	case "m":
-		unit = time.Minute
-	case "h":
-		unit = time.Hour
-	case "d":
-		unit = 24 * time.Hour
-	case "w":
-		unit = 7 * 24 * time.Hour
-	default:
-		return 0, false
+	cp := append([]int64(nil), vals...)
+	sort.Slice(cp, func(i, j int) bool { return cp[i] < cp[j] })
+	rank := int(math.Ceil(p * float64(n)))
+	if rank < 1 {
+		rank = 1
 	}
-	d := time.Duration(n) * unit
-	if d <= 0 {
-		return 0, false
+	if rank > n {
+		rank = n
 	}
-	return d, true
+	return cp[rank-1]
 }
 
 // arenaReport aggregates arena.decision events of the selected policy. It

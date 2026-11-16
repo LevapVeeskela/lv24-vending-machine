@@ -68,6 +68,11 @@ type ReportAssumptions struct {
 	EntryLagMedian float64 `json:"entryLagMedian,omitempty"`
 	// EntryLagP95 is the 95th percentile entry lag as a fraction of one bar.
 	EntryLagP95 float64 `json:"entryLagP95,omitempty"`
+	// EntryLagMedianMS is the median entry lag in milliseconds, over the
+	// outcomes that recorded entryLagMs.
+	EntryLagMedianMS int64 `json:"entryLagMedianMs,omitempty"`
+	// EntryLagP95MS is the 95th percentile entry lag in milliseconds.
+	EntryLagP95MS int64 `json:"entryLagP95Ms,omitempty"`
 	// EntryShifted counts labeled outcomes whose entry bar was shifted.
 	EntryShifted int `json:"entryShifted,omitempty"`
 }
@@ -90,8 +95,14 @@ type ArenaReport struct {
 
 // Report is a summary of labeled outcomes and gate performance.
 type Report struct {
-	GeneratedAt          time.Time          `json:"generatedAt"`
-	LabeledCount         int                `json:"labeledCount"`
+	GeneratedAt  time.Time `json:"generatedAt"`
+	LabeledCount int       `json:"labeledCount"`
+	// AwaitingLabeling is the number of entry signals with neither a labeled
+	// outcome nor an outcome.unlabelable record yet.
+	AwaitingLabeling int `json:"awaitingLabeling,omitempty"`
+	// NoOutcomeByDeadline is the number of entry signals recorded as
+	// unlabelable when their labeling deadline passed.
+	NoOutcomeByDeadline  int                `json:"noOutcomeByDeadline,omitempty"`
 	Sufficient           bool               `json:"sufficient"`
 	VerdictCounts        map[string]int     `json:"verdictCounts"`
 	DecisionCostUSD      Decimal            `json:"decisionCostUsd"`

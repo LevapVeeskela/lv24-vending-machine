@@ -122,7 +122,8 @@ func TestGateReportInsufficient(t *testing.T) {
 		t.Fatalf("gate report = %d, stderr=%s", code, stderr.String())
 	}
 	got := stdout.String()
-	for _, want := range []string{"verdicts:", "labeled: 2", "decision cost:", "latency", "insufficient data"} {
+	for _, want := range []string{"verdicts:", "labeled: 2", "ожидают разметки: 0",
+		"без исхода по сроку: 0", "decision cost:", "latency", "insufficient data"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("human report misses %q: %q", want, got)
 		}
@@ -149,6 +150,10 @@ func TestGateReportInsufficient(t *testing.T) {
 	}
 	if rep.LabeledCount != 2 {
 		t.Fatalf("labeled = %d, want 2", rep.LabeledCount)
+	}
+	if rep.AwaitingLabeling != 0 || rep.NoOutcomeByDeadline != 0 {
+		t.Fatalf("progress = awaiting %d, missed %d, want 0/0",
+			rep.AwaitingLabeling, rep.NoOutcomeByDeadline)
 	}
 }
 

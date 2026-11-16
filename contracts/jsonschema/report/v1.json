@@ -13,6 +13,16 @@
       "format": "date-time"
     },
     "labeledCount": { "type": "integer", "minimum": 0 },
+    "awaitingLabeling": {
+      "description": "Entry signals with neither a labeled outcome nor an outcome.unlabelable record yet.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "noOutcomeByDeadline": {
+      "description": "Entry signals recorded as unlabelable when their labeling deadline passed.",
+      "type": "integer",
+      "minimum": 0
+    },
     "sufficient": { "type": "boolean" },
     "verdictCounts": {
       "type": "object",
@@ -135,6 +145,16 @@
           "type": "number",
           "minimum": 0,
           "maximum": 1
+        },
+        "entryLagMedianMs": {
+          "description": "Median entry lag in milliseconds, over outcomes that recorded entryLagMs.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "entryLagP95Ms": {
+          "description": "95th percentile entry lag in milliseconds.",
+          "type": "integer",
+          "minimum": 0
         },
         "entryShifted": {
           "description": "Number of labeled outcomes whose entry bar was shifted.",

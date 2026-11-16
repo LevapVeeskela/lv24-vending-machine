@@ -502,29 +502,30 @@ func TestScanWindowStability(t *testing.T) {
 	}
 }
 
-func TestParseInterval(t *testing.T) {
+// TestParseTimeframe pins the shared domain parser through the trend facade:
+// units are lowercase, the amount is a positive integer.
+func TestParseTimeframe(t *testing.T) {
 	tests := []struct {
 		raw  string
 		want time.Duration
 	}{
 		{"15m", 15 * time.Minute},
 		{"1h", time.Hour},
-		{"4H", 4 * time.Hour},
 		{"1d", 24 * time.Hour},
 		{"1w", 7 * 24 * time.Hour},
 	}
 	for _, tt := range tests {
-		got, err := parseInterval(tt.raw)
+		got, err := domain.ParseTimeframe(tt.raw)
 		if err != nil {
-			t.Fatalf("parseInterval(%q): %v", tt.raw, err)
+			t.Fatalf("ParseTimeframe(%q): %v", tt.raw, err)
 		}
 		if got != tt.want {
-			t.Fatalf("parseInterval(%q) = %v, want %v", tt.raw, got, tt.want)
+			t.Fatalf("ParseTimeframe(%q) = %v, want %v", tt.raw, got, tt.want)
 		}
 	}
-	for _, raw := range []string{"", "h", "0m", "-1h", "1x", "1", "1.5h", "m15"} {
-		if _, err := parseInterval(raw); err == nil {
-			t.Fatalf("parseInterval(%q): want error, got nil", raw)
+	for _, raw := range []string{"", "h", "0m", "-1h", "1x", "1", "1.5h", "m15", "4H"} {
+		if _, err := domain.ParseTimeframe(raw); err == nil {
+			t.Fatalf("ParseTimeframe(%q): want error, got nil", raw)
 		}
 	}
 }

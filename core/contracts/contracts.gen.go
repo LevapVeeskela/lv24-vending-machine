@@ -1523,6 +1523,10 @@ type Report struct {
 	// Assumptions corresponds to the JSON schema field "assumptions".
 	Assumptions *ReportAssumptions `json:"assumptions,omitempty,omitzero"`
 
+	// Entry signals with neither a labeled outcome nor an outcome.unlabelable record
+	// yet.
+	AwaitingLabeling *int `json:"awaitingLabeling,omitempty,omitzero"`
+
 	// BackfillExcluded corresponds to the JSON schema field "backfillExcluded".
 	BackfillExcluded *int `json:"backfillExcluded,omitempty,omitzero"`
 
@@ -1547,6 +1551,9 @@ type Report struct {
 	// LatencyP95Ms corresponds to the JSON schema field "latencyP95Ms".
 	LatencyP95Ms int `json:"latencyP95Ms"`
 
+	// Entry signals recorded as unlabelable when their labeling deadline passed.
+	NoOutcomeByDeadline *int `json:"noOutcomeByDeadline,omitempty,omitzero"`
+
 	// Number of labeled outcomes produced with a different horizon/fee pair than the
 	// report assumptions.
 	OtherLabelParams *int `json:"otherLabelParams,omitempty,omitzero"`
@@ -1569,8 +1576,14 @@ type ReportAssumptions struct {
 	// Median entry lag as a fraction of one bar.
 	EntryLagMedian *float64 `json:"entryLagMedian,omitempty,omitzero"`
 
+	// Median entry lag in milliseconds, over outcomes that recorded entryLagMs.
+	EntryLagMedianMs *int `json:"entryLagMedianMs,omitempty,omitzero"`
+
 	// 95th percentile entry lag as a fraction of one bar.
 	EntryLagP95 *float64 `json:"entryLagP95,omitempty,omitzero"`
+
+	// 95th percentile entry lag in milliseconds.
+	EntryLagP95Ms *int `json:"entryLagP95Ms,omitempty,omitzero"`
 
 	// Number of labeled outcomes whose entry bar was shifted.
 	EntryShifted *int `json:"entryShifted,omitempty,omitzero"`
@@ -1629,11 +1642,17 @@ func (j *ReportAssumptions) UnmarshalJSON(value []byte) error {
 	if plain.EntryLagMedian != nil && 0 > *plain.EntryLagMedian {
 		return fmt.Errorf("field %s: must be >= %v", "entryLagMedian", 0)
 	}
+	if plain.EntryLagMedianMs != nil && 0 > *plain.EntryLagMedianMs {
+		return fmt.Errorf("field %s: must be >= %v", "entryLagMedianMs", 0)
+	}
 	if plain.EntryLagP95 != nil && 1 < *plain.EntryLagP95 {
 		return fmt.Errorf("field %s: must be <= %v", "entryLagP95", 1)
 	}
 	if plain.EntryLagP95 != nil && 0 > *plain.EntryLagP95 {
 		return fmt.Errorf("field %s: must be >= %v", "entryLagP95", 0)
+	}
+	if plain.EntryLagP95Ms != nil && 0 > *plain.EntryLagP95Ms {
+		return fmt.Errorf("field %s: must be >= %v", "entryLagP95Ms", 0)
 	}
 	if plain.EntryShifted != nil && 0 > *plain.EntryShifted {
 		return fmt.Errorf("field %s: must be >= %v", "entryShifted", 0)
@@ -1791,6 +1810,9 @@ func (j *Report) UnmarshalJSON(value []byte) error {
 	if err := json.Unmarshal(value, &plain); err != nil {
 		return err
 	}
+	if plain.AwaitingLabeling != nil && 0 > *plain.AwaitingLabeling {
+		return fmt.Errorf("field %s: must be >= %v", "awaitingLabeling", 0)
+	}
 	if plain.BackfillExcluded != nil && 0 > *plain.BackfillExcluded {
 		return fmt.Errorf("field %s: must be >= %v", "backfillExcluded", 0)
 	}
@@ -1805,6 +1827,9 @@ func (j *Report) UnmarshalJSON(value []byte) error {
 	}
 	if 0 > plain.LatencyP95Ms {
 		return fmt.Errorf("field %s: must be >= %v", "latencyP95Ms", 0)
+	}
+	if plain.NoOutcomeByDeadline != nil && 0 > *plain.NoOutcomeByDeadline {
+		return fmt.Errorf("field %s: must be >= %v", "noOutcomeByDeadline", 0)
 	}
 	if plain.OtherLabelParams != nil && 0 > *plain.OtherLabelParams {
 		return fmt.Errorf("field %s: must be >= %v", "otherLabelParams", 0)

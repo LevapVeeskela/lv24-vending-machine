@@ -232,7 +232,28 @@ func (r *runner) liveChecks(cfg config.Config, cfgErr error, cfgValid bool,
 			add("decision", false, liveCode(derr))
 		} else {
 			raw = resp.Raw
-			add("decision", true, "ok cost="+resp.Usage.CostUSD.String()+" USD")
+			// The live answer goes through the same gate policy as a real
+			// signal: a syntactically valid response that the gate classifies
+			// as invalid output is a FAIL of the probe, not a success.
+			verdict := gate.Evaluate(domain.GateRequest{
+				Instrument: domain.Instrument{Venue: "binance", Symbol: symbol},
+				Side:       domain.SideBuy,
+				IntentKind: domain.IntentEntry,
+				Timeframe:  doctorLiveInterval,
+				TS:         r.clock(),
+				Price:      domain.MustParseDecimal("100"),
+			}, domain.DecisionOutcome{Response: &resp}, domain.GatePolicy{
+				Version:  cfg.Gate.Version,
+				MinPass:  cfg.Gate.MinPass,
+				MinBlock: cfg.Gate.MinBlock,
+			})
+			ok := !(verdict.Verdict == domain.VerdictAbstain && verdict.Code == gate.CodeProviderInvalidOutput)
+			status := "ok"
+			if !ok {
+				status = "FAIL"
+			}
+			add("decision", ok, fmt.Sprintf("%s verdict=%s code=%s cost=%s USD",
+				status, verdict.Verdict, verdict.Code, resp.Usage.CostUSD.String()))
 		}
 	}
 	if strings.TrimSpace(saveRaw) != "" {

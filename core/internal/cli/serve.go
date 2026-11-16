@@ -149,7 +149,7 @@ func (r *runner) cmdServe(args []string) int {
 	// ticker.
 	var trendInterval time.Duration
 	if cfg.Signals.Trend.Enabled {
-		trendInterval, err = shadow.TimeframeInterval(cfg.Signals.Trend.Timeframe)
+		trendInterval, err = domain.ParseTimeframe(cfg.Signals.Trend.Timeframe)
 		if err != nil {
 			return r.fail(jsonOut, exitUsage, codeUsage, err.Error(),
 				"fix signals.trend.timeframe via vend config validate", false, nil)

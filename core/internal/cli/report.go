@@ -134,6 +134,8 @@ func printReportHuman(w io.Writer, rep domain.Report, days int) {
 		counts[string(domain.VerdictAllow)], counts[string(domain.VerdictReject)],
 		counts[string(domain.VerdictAbstain)], counts[string(domain.VerdictSkip)])
 	fmt.Fprintf(w, "labeled: %d\n", rep.LabeledCount)
+	fmt.Fprintf(w, "ожидают разметки: %d\n", rep.AwaitingLabeling)
+	fmt.Fprintf(w, "без исхода по сроку: %d\n", rep.NoOutcomeByDeadline)
 	fmt.Fprintf(w, "policy: %s\n", shortPolicy(rep.PolicyHash))
 	fmt.Fprintf(w, "other policies: %d\n", rep.OtherPolicyDecisions)
 	fmt.Fprintf(w, "backfill: labeled=%d excluded=%d\n",
@@ -300,6 +302,8 @@ func shareMarkdown(rep domain.Report, ver string, decisions, days int) string {
 	fmt.Fprintf(&b, "- decisions: %d\n", decisions)
 	fmt.Fprintf(&b, "- days: %d\n", days)
 	fmt.Fprintf(&b, "- labeled outcomes: %d\n", rep.LabeledCount)
+	fmt.Fprintf(&b, "- ожидают разметки: %d\n", rep.AwaitingLabeling)
+	fmt.Fprintf(&b, "- без исхода по сроку: %d\n", rep.NoOutcomeByDeadline)
 	fmt.Fprintf(&b, "- verdicts: ALLOW=%d REJECT=%d ABSTAIN=%d\n\n",
 		rep.VerdictCounts[string(domain.VerdictAllow)],
 		rep.VerdictCounts[string(domain.VerdictReject)],
@@ -329,8 +333,10 @@ func shareMarkdown(rep domain.Report, ver string, decisions, days int) string {
 	if a := rep.Assumptions; a != nil {
 		fmt.Fprintf(&b, "- horizon: %d bars\n", a.HorizonBars)
 		fmt.Fprintf(&b, "- round-trip fee: %d bps\n", a.FeeBpsRoundTrip)
-		fmt.Fprintf(&b, "- entry lag median: %.4f bars\n", a.EntryLagMedian)
-		fmt.Fprintf(&b, "- entry lag p95: %.4f bars\n", a.EntryLagP95)
+		fmt.Fprintf(&b, "- entry lag median: %.4f bars (%.3f s)\n",
+			a.EntryLagMedian, float64(a.EntryLagMedianMS)/1000)
+		fmt.Fprintf(&b, "- entry lag p95: %.4f bars (%.3f s)\n",
+			a.EntryLagP95, float64(a.EntryLagP95MS)/1000)
 		fmt.Fprintf(&b, "- entry shifted: %d\n", a.EntryShifted)
 		fmt.Fprintf(&b, "- equal size, no slippage, no funding\n\n")
 	} else {

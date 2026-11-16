@@ -350,7 +350,7 @@ func (l *Labeler) wait(req domain.GateRequest, interval time.Duration, msg, reas
 // event. Per-signal failures come back as resultFailed with a nil error; only
 // a journal append error is returned so Run can stop.
 func (l *Labeler) labelOne(ctx context.Context, ev domain.Event, req domain.GateRequest, verdicts map[string]time.Time, now time.Time) (labelResult, error) {
-	interval, err := parseInterval(req.Timeframe)
+	interval, err := domain.ParseTimeframe(req.Timeframe)
 	if err != nil {
 		return l.fail(req, 0, err)
 	}
@@ -582,43 +582,6 @@ func entryLagMS(anchor, open time.Time) int64 {
 		return 0
 	}
 	return d.Milliseconds()
-}
-
-// parseInterval parses a timeframe of integer magnitude plus unit m/h/d/w
-// (minutes, hours, days, weeks) into a duration. Anything else is a clear
-// error: the horizon is N intervals, so an unknown bar length cannot label.
-func parseInterval(tf string) (time.Duration, error) {
-	bad := func() (time.Duration, error) {
-		return 0, fmt.Errorf("outcome: unsupported timeframe %q (want e.g. 5m, 1h, 1d, 1w)", tf)
-	}
-	i := 0
-	for i < len(tf) && tf[i] >= '0' && tf[i] <= '9' {
-		i++
-	}
-	if i == 0 || i >= len(tf) {
-		return bad()
-	}
-	n, err := strconv.Atoi(tf[:i])
-	if err != nil || n <= 0 {
-		return bad()
-	}
-	var unit time.Duration
-	switch tf[i:] {
-	case "m":
-		unit = time.Minute
-	case "h":
-		unit = time.Hour
-	case "d":
-		unit = 24 * time.Hour
-	case "w":
-		unit = 7 * 24 * time.Hour
-	default:
-		return bad()
-	}
-	if d := time.Duration(n) * unit; d > 0 {
-		return d, nil
-	}
-	return bad()
 }
 
 // contiguous reports whether bars open exactly one interval apart starting

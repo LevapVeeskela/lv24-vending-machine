@@ -103,9 +103,27 @@ func enableTelegram(t *testing.T, cfgPath string) {
 func okDecision() *fakeDecision {
 	raw := []byte(`{"answers":{}}`)
 	return &fakeDecision{resp: domain.DecisionResponse{
-		Answers: map[string]domain.Answer{},
-		Usage:   domain.Usage{CostUSD: domain.MustParseDecimal("0.0012")},
-		Raw:     raw,
+		Answers: map[string]domain.Answer{
+			"data_quality": {
+				Type: domain.QuestionChoice, Choice: "ok",
+				Probabilities: map[string]float64{"ok": 0.95, "insufficient": 0.05},
+			},
+			"signal_alignment": {
+				Type: domain.QuestionChoice, Choice: "aligned",
+				Probabilities: map[string]float64{"aligned": 0.8, "neutral": 0.15, "conflict": 0.05},
+			},
+			"market_regime": {
+				Type: domain.QuestionChoice, Choice: "favorable",
+				Probabilities: map[string]float64{"favorable": 0.7, "neutral": 0.2, "adverse": 0.1},
+			},
+			"risk_check": {
+				Type: domain.QuestionChoice, Choice: "pass",
+				Probabilities: map[string]float64{"pass": 0.9, "block": 0.1},
+			},
+		},
+		Model: "drex-max-v1.1",
+		Usage: domain.Usage{CostUSD: domain.MustParseDecimal("0.0012")},
+		Raw:   raw,
 	}}
 }
 
@@ -130,7 +148,7 @@ func TestDoctorLiveOK(t *testing.T) {
 	}
 	got := stdout.String()
 	for _, want := range []string{
-		"decision: ok cost=0.0012 USD", "save_raw: ok", "candles: ok", "telegram: ok",
+		"decision: ok verdict=ALLOW code=allow cost=0.0012 USD", "save_raw: ok", "candles: ok", "telegram: ok",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("stdout misses %q: %q", want, got)
@@ -163,6 +181,26 @@ func TestDoctorLiveOK(t *testing.T) {
 		if perm := st.Mode().Perm(); perm != 0o600 {
 			t.Fatalf("saved raw perm = %o, want 600", perm)
 		}
+	}
+}
+
+// TestDoctorLiveInvalidOutputFails: a provider answer that the gate classifies
+// as invalid output is a FAIL probe, not a successful live call.
+func TestDoctorLiveInvalidOutputFails(t *testing.T) {
+	env, stdout, stderr, cfgPath, dataDir := initTestEnv(t)
+	dec := &fakeDecision{resp: domain.DecisionResponse{
+		Answers: map[string]domain.Answer{},
+		Usage:   domain.Usage{CostUSD: domain.MustParseDecimal("0.0012")},
+	}}
+	env.NewRegistry = liveRegistry(t, dec, okCandles(), nil)
+	args := []string{"doctor", "--live", "--config", cfgPath, "--data-dir", dataDir}
+	if code := runArgs(env, args...); code != 1 {
+		t.Fatalf("doctor --live invalid output = %d, want 1, stdout=%s stderr=%s",
+			code, stdout.String(), stderr.String())
+	}
+	want := "decision: FAIL verdict=ABSTAIN code=invalid_output cost=0.0012 USD"
+	if got := stdout.String(); !strings.Contains(got, want) {
+		t.Fatalf("stdout misses %q: %q", want, got)
 	}
 }
 

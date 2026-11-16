@@ -253,6 +253,8 @@ func TestParityReport(t *testing.T) {
 	d := domain.Report{
 		GeneratedAt:          parityTS,
 		LabeledCount:         42,
+		AwaitingLabeling:     4,
+		NoOutcomeByDeadline:  2,
 		Sufficient:           true,
 		VerdictCounts:        map[string]int{"ALLOW": 25, "REJECT": 15, "ABSTAIN": 2},
 		DecisionCostUSD:      domain.MustParseDecimal("0.0003024"),
@@ -264,15 +266,17 @@ func TestParityReport(t *testing.T) {
 		BackfillLabeled:      5,
 		BackfillExcluded:     2,
 		Assumptions: &domain.ReportAssumptions{
-			HorizonBars:     12,
-			FeeBpsRoundTrip: 20,
-			PriceSource:     "marketdata-binance",
-			EqualSize:       true,
-			NoSlippage:      true,
-			NoFunding:       true,
-			EntryLagMedian:  0.02,
-			EntryLagP95:     0.25,
-			EntryShifted:    1,
+			HorizonBars:      12,
+			FeeBpsRoundTrip:  20,
+			PriceSource:      "marketdata-binance",
+			EqualSize:        true,
+			NoSlippage:       true,
+			NoFunding:        true,
+			EntryLagMedian:   0.02,
+			EntryLagP95:      0.25,
+			EntryLagMedianMS: 72000,
+			EntryLagP95MS:    900000,
+			EntryShifted:     1,
 		},
 		Arena: &domain.ArenaReport{
 			Decisions:      10,
@@ -397,6 +401,12 @@ func TestParityReport(t *testing.T) {
 	if c.OtherLabelParams == nil || *c.OtherLabelParams != 2 {
 		t.Fatalf("otherLabelParams lost on the wire: %+v", c)
 	}
+	if c.AwaitingLabeling == nil || *c.AwaitingLabeling != 4 {
+		t.Fatalf("awaitingLabeling lost on the wire: %+v", c)
+	}
+	if c.NoOutcomeByDeadline == nil || *c.NoOutcomeByDeadline != 2 {
+		t.Fatalf("noOutcomeByDeadline lost on the wire: %+v", c)
+	}
 	if c.Assumptions == nil || c.Assumptions.HorizonBars != 12 || c.Assumptions.FeeBpsRoundTrip != 20 {
 		t.Fatalf("assumptions lost on the wire: %+v", c.Assumptions)
 	}
@@ -408,6 +418,12 @@ func TestParityReport(t *testing.T) {
 	}
 	if c.Assumptions.EntryShifted == nil || *c.Assumptions.EntryShifted != 1 {
 		t.Fatalf("entryShifted lost on the wire: %+v", c.Assumptions)
+	}
+	if c.Assumptions.EntryLagMedianMs == nil || *c.Assumptions.EntryLagMedianMs != 72000 {
+		t.Fatalf("entryLagMedianMs lost on the wire: %+v", c.Assumptions)
+	}
+	if c.Assumptions.EntryLagP95Ms == nil || *c.Assumptions.EntryLagP95Ms != 900000 {
+		t.Fatalf("entryLagP95Ms lost on the wire: %+v", c.Assumptions)
 	}
 	if c.Assumptions.PriceSource != "marketdata-binance" || !c.Assumptions.EqualSize || !c.Assumptions.NoSlippage || !c.Assumptions.NoFunding {
 		t.Fatalf("assumptions tail lost on the wire: %+v", c.Assumptions)
@@ -437,6 +453,12 @@ func TestParityReport(t *testing.T) {
 	}
 	if back.BackfillLabeled != 5 || back.BackfillExcluded != 2 {
 		t.Fatalf("reverse backfill mismatch: %+v", back)
+	}
+	if back.AwaitingLabeling != 4 || back.NoOutcomeByDeadline != 2 {
+		t.Fatalf("reverse labeling progress mismatch: %+v", back)
+	}
+	if back.Assumptions == nil || back.Assumptions.EntryLagMedianMS != 72000 || back.Assumptions.EntryLagP95MS != 900000 {
+		t.Fatalf("reverse entry lag ms mismatch: %+v", back.Assumptions)
 	}
 	if back.OtherLabelParams != 2 {
 		t.Fatalf("reverse otherLabelParams mismatch: %+v", back)

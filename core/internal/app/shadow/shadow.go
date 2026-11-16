@@ -11,8 +11,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -307,33 +305,6 @@ func nextTrendDelay(now time.Time, interval, offset time.Duration) time.Duration
 		fire = fire.Add(interval)
 	}
 	return fire.Sub(now)
-}
-
-// TimeframeInterval parses a candle timeframe (an amount followed by m, h, d
-// or w) into the bar duration used to schedule trend scans.
-func TimeframeInterval(raw string) (time.Duration, error) {
-	s := strings.ToLower(strings.TrimSpace(raw))
-	if len(s) < 2 {
-		return 0, fmt.Errorf("timeframe %q must be an amount followed by m, h, d or w", raw)
-	}
-	n, err := strconv.Atoi(s[:len(s)-1])
-	if err != nil || n <= 0 {
-		return 0, fmt.Errorf("timeframe %q must start with a positive integer", raw)
-	}
-	var unit time.Duration
-	switch s[len(s)-1] {
-	case 'm':
-		unit = time.Minute
-	case 'h':
-		unit = time.Hour
-	case 'd':
-		unit = 24 * time.Hour
-	case 'w':
-		unit = 7 * 24 * time.Hour
-	default:
-		return 0, fmt.Errorf("timeframe %q unit must be m, h, d or w", raw)
-	}
-	return time.Duration(n) * unit, nil
 }
 
 // Status returns a snapshot of the last written status.

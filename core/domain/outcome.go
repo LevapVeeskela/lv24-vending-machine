@@ -31,9 +31,11 @@ type Outcome struct {
 	Backfill bool `json:"backfill,omitempty"`
 	// PriceSource is the candle provider id used for labeling.
 	PriceSource string `json:"priceSource,omitempty"`
-	// EntryLagMS is the delay between the signal timestamp and the actual
-	// entry bar open, in milliseconds.
-	EntryLagMS int64 `json:"entryLagMs,omitempty"`
+	// EntryLagMS is the delay between the anchor (gate verdict time, else the
+	// request receipt time) and the open of the actual entry bar, in
+	// milliseconds. The labeler always records it, including a zero lag; only
+	// an outcome written before the field existed omits it.
+	EntryLagMS int64 `json:"entryLagMs"`
 	// EntryShifted marks outcomes whose entry bar was moved forward because
 	// the configured entry bar was not usable.
 	EntryShifted bool `json:"entryShifted,omitempty"`

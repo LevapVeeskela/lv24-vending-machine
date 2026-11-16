@@ -80,34 +80,6 @@ func invalid(msg string) error {
 	return domain.NewError(domain.CodeInvalidRequest, "trend: "+msg)
 }
 
-// parseInterval converts a candle interval such as "1m", "15m", "4h", "1d"
-// or "1w" into a duration. Only a positive integer amount and the m, h, d
-// and w units are accepted.
-func parseInterval(raw string) (time.Duration, error) {
-	s := strings.ToLower(strings.TrimSpace(raw))
-	if len(s) < 2 {
-		return 0, fmt.Errorf("interval %q must be an amount followed by m, h, d or w", raw)
-	}
-	n, err := strconv.Atoi(s[:len(s)-1])
-	if err != nil || n <= 0 {
-		return 0, fmt.Errorf("interval %q must start with a positive integer", raw)
-	}
-	var unit time.Duration
-	switch s[len(s)-1] {
-	case 'm':
-		unit = time.Minute
-	case 'h':
-		unit = time.Hour
-	case 'd':
-		unit = 24 * time.Hour
-	case 'w':
-		unit = 7 * 24 * time.Hour
-	default:
-		return 0, fmt.Errorf("interval %q unit must be m, h, d or w", raw)
-	}
-	return time.Duration(n) * unit, nil
-}
-
 // New validates cfg and builds a Generator over candles.
 func New(cfg Config, candles ports.CandleProvider, deps ports.Deps) (*Generator, error) {
 	if candles == nil {
@@ -153,7 +125,7 @@ func New(cfg Config, candles ports.CandleProvider, deps ports.Deps) (*Generator,
 		return nil, invalid(fmt.Sprintf("label interval sec must not be negative, got %d", cfg.LabelIntervalSec))
 	}
 	if cfg.LabelIntervalSec > 0 {
-		interval, err := parseInterval(timeframe)
+		interval, err := domain.ParseTimeframe(timeframe)
 		if err != nil {
 			return nil, invalid(fmt.Sprintf("timeframe %q: %v", timeframe, err))
 		}

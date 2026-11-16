@@ -621,8 +621,8 @@ func TestEntryLagAssumptions(t *testing.T) {
 	}
 }
 
-// TestTimeframeDuration covers the supported bar units and rejects junk.
-func TestTimeframeDuration(t *testing.T) {
+// TestParseTimeframe covers the shared supported bar units and rejects junk.
+func TestParseTimeframe(t *testing.T) {
 	for _, tc := range []struct {
 		tf   string
 		want time.Duration
@@ -637,10 +637,102 @@ func TestTimeframeDuration(t *testing.T) {
 		{"0h", 0, false},
 		{"1x", 0, false},
 		{"-1h", 0, false},
+		{"1H", 0, false},
 	} {
-		got, ok := timeframeDuration(tc.tf)
-		if ok != tc.ok || got != tc.want {
-			t.Fatalf("timeframeDuration(%q) = %v/%v, want %v/%v", tc.tf, got, ok, tc.want, tc.ok)
+		got, err := domain.ParseTimeframe(tc.tf)
+		if (err == nil) != tc.ok || got != tc.want {
+			t.Fatalf("ParseTimeframe(%q) = %v/%v, want %v/%v", tc.tf, got, err, tc.want, tc.ok)
 		}
+	}
+}
+
+// TestLabelingProgressCounts pins the awaiting-labeling and
+// no-outcome-by-deadline counters used by the report header. Exit requests do
+// not need an outcome, a labeled signal leaves the queue and a timeout record
+// counts as a deadline miss.
+func TestLabelingProgressCounts(t *testing.T) {
+	jr := &fakeJournal{}
+	for _, sig := range []string{"s1", "s2", "s3"} {
+		appendEv(t, jr, domain.Event{
+			Kind:       domain.EventGateRequest,
+			DecisionID: "d-" + sig,
+			Payload:    gateRequestPayload(t, sig),
+		})
+	}
+	exitReq := domain.GateRequest{SignalID: "s4", IntentKind: domain.IntentExit}
+	appendEv(t, jr, domain.Event{
+		Kind:       domain.EventGateRequest,
+		DecisionID: "d-s4",
+		Payload:    mustPayload(t, exitReq),
+	})
+	appendEv(t, jr, domain.Event{
+		Kind:       domain.EventGateVerdict,
+		DecisionID: "d-s1",
+		Payload:    verdictPolicyPayload(t, domain.VerdictAllow, "p1"),
+	})
+	appendEv(t, jr, domain.Event{
+		Kind:       domain.EventOutcomeLabeled,
+		DecisionID: "d-s1",
+		Payload: outcomeOptsPayload(t, "s1", "d-s1", "0.01",
+			decSpec{entry: testClock, horizon: 1, feeBps: 0}),
+	})
+	appendEv(t, jr, domain.Event{
+		Kind:    domain.EventOutcomeUnlabelable,
+		Payload: mustPayload(t, domain.OutcomeUnlabelable{SignalID: "s2", DecisionID: "d-s2", Reason: "timeout"}),
+	})
+
+	rep := buildReport(t, jr, Config{})
+	if rep.LabeledCount != 1 {
+		t.Fatalf("labeled = %d, want 1", rep.LabeledCount)
+	}
+	if rep.AwaitingLabeling != 1 {
+		t.Fatalf("awaitingLabeling = %d, want 1 (s3)", rep.AwaitingLabeling)
+	}
+	if rep.NoOutcomeByDeadline != 1 {
+		t.Fatalf("noOutcomeByDeadline = %d, want 1 (s2)", rep.NoOutcomeByDeadline)
+	}
+}
+
+// TestEntryLagOnlyWhenRecorded: an outcome written before entryLagMs existed
+// must not be read as a zero lag. With one recorded 0.5-bar lag and one old
+// outcome, the median stays 0.5 bar (not 0.25).
+func TestEntryLagOnlyWhenRecorded(t *testing.T) {
+	jr := &fakeJournal{}
+	for _, id := range []string{"d-new", "d-old"} {
+		appendEv(t, jr, domain.Event{
+			Kind:       domain.EventGateVerdict,
+			DecisionID: id,
+			Payload:    verdictPolicyPayload(t, domain.VerdictAllow, "p1"),
+		})
+	}
+	appendEv(t, jr, domain.Event{
+		Kind:       domain.EventOutcomeLabeled,
+		DecisionID: "d-new",
+		Payload: outcomeOptsPayload(t, "s-new", "d-new", "0.01", decSpec{
+			entry: testClock, horizon: 1, feeBps: 0, entryLagMS: 1800000,
+		}),
+	})
+	// Old journal shape: no entryLagMs field at all.
+	old := []byte(`{"signalId":"s-old","decisionId":"d-old",` +
+		`"instrument":{"venue":"test-venue","symbol":"BTC/USDT"},"side":"buy",` +
+		`"timeframe":"1h","entryPrice":"100","exitPrice":"101",` +
+		`"horizonBars":1,"feeBps":0,"netReturn":"0.01","grossReturn":"0.01"}`)
+	appendEv(t, jr, domain.Event{
+		Kind:       domain.EventOutcomeLabeled,
+		DecisionID: "d-old",
+		Payload:    old,
+	})
+
+	rep := buildReport(t, jr, Config{})
+	if rep.LabeledCount != 2 {
+		t.Fatalf("labeled = %d, want 2", rep.LabeledCount)
+	}
+	a := rep.Assumptions
+	if a == nil {
+		t.Fatalf("Assumptions is nil")
+	}
+	almostEqual(t, "EntryLagMedian", a.EntryLagMedian, 0.5)
+	if a.EntryLagMedianMS != 1800000 {
+		t.Fatalf("EntryLagMedianMS = %d, want 1800000", a.EntryLagMedianMS)
 	}
 }
