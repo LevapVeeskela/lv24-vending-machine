@@ -144,6 +144,17 @@ func (r *runner) cmdServe(args []string) int {
 		return r.fail(jsonOut, exitUsage, codeUsage, err.Error(),
 			"fix signals.trend settings via vend config validate", false, nil)
 	}
+	// Schedule trend scans two seconds after each configured bar close; with
+	// trend disabled (or no timeframe) the trend phase stays on the label
+	// ticker.
+	var trendInterval time.Duration
+	if cfg.Signals.Trend.Enabled {
+		trendInterval, err = shadow.TimeframeInterval(cfg.Signals.Trend.Timeframe)
+		if err != nil {
+			return r.fail(jsonOut, exitUsage, codeUsage, err.Error(),
+				"fix signals.trend.timeframe via vend config validate", false, nil)
+		}
+	}
 	var notifier ports.Notifier
 	if cfg.Notify.Telegram.Enabled {
 		notifier, err = reg.Notifier("notify-telegram")
@@ -154,6 +165,7 @@ func (r *runner) cmdServe(args []string) int {
 	}
 	runner, err := shadow.New(jr, labeler, signals, flow, reporter, notifier, deps, shadow.Config{
 		LabelInterval: time.Duration(cfg.Outcome.LabelIntervalSec) * time.Second,
+		TrendInterval: trendInterval,
 		StatusPath:    filepath.Join(dataDir, "shadow-status.json"),
 		CodeVersion:   r.ver,
 	})
