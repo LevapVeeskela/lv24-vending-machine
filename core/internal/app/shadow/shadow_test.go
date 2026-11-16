@@ -622,8 +622,8 @@ func TestDebugSizeStable(t *testing.T) {
 	n := &fakeNotifier{}
 	rep := &fakeReporter{rep: domain.Report{LabeledCount: 1, VerdictCounts: map[string]int{}}}
 	r := newRunner(jr, fixedDeps(), testConfig(""), nil, nil, nil, rep, n)
-	if got := r.debugSize(); got != 0 {
-		t.Fatalf("debugSize = %d, want 0 before any step", got)
+	if got := r.debugSize(); got != 2 {
+		t.Fatalf("debugSize = %d, want 2 (fixed keys initialized)", got)
 	}
 	for i := 0; i < 5; i++ {
 		if err := r.Step(context.Background()); err != nil {

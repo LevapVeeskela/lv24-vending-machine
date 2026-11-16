@@ -273,12 +273,10 @@ func TestShadowSevenDays(t *testing.T) {
 
 	endDebug := runner.debugSize()
 	t.Logf("debugSize start=%d end=%d", startDebug, endDebug)
-	// debugSize must stay bounded regardless of the 2000 signals: exactly two
-	// persistent keys are expected (the provider_unavailable streak counter,
-	// reset to zero on every non-ABSTAIN verdict, and the weekly rate-limit
-	// timestamp). Anything more would mean per-signal growth.
-	if endDebug > 2 {
-		t.Fatalf("debugSize grew unboundedly: start=%d end=%d", startDebug, endDebug)
+	// debugSize must not change across the week: the two persistent keys are
+	// initialized at construction, so start and end must match exactly.
+	if endDebug != startDebug {
+		t.Fatalf("debugSize changed: start=%d end=%d", startDebug, endDebug)
 	}
 
 	if sends := notifier.sent(); len(sends) > 0 {

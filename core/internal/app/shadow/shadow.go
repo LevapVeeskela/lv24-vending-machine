@@ -125,6 +125,12 @@ func New(jr ports.Journal, labeler Labeler, signals SignalSource, evaluator Eval
 		streaks:   make(map[string]int),
 		lastSent:  make(map[string]time.Time),
 	}
+	// Initialize the fixed persistent keys so debugSize reflects the steady
+	// state from the very first step: the provider-unavailable streak counter
+	// and the weekly rate-limit timestamp. A zero time still means "never
+	// sent", so the weekly check is unchanged.
+	r.streaks[streakUnavailable] = 0
+	r.lastSent[notifyWeekly] = time.Time{}
 	// Restore the notification cursor from a previous run so notifications
 	// only process events appended after the last persisted seq. A missing or
 	// corrupt status file leaves the cursor at zero (reprocess from scratch).
