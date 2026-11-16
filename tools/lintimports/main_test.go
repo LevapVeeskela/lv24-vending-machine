@@ -78,6 +78,23 @@ func TestClassify(t *testing.T) {
 		{"app rejects providers", "core/internal/app", p + "/providers/decision-drex", false, false},
 		{"app rejects providers test", "core/internal/app", p + "/providers/decision-drex", true, false},
 		{"app rejects registry", "core/internal/app", p + "/core/internal/registry", false, false},
+
+		{"shadow stdlib", "core/internal/app/shadow", "context", false, true},
+		{"shadow domain", "core/internal/app/shadow", p + "/core/domain", false, true},
+		{"shadow ports", "core/internal/app/shadow", p + "/core/ports", false, true},
+		{"shadow gate", "core/internal/app/shadow", p + "/core/internal/gate", false, true},
+		{"shadow resilience", "core/internal/app/shadow", p + "/core/internal/resilience", false, true},
+		{"shadow outcome", "core/internal/app/shadow", p + "/core/internal/app/outcome", false, true},
+		{"shadow gateflow", "core/internal/app/shadow", p + "/core/internal/app/gateflow", false, true},
+		{"shadow report", "core/internal/app/shadow", p + "/core/internal/app/report", false, true},
+		{"shadow trend", "core/internal/app/shadow", p + "/core/internal/app/signals/trend", false, true},
+		{"shadow store non-test", "core/internal/app/shadow", p + "/core/internal/store/sqlite", false, false},
+		{"shadow store test", "core/internal/app/shadow", p + "/core/internal/store/sqlite", true, true},
+		{"shadow rejects cli", "core/internal/app/shadow", p + "/core/internal/cli", false, false},
+		{"shadow rejects journal", "core/internal/app/shadow", p + "/core/internal/journal", false, false},
+		{"shadow rejects config", "core/internal/app/shadow", p + "/core/internal/config", true, false},
+		{"shadow rejects registry", "core/internal/app/shadow", p + "/core/internal/registry", false, false},
+		{"shadow rejects providers", "core/internal/app/shadow", p + "/providers/decision-drex", false, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -103,6 +120,8 @@ func TestLayerOf(t *testing.T) {
 		{"core/internal/gate/gate_test.go", "core/internal/gate"},
 		{"core/internal/app/gateflow/flow.go", "core/internal/app"},
 		{"core/internal/app/gateflow/flow_test.go", "core/internal/app"},
+		{"core/internal/app/shadow/shadow.go", "core/internal/app/shadow"},
+		{"core/internal/app/shadow/shadow_test.go", "core/internal/app/shadow"},
 		{"core/internal/cli/cli.go", "core/internal"},
 		{"core/internal/cli/gate.go", "core/internal"},
 		{"core/internal/cli/cli_test.go", "core/internal"},

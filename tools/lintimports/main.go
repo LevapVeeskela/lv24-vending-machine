@@ -10,6 +10,11 @@
 //	                    + .../core/internal/gate + .../core/internal/resilience.
 //	                    Store, cli, journal, config, contracts and providers
 //	                    are forbidden there.
+//	core/internal/app/shadow -> stdlib + .../core/domain + .../core/ports
+//	                    + .../core/internal/gate + .../core/internal/resilience
+//	                    + .../core/internal/app/{outcome,gateflow,report}
+//	                    + .../core/internal/app/signals/trend.
+//	                    Store/sqlite is allowed only in _test.go.
 //	core/internal/*  -> anything except .../providers/* (any provider).
 //	                    Only core/cmd (the composition root) wires providers.
 //	providers/<name> -> stdlib + .../core/domain + .../core/ports
@@ -66,6 +71,16 @@ func classify(layer, importPath string, isTest bool) bool {
 	case layer == "core/internal/app":
 		return inModule("/core/domain") || inModule("/core/ports") ||
 			inModule("/core/internal/gate") || inModule("/core/internal/resilience")
+	case layer == "core/internal/app/shadow":
+		// The shadow runner is a self-contained app package: it may only use
+		// its own collaborators, never the store (outside tests) or the CLI.
+		return inModule("/core/domain") || inModule("/core/ports") ||
+			inModule("/core/internal/gate") || inModule("/core/internal/resilience") ||
+			inModule("/core/internal/app/outcome") ||
+			inModule("/core/internal/app/gateflow") ||
+			inModule("/core/internal/app/report") ||
+			inModule("/core/internal/app/signals/trend") ||
+			(inModule("/core/internal/store/sqlite") && isTest)
 	case layer == "core/internal":
 		// Only the cmd composition root wires providers.
 		return !strings.HasPrefix(importPath, modulePrefix+"/providers/")
@@ -96,6 +111,8 @@ func layerOf(relSlash string) string {
 		return "core/ports"
 	case strings.HasPrefix(relSlash, "core/internal/gate/"):
 		return "core/internal/gate"
+	case strings.HasPrefix(relSlash, "core/internal/app/shadow/"):
+		return "core/internal/app/shadow"
 	case strings.HasPrefix(relSlash, "core/internal/app/"):
 		return "core/internal/app"
 	case strings.HasPrefix(relSlash, "core/internal/"):

@@ -144,10 +144,12 @@ func Run(env Env) int {
 		return r.cmdServe(args[1:])
 	case "outcomes":
 		return r.cmdOutcomes(args[1:])
+	case "status":
+		return r.cmdStatus(args[1:])
 	default:
 		r.fail(false, exitUsage, codeUsage,
 			fmt.Sprintf("unknown command %q", args[0]),
-			"run vend with one of: version, init, config, doctor, gate, journal, serve, outcomes", false, nil)
+			"run vend with one of: version, init, config, doctor, gate, journal, serve, outcomes, status", false, nil)
 		return exitUsage
 	}
 }
@@ -166,6 +168,7 @@ func (r *runner) usage() {
 	fmt.Fprintln(r.stderr, "  journal head [--data-dir DIR] [--json]")
 	fmt.Fprintln(r.stderr, "  serve [--addr 127.0.0.1:8420]")
 	fmt.Fprintln(r.stderr, "  outcomes label [--candles FILE] [--json]")
+	fmt.Fprintln(r.stderr, "  status [--json]")
 }
 
 // fail writes the error envelope to stderr and returns exit.

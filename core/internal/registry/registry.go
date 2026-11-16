@@ -11,10 +11,18 @@ import (
 	"github.com/LevapVeeskela/lv24-vending-machine/core/ports"
 )
 
+// NotifierProvider is the registry-facing view of a notification channel:
+// the ports.Notifier capability plus its descriptor.
+type NotifierProvider interface {
+	ports.Notifier
+	Descriptor() ports.Descriptor
+}
+
 // Registry maps provider IDs to provider implementations.
 type Registry struct {
 	decisions map[string]ports.Decision
 	candles   map[string]ports.CandleProvider
+	notifiers map[string]NotifierProvider
 }
 
 // New returns an empty registry.
@@ -22,6 +30,7 @@ func New() *Registry {
 	return &Registry{
 		decisions: make(map[string]ports.Decision),
 		candles:   make(map[string]ports.CandleProvider),
+		notifiers: make(map[string]NotifierProvider),
 	}
 }
 
@@ -57,6 +66,22 @@ func (r *Registry) RegisterCandle(p ports.CandleProvider) error {
 	return nil
 }
 
+// RegisterNotifier adds a notification channel. A duplicate ID is an error.
+func (r *Registry) RegisterNotifier(p NotifierProvider) error {
+	if p == nil {
+		return fmt.Errorf("registry: nil notifier provider")
+	}
+	id := p.Descriptor().ID
+	if id == "" {
+		return fmt.Errorf("registry: notifier provider has empty ID")
+	}
+	if _, ok := r.notifiers[id]; ok {
+		return fmt.Errorf("registry: duplicate notifier provider %q", id)
+	}
+	r.notifiers[id] = p
+	return nil
+}
+
 // Decision returns the decision provider with the given ID.
 func (r *Registry) Decision(id string) (ports.Decision, error) {
 	p, ok := r.decisions[id]
@@ -75,6 +100,15 @@ func (r *Registry) Candle(id string) (ports.CandleProvider, error) {
 	return p, nil
 }
 
+// Notifier returns the notification channel with the given ID.
+func (r *Registry) Notifier(id string) (ports.Notifier, error) {
+	p, ok := r.notifiers[id]
+	if !ok {
+		return nil, fmt.Errorf("registry: unknown notifier provider %q", id)
+	}
+	return p, nil
+}
+
 // Descriptors returns all registered provider descriptors sorted by ID.
 func (r *Registry) Descriptors() []ports.Descriptor {
 	var out []ports.Descriptor
@@ -82,6 +116,9 @@ func (r *Registry) Descriptors() []ports.Descriptor {
 		out = append(out, p.Descriptor())
 	}
 	for _, p := range r.candles {
+		out = append(out, p.Descriptor())
+	}
+	for _, p := range r.notifiers {
 		out = append(out, p.Descriptor())
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
