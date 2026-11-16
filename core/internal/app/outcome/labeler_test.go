@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -87,13 +89,17 @@ func (m *memJournal) count() int {
 
 // stubSource is a scripted CandleSource for offline tests.
 type stubSource struct {
-	candles []domain.Candle
-	err     error
-	lastReq domain.CandleRequest
+	candles    []domain.Candle
+	err        error
+	errSymbols map[string]error
+	lastReq    domain.CandleRequest
 }
 
 func (s *stubSource) Candles(_ context.Context, req domain.CandleRequest) ([]domain.Candle, error) {
 	s.lastReq = req
+	if err := s.errSymbols[req.Symbol]; err != nil {
+		return nil, err
+	}
 	if s.err != nil {
 		return nil, s.err
 	}
@@ -160,13 +166,20 @@ func entryReq(signalID string, side domain.Side) domain.GateRequest {
 
 func seedRequest(t *testing.T, jr *memJournal, req domain.GateRequest, decisionID string) {
 	t.Helper()
+	seedRequestAt(t, jr, req, decisionID, req.TS)
+}
+
+// seedRequestAt appends one entry gate.request whose envelope ts is the
+// receipt time, which may differ from the signal ts.
+func seedRequestAt(t *testing.T, jr *memJournal, req domain.GateRequest, decisionID string, receivedAt time.Time) {
+	t.Helper()
 	raw, err := json.Marshal(req)
 	if err != nil {
 		t.Fatalf("encode request: %v", err)
 	}
 	if _, err := jr.Append(context.Background(), domain.Event{
 		Kind:          domain.EventGateRequest,
-		TS:            req.TS,
+		TS:            receivedAt,
 		SchemaVersion: domain.EventSchemaVersion,
 		Payload:       raw,
 		CodeVersion:   "v-test",
@@ -273,6 +286,12 @@ func TestBuyExactNumbers(t *testing.T) {
 	}
 	if !oc.EntryTS.Equal(sigTS) {
 		t.Fatalf("entryTs = %v, want %v", oc.EntryTS, sigTS)
+	}
+	if !oc.ReceivedAt.Equal(sigTS) {
+		t.Fatalf("receivedAt = %v, want %v", oc.ReceivedAt, sigTS)
+	}
+	if oc.Backfill {
+		t.Fatalf("backfill = true, want false for an on-time signal")
 	}
 	if want := time.Date(2026, time.November, 10, 8, 0, 0, 0, time.UTC); !oc.ExitTS.Equal(want) {
 		t.Fatalf("exitTs = %v, want %v", oc.ExitTS, want)
@@ -525,7 +544,7 @@ func TestCandlesHash(t *testing.T) {
 	}
 }
 
-func TestZeroEntryPriceErrors(t *testing.T) {
+func TestZeroEntryPriceFailed(t *testing.T) {
 	jr := &memJournal{}
 	bars := twoBars()
 	bars[0].Open = domain.MustParseDecimal("0")
@@ -535,8 +554,12 @@ func TestZeroEntryPriceErrors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() = %v", err)
 	}
-	if _, err := lb.Run(context.Background()); err == nil {
-		t.Fatalf("Run() = nil, want zero entry price error")
+	sum, err := lb.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run() = %v, want isolated failure", err)
+	}
+	if sum != (Summary{Failed: 1}) {
+		t.Fatalf("summary = %+v, want {Failed:1}", sum)
 	}
 	if n := jr.count(); n != 1 {
 		t.Fatalf("events = %d, want 1 (no label appended)", n)
@@ -575,6 +598,7 @@ func TestErrorsPropagate(t *testing.T) {
 		t.Fatalf("Run() walk err = %v, want boom", err)
 	}
 
+	// A candle source failure is isolated to its own signal.
 	jr2 := &memJournal{}
 	src := &stubSource{err: boom}
 	seedRequest(t, jr2, entryReq("sig-err", domain.SideBuy), "dec-1")
@@ -582,10 +606,18 @@ func TestErrorsPropagate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() = %v", err)
 	}
-	if _, err := lb2.Run(context.Background()); !errors.Is(err, boom) {
-		t.Fatalf("Run() source err = %v, want boom", err)
+	sum, err := lb2.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run() source err = %v, want isolated failure", err)
+	}
+	if sum != (Summary{Failed: 1}) {
+		t.Fatalf("summary = %+v, want {Failed:1}", sum)
+	}
+	if n := jr2.count(); n != 1 {
+		t.Fatalf("events = %d, want 1 (no outcome on a source failure)", n)
 	}
 
+	// A journal append failure stays fatal.
 	jr3 := &memJournal{}
 	seedRequest(t, jr3, entryReq("sig-err", domain.SideBuy), "dec-1")
 	lb3, err := New(jr3, &stubSource{candles: twoBars()}, testDeps(), testConfig())
@@ -598,7 +630,7 @@ func TestErrorsPropagate(t *testing.T) {
 	}
 }
 
-func TestMissingBarSkipped(t *testing.T) {
+func TestMissingBarUnlabelable(t *testing.T) {
 	jr := &memJournal{}
 	bars := []domain.Candle{
 		candle("BTCUSDT", "1h", sigTS, sigTS.Add(time.Hour), "100", "110", "90", "105", "1000"),
@@ -616,15 +648,15 @@ func TestMissingBarSkipped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run() = %v", err)
 	}
-	if sum != (Summary{Skipped: 1}) {
-		t.Fatalf("summary = %+v, want {Skipped:1}", sum)
+	if sum != (Summary{Unlabelable: 1}) {
+		t.Fatalf("summary = %+v, want {Unlabelable:1}", sum)
 	}
 	if n := jr.count(); n != 1 {
 		t.Fatalf("events = %d, want 1 (no outcome event on a gappy window)", n)
 	}
 }
 
-func TestShiftedBarSkipped(t *testing.T) {
+func TestShiftedBarUnlabelable(t *testing.T) {
 	jr := &memJournal{}
 	bars := []domain.Candle{
 		candle("BTCUSDT", "1h", sigTS, sigTS.Add(time.Hour), "100", "110", "90", "105", "1000"),
@@ -642,8 +674,8 @@ func TestShiftedBarSkipped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run() = %v", err)
 	}
-	if sum != (Summary{Skipped: 1}) {
-		t.Fatalf("summary = %+v, want {Skipped:1}", sum)
+	if sum != (Summary{Unlabelable: 1}) {
+		t.Fatalf("summary = %+v, want {Unlabelable:1}", sum)
 	}
 	if n := jr.count(); n != 1 {
 		t.Fatalf("events = %d, want 1 (no outcome event on a shifted window)", n)
@@ -701,7 +733,7 @@ func TestCandlesHashRepresentationIndependent(t *testing.T) {
 	}
 }
 
-func TestUnsupportedTimeframeErrors(t *testing.T) {
+func TestUnsupportedTimeframeFailed(t *testing.T) {
 	for _, tf := range []string{"", "1M", "xyz", "h", "0h", "1H", "1.5h"} {
 		jr := &memJournal{}
 		req := entryReq("sig-badtf", domain.SideBuy)
@@ -711,12 +743,192 @@ func TestUnsupportedTimeframeErrors(t *testing.T) {
 		if err != nil {
 			t.Fatalf("New() = %v", err)
 		}
-		_, err = lb.Run(context.Background())
-		if err == nil || !strings.Contains(err.Error(), "unsupported timeframe") {
-			t.Fatalf("Run() with timeframe %q = %v, want a clear unsupported-timeframe error", tf, err)
+		sum, err := lb.Run(context.Background())
+		if err != nil {
+			t.Fatalf("Run() with timeframe %q = %v, want isolated failure", tf, err)
+		}
+		if sum != (Summary{Failed: 1}) {
+			t.Fatalf("summary with timeframe %q = %+v, want {Failed:1}", tf, sum)
 		}
 		if n := jr.count(); n != 1 {
 			t.Fatalf("events = %d, want 1 (no outcome event on bad timeframe)", n)
 		}
+	}
+}
+
+// TestSignalAtBarOpenUsesNextBar: the signal ts is the open of the 06:00 bar,
+// but the gate accepted it exactly at that bar's close, so the entry is the
+// next bar.
+func TestSignalAtBarOpenUsesNextBar(t *testing.T) {
+	jr := &memJournal{}
+	req := entryReq("sig-atopen", domain.SideBuy)
+	seedRequestAt(t, jr, req, "dec-1", sigTS.Add(time.Hour))
+	cfg := testConfig()
+	cfg.HorizonBars = 1
+	lb, err := New(jr, &stubSource{candles: twoBars()}, testDeps(), cfg)
+	if err != nil {
+		t.Fatalf("New() = %v", err)
+	}
+	sum, err := lb.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run() = %v", err)
+	}
+	if sum != (Summary{Labeled: 1}) {
+		t.Fatalf("summary = %+v, want {Labeled:1}", sum)
+	}
+	oc := labeledOutcome(t, jr)
+	if want := sigTS.Add(time.Hour); !oc.EntryTS.Equal(want) {
+		t.Fatalf("entryTs = %v, want %v (next bar)", oc.EntryTS, want)
+	}
+	if oc.EntryPrice.String() != "105" {
+		t.Fatalf("entryPrice = %q, want 105", oc.EntryPrice.String())
+	}
+	if oc.Backfill {
+		t.Fatalf("backfill = true, want false (accepted within one interval)")
+	}
+}
+
+// TestLateSignalBackfill: the signal is accepted hours after its ts, so it is
+// flagged as backfill and may enter a bar that had already closed at receipt.
+func TestLateSignalBackfill(t *testing.T) {
+	jr := &memJournal{}
+	req := entryReq("sig-late", domain.SideBuy)
+	receivedAt := sigTS.Add(90 * time.Minute)
+	seedRequestAt(t, jr, req, "dec-1", receivedAt)
+	cfg := testConfig()
+	cfg.HorizonBars = 1
+	cfg.PriceSource = "marketdata-stub"
+	lb, err := New(jr, &stubSource{candles: twoBars()}, testDeps(), cfg)
+	if err != nil {
+		t.Fatalf("New() = %v", err)
+	}
+	sum, err := lb.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run() = %v", err)
+	}
+	if sum != (Summary{Labeled: 1}) {
+		t.Fatalf("summary = %+v, want {Labeled:1}", sum)
+	}
+	oc := labeledOutcome(t, jr)
+	if !oc.Backfill {
+		t.Fatalf("backfill = false, want true for a signal accepted 90m late")
+	}
+	if !oc.ReceivedAt.Equal(receivedAt) {
+		t.Fatalf("receivedAt = %v, want %v", oc.ReceivedAt, receivedAt)
+	}
+	// Entry bar closed at 07:00, before receipt: allowed only because it is a
+	// backfill sample.
+	if !oc.EntryTS.Equal(sigTS) {
+		t.Fatalf("entryTs = %v, want %v", oc.EntryTS, sigTS)
+	}
+	if !oc.ExitTS.Equal(sigTS.Add(time.Hour)) {
+		t.Fatalf("exitTs = %v, want %v (closed before receipt)", oc.ExitTS, sigTS.Add(time.Hour))
+	}
+	if oc.PriceSource != "marketdata-stub" {
+		t.Fatalf("priceSource = %q, want marketdata-stub", oc.PriceSource)
+	}
+}
+
+// TestOneFailingSymbolIsolated: one broken symbol must not stop the other
+// nine, and the failure is logged with ids only.
+func TestOneFailingSymbolIsolated(t *testing.T) {
+	jr := &memJournal{}
+	var logBuf strings.Builder
+	deps := testDeps()
+	deps.Logger = slog.New(slog.NewTextHandler(&logBuf, nil))
+	src := &stubSource{
+		errSymbols: map[string]error{"S0": errors.New("provider unavailable")},
+	}
+	cfg := testConfig()
+	cfg.HorizonBars = 1
+	for i := 0; i < 10; i++ {
+		sym := "S" + strconv.Itoa(i)
+		req := entryReq("sig-"+strconv.Itoa(i), domain.SideBuy)
+		req.Instrument.Symbol = sym
+		seedRequest(t, jr, req, "dec-"+strconv.Itoa(i))
+		src.candles = append(src.candles,
+			candle(sym, "1h", sigTS, sigTS.Add(time.Hour), "100", "110", "90", "105", "1000"),
+			candle(sym, "1h", sigTS.Add(time.Hour), sigTS.Add(2*time.Hour), "105", "115", "95", "112", "2000"))
+	}
+	lb, err := New(jr, src, deps, cfg)
+	if err != nil {
+		t.Fatalf("New() = %v", err)
+	}
+	sum, err := lb.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run() = %v", err)
+	}
+	if sum != (Summary{Labeled: 9, Failed: 1}) {
+		t.Fatalf("summary = %+v, want {Labeled:9 Failed:1}", sum)
+	}
+	evs, err := jr.Query(context.Background(), 0, domain.EventOutcomeLabeled)
+	if err != nil {
+		t.Fatalf("query labeled: %v", err)
+	}
+	if len(evs) != 9 {
+		t.Fatalf("labeled events = %d, want 9", len(evs))
+	}
+	for _, ev := range evs {
+		var oc domain.Outcome
+		if err := json.Unmarshal(ev.Payload, &oc); err != nil {
+			t.Fatalf("decode outcome: %v", err)
+		}
+		if oc.SignalID == "sig-0" {
+			t.Fatalf("the failing signal was labeled")
+		}
+	}
+	out := logBuf.String()
+	if !strings.Contains(out, "outcome: label failed") || !strings.Contains(out, "sig-0") {
+		t.Fatalf("warning log misses the failing signal: %q", out)
+	}
+	if strings.Contains(out, "secret") {
+		t.Fatalf("warning log must not carry secrets: %q", out)
+	}
+}
+
+func TestNetFeeTenBpsExact(t *testing.T) {
+	jr := &memJournal{}
+	seedRequest(t, jr, entryReq("sig-fee", domain.SideBuy), "dec-1")
+	cfg := testConfig()
+	cfg.FeeBps = 10
+	lb, err := New(jr, &stubSource{candles: twoBars()}, testDeps(), cfg)
+	if err != nil {
+		t.Fatalf("New() = %v", err)
+	}
+	if sum, err := lb.Run(context.Background()); err != nil {
+		t.Fatalf("Run() = %v", err)
+	} else if sum != (Summary{Labeled: 1}) {
+		t.Fatalf("summary = %+v, want {Labeled:1}", sum)
+	}
+	oc := labeledOutcome(t, jr)
+	if oc.NetReturn.String() != "0.118000000000" {
+		t.Fatalf("net = %q, want 0.118000000000", oc.NetReturn.String())
+	}
+	want := oc.GrossReturn.Sub(domain.MustParseDecimal("0.002"))
+	if oc.NetReturn.Cmp(want) != 0 {
+		t.Fatalf("net = %q, want gross - 0.002 = %q", oc.NetReturn.String(), want.String())
+	}
+}
+
+// TestOldOutcomeJSONDecodes guards journal compatibility: outcomes written
+// before receivedAt/backfill/priceSource existed must still decode.
+func TestOldOutcomeJSONDecodes(t *testing.T) {
+	const old = `{"signalId":"sig-old","decisionId":"dec-old",` +
+		`"instrument":{"venue":"binance","symbol":"BTCUSDT"},"side":"buy",` +
+		`"timeframe":"1h","entryTs":"2026-11-10T06:00:00Z","entryPrice":"100",` +
+		`"exitTs":"2026-11-10T08:00:00Z","exitPrice":"112","horizonBars":2,` +
+		`"feeBps":20,"grossReturn":"0.120000000000","netReturn":"0.116000000000",` +
+		`"mfe":"0.150000000000","mae":"-0.100000000000",` +
+		`"candlesHash":"abc","labeledAt":"2026-11-16T08:00:00Z"}`
+	var oc domain.Outcome
+	if err := json.Unmarshal([]byte(old), &oc); err != nil {
+		t.Fatalf("decode old outcome: %v", err)
+	}
+	if oc.SignalID != "sig-old" || oc.NetReturn.String() != "0.116000000000" {
+		t.Fatalf("decoded outcome = %+v", oc)
+	}
+	if !oc.ReceivedAt.IsZero() || oc.Backfill || oc.PriceSource != "" {
+		t.Fatalf("new fields = %v/%v/%q, want zero values",
+			oc.ReceivedAt, oc.Backfill, oc.PriceSource)
 	}
 }

@@ -3,8 +3,10 @@
 // The Labeler replays gate.request events from the journal, fetches the
 // closed candles that follow each signal, and appends one outcome.labeled
 // event per signal. Labeling never looks ahead: only candles with
-// CloseTime before now are used, and the first used bar always opens at or
-// after the signal timestamp.
+// CloseTime before now are used, the first used bar always opens at or
+// after the signal timestamp, and a bar that closed before the gate
+// accepted the signal is only allowed for a late (backfill) signal, which
+// is flagged in the outcome.
 package outcome
 
 import (
@@ -33,6 +35,10 @@ type Config struct {
 	FeeBps int
 	// CodeVersion is stamped on every appended event envelope.
 	CodeVersion string
+	// PriceSource names the candles used for labeling: the market data
+	// provider descriptor id, or "file" for a replayed candles file. It is
+	// copied into every outcome so a provider change is visible in reports.
+	PriceSource string
 }
 
 // CandleSource serves historical OHLCV candles.
@@ -49,7 +55,29 @@ type Summary struct {
 	Skipped int
 	// Already is the number of entry signals labeled on an earlier run.
 	Already int
+	// Unlabelable is the number of entry signals whose closed candles are
+	// missing or off-grid: no honest forward window exists, so nothing is
+	// appended and the signal stays retryable.
+	Unlabelable int
+	// Failed is the number of entry signals whose labeling errored (candle
+	// source, bad payload, unsupported timeframe, math). One bad symbol never
+	// stops the pass; the signal stays retryable.
+	Failed int
 }
+
+// labelResult classifies one labeled (or not labeled) entry signal.
+type labelResult int
+
+const (
+	// resultLabeled means an outcome.labeled event was appended.
+	resultLabeled labelResult = iota
+	// resultSkipped means the forward window is not complete yet.
+	resultSkipped
+	// resultUnlabelable means the forward window has gaps or shifts.
+	resultUnlabelable
+	// resultFailed means labeling this one signal errored.
+	resultFailed
+)
 
 // Labeler labels gate entry signals with forward candle returns.
 type Labeler struct {
@@ -107,7 +135,13 @@ func (l *Labeler) Run(ctx context.Context) (Summary, error) {
 	for _, ev := range reqs {
 		var req domain.GateRequest
 		if err := json.Unmarshal(ev.Payload, &req); err != nil {
-			return Summary{}, fmt.Errorf("outcome: decode gate request at seq %d: %w", ev.Seq, err)
+			// One corrupt payload must not stop an unattended pass.
+			out.Failed++
+			if l.deps.Logger != nil {
+				l.deps.Logger.Warn("outcome: decode gate request",
+					"seq", ev.Seq, "err", err.Error())
+			}
+			continue
 		}
 		if req.IntentKind != domain.IntentEntry {
 			continue
@@ -116,55 +150,82 @@ func (l *Labeler) Run(ctx context.Context) (Summary, error) {
 			out.Already++
 			continue
 		}
-		done, err := l.labelOne(ctx, ev, req, now)
+		res, err := l.labelOne(ctx, ev, req, now)
 		if err != nil {
+			// Only journal failures are fatal: losing the journal is not a
+			// per-signal problem.
 			return Summary{}, err
 		}
-		if done {
+		switch res {
+		case resultLabeled:
 			labeled[req.SignalID] = true
 			out.Labeled++
-		} else {
+		case resultSkipped:
 			out.Skipped++
+		case resultUnlabelable:
+			out.Unlabelable++
+		case resultFailed:
+			out.Failed++
 		}
 	}
 	return out, nil
 }
 
+// fail logs one per-signal labeling error and asks Run to continue. The
+// message carries ids only: no payload, price or secret ever reaches the log.
+func (l *Labeler) fail(req domain.GateRequest, err error) (labelResult, error) {
+	if l.deps.Logger != nil {
+		l.deps.Logger.Warn("outcome: label failed",
+			"signalId", req.SignalID,
+			"symbol", req.Instrument.Symbol,
+			"err", err.Error())
+	}
+	return resultFailed, nil
+}
+
 // labelOne fetches the candles following req and appends the outcome.labeled
-// event. It reports false when fewer than HorizonBars consecutive closed
-// candles exist yet, in which case nothing is appended.
-func (l *Labeler) labelOne(ctx context.Context, ev domain.Event, req domain.GateRequest, now time.Time) (bool, error) {
+// event. Per-signal failures come back as resultFailed with a nil error; only
+// a journal append error is returned so Run can stop.
+func (l *Labeler) labelOne(ctx context.Context, ev domain.Event, req domain.GateRequest, now time.Time) (labelResult, error) {
 	interval, err := parseInterval(req.Timeframe)
 	if err != nil {
-		return false, err
+		return l.fail(req, err)
 	}
+	// receivedAt is when the gate accepted the signal, not when the signal
+	// claims to have fired: the difference decides whether the signal is a
+	// late (backfill) sample.
+	receivedAt := ev.TS.UTC()
+	backfill := !req.TS.IsZero() && receivedAt.Sub(req.TS.UTC()) > interval
 	candles, err := l.src.Candles(ctx, domain.CandleRequest{
 		Symbol:   req.Instrument.Symbol,
 		Interval: req.Timeframe,
-		From:     req.TS,
+		From:     req.TS.UTC(),
 		Limit:    l.cfg.HorizonBars + 2,
 	})
 	if err != nil {
-		return false, err
+		return l.fail(req, fmt.Errorf("outcome: candles for signal %q: %w", req.SignalID, err))
 	}
-	bars := selectBars(candles, req, now)
+	bars := selectBars(candles, req, receivedAt, backfill, now)
 	if len(bars) < l.cfg.HorizonBars {
-		return false, nil
+		return resultSkipped, nil
 	}
 	bars = bars[:l.cfg.HorizonBars]
 	if !contiguous(bars, interval) {
 		// A missing or shifted bar breaks the horizon: labeling over a
 		// gappy window would silently change the holding period.
-		return false, nil
+		return resultUnlabelable, nil
 	}
 	oc, err := l.buildOutcome(req, bars, now)
 	if err != nil {
-		return false, err
+		return l.fail(req, err)
 	}
 	oc.DecisionID = ev.DecisionID
+	oc.ReceivedAt = receivedAt
+	oc.Backfill = backfill
+	oc.PriceSource = l.cfg.PriceSource
 	raw, err := json.Marshal(oc)
 	if err != nil {
-		return false, fmt.Errorf("outcome: encode outcome for signal %q: %w", req.SignalID, err)
+		return l.fail(req, fmt.Errorf("outcome: encode outcome for signal %q: %w", req.SignalID, err))
 	}
 	if _, err := l.jr.Append(ctx, domain.Event{
 		Kind:          domain.EventOutcomeLabeled,
@@ -174,25 +235,36 @@ func (l *Labeler) labelOne(ctx context.Context, ev domain.Event, req domain.Gate
 		CodeVersion:   l.cfg.CodeVersion,
 		DecisionID:    ev.DecisionID,
 	}); err != nil {
-		return false, err
+		return resultFailed, err
 	}
-	return true, nil
+	return resultLabeled, nil
 }
 
 // selectBars keeps the usable candles for req: same symbol and interval,
-// opening at or after the signal, already closed as of now. The result is
-// sorted by open time ascending with duplicates removed (first wins).
-func selectBars(all []domain.Candle, req domain.GateRequest, now time.Time) []domain.Candle {
+// opening at or after the signal, already closed as of now.
+//
+// A signal accepted while its own bar was still open may enter at that bar's
+// open, so the bar must close after receipt. A late (backfill) signal may
+// enter a bar that had already closed when it arrived; the outcome then
+// records backfill=true so reports can keep those samples apart.
+//
+// The result is sorted by open time ascending with duplicates removed (first
+// wins).
+func selectBars(all []domain.Candle, req domain.GateRequest, receivedAt time.Time, backfill bool, now time.Time) []domain.Candle {
 	sigTS := req.TS.UTC()
 	var bars []domain.Candle
 	for _, c := range all {
 		if c.Symbol != req.Instrument.Symbol || c.Interval != req.Timeframe {
 			continue
 		}
-		if c.OpenTime.UTC().Before(sigTS) {
+		open, closed := c.OpenTime.UTC(), c.CloseTime.UTC()
+		if open.Before(sigTS) {
 			continue
 		}
-		if !c.CloseTime.UTC().Before(now) {
+		if !closed.Before(now) {
+			continue
+		}
+		if !backfill && !closed.After(receivedAt) {
 			continue
 		}
 		bars = append(bars, c)

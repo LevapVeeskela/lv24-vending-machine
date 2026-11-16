@@ -17,9 +17,11 @@ import (
 
 // outcomeSummary is the machine-readable outcomes label result.
 type outcomeSummary struct {
-	Labeled int `json:"labeled"`
-	Skipped int `json:"skipped"`
-	Already int `json:"already"`
+	Labeled     int `json:"labeled"`
+	Skipped     int `json:"skipped"`
+	Already     int `json:"already"`
+	Failed      int `json:"failed"`
+	Unlabelable int `json:"unlabelable"`
 }
 
 func (r *runner) cmdOutcomes(args []string) int {
@@ -99,6 +101,7 @@ func (r *runner) cmdOutcomesLabel(args []string) int {
 	defer func() { _ = closer.Close() }()
 
 	var src outcome.CandleSource
+	priceSource := "file"
 	if strings.TrimSpace(*candles) != "" {
 		cs, failCode, failErr := readCandlesFile(*candles)
 		if failErr != nil {
@@ -123,6 +126,7 @@ func (r *runner) cmdOutcomesLabel(args []string) int {
 				"align providers.marketdata.id with a registered provider", false, nil)
 		}
 		src = p
+		priceSource = p.Descriptor().ID
 	}
 
 	lb, err := outcome.New(jr, src, ports.Deps{
@@ -133,6 +137,7 @@ func (r *runner) cmdOutcomesLabel(args []string) int {
 		HorizonBars: cfg.Outcome.HorizonBars,
 		FeeBps:      cfg.Outcome.FeeBps,
 		CodeVersion: r.ver,
+		PriceSource: priceSource,
 	})
 	if err != nil {
 		return r.fail(jsonOut, exitGeneral, codeGeneral, err.Error(),
@@ -143,7 +148,13 @@ func (r *runner) cmdOutcomesLabel(args []string) int {
 		return r.fail(jsonOut, exitGeneral, codeGeneral, err.Error(),
 			"check the database file is a valid sqlite database", false, nil)
 	}
-	res := outcomeSummary{Labeled: sum.Labeled, Skipped: sum.Skipped, Already: sum.Already}
+	res := outcomeSummary{
+		Labeled:     sum.Labeled,
+		Skipped:     sum.Skipped,
+		Already:     sum.Already,
+		Failed:      sum.Failed,
+		Unlabelable: sum.Unlabelable,
+	}
 	if jsonOut {
 		r.printJSON(res)
 		return exitOK
@@ -151,6 +162,8 @@ func (r *runner) cmdOutcomesLabel(args []string) int {
 	fmt.Fprintf(r.stdout, "labeled: %d\n", res.Labeled)
 	fmt.Fprintf(r.stdout, "skipped: %d\n", res.Skipped)
 	fmt.Fprintf(r.stdout, "already: %d\n", res.Already)
+	fmt.Fprintf(r.stdout, "failed: %d\n", res.Failed)
+	fmt.Fprintf(r.stdout, "unlabelable: %d\n", res.Unlabelable)
 	return exitOK
 }
 
