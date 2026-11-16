@@ -10,7 +10,7 @@
 > символы и локальная сборка релиза. Бинарники не подписаны; релиз собирается
 > `go run ./tools/release` и никуда не загружается.
 > Установка — [install](docs/install.md) / [install.ru](docs/install.ru.md);
-> живая проверка на 30–40 минут — [runbook](docs/runbook-live-smoke.md);
+> живая проверка на 15 минут — [runbook](docs/runbook-live-smoke.md);
 > выпуск — [release checklist](docs/release-checklist.md).
 > **НЕ сделано:** публикация релиза, адаптер TradingView webhook,
 > desktop/web/mobile, paper/live, команды Telegram (двусторонний бот).

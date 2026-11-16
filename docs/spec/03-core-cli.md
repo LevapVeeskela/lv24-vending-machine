@@ -47,7 +47,7 @@ Application Support` на macOS): `vending.db` и `shadow-status.json` в M1; `r
 ### 2.0 Реализовано в M0/M1 (shadow-гейт)
 
 Установка (бинарник или сборка) — [install](../install.md) /
-[install.ru](../install.ru.md); живая проверка на 30–40 минут —
+[install.ru](../install.ru.md); живая проверка на 15 минут —
 [runbook-live-smoke](../runbook-live-smoke.md); выпуск предрелиза —
 [release-checklist](../release-checklist.md).
 

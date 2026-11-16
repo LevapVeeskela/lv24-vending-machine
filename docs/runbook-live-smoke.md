@@ -205,7 +205,8 @@ vend status --json
 ```
 
 Поля: `version`, `policyHash`, `events`, `labeled`, `lastLabelAt`,
-`lastCycleError`, `updatedAt`, `lastSeq`.
+`lastCycleError`, `updatedAt`, `lastSeq`. `lastLabelAt`, `lastCycleError` и
+`lastSeq` опускаются, когда пусты.
 
 Ожидаемо:
 
@@ -219,8 +220,10 @@ vend status --json
 - `lastCycleError` пустой; если там текст — цикл упал, см. «Если что-то не так»;
 - `updatedAt` не старше `labelIntervalSec` + несколько секунд.
 
-Без запущенного `serve` статус-файла нет: `events`/`labeled` считаются по
-журналу, `policy: none`, `last label: never`.
+Без единого запуска `serve` статус-файла нет: `events`/`labeled` считаются по
+журналу, `policy: none`, `last label: never`. После остановки файл остаётся,
+поэтому `updatedAt` перестаёт обновляться; свежесть проверяйте при работающем
+`serve`.
 
 ### `vend gate report`
 
