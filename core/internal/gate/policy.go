@@ -21,32 +21,36 @@ func DefaultPolicy() domain.GatePolicy {
 	return domain.DefaultGatePolicy()
 }
 
-// Normalize fills zero-value policy fields with defaults.
+// Normalize fills an empty policy version with the frozen default.
 //
 // NOTE: the task text spells this as a method on domain.GatePolicy, which Go
 // forbids (methods cannot be declared on types from another package), so it
 // is a package-level function instead.
+//
+// Thresholds are never defaulted here: a MinPass or MinBlock outside (0,1]
+// (including zero, NaN and infinities) is invalid and must be rejected by
+// Evaluate, not silently replaced.
 func Normalize(p domain.GatePolicy) domain.GatePolicy {
 	if p.Version == "" {
 		p.Version = QuestionsVersion
 	}
-	if p.MinPass == 0 {
-		p.MinPass = 0.55
-	}
-	if p.MinBlock == 0 {
-		p.MinBlock = 0.50
-	}
 	return p
 }
 
-// PolicyHash returns a stable hash of the policy and the check order.
-//
-// Thresholds use the shortest exact round-trip form
-// (strconv.FormatFloat with 'g', -1), so policies differing by any
-// representable amount hash differently. The hashed JSON is deterministic:
-// {"version":"gate-v1","minPass":"0.55","minBlock":"0.5","checks":["intent",...]}
+// PolicyHash returns a stable 64-char lowercase hex hash of the normalized
+// policy and the full frozen question set: version, thresholds, check order,
+// and for every question its id, type, instructions and ordered options
+// (key plus description). Deterministic serialization with stable field
+// order and question/option order; thresholds use the shortest exact
+// round-trip form (strconv.FormatFloat with 'g', -1).
 func PolicyHash(p domain.GatePolicy) string {
-	p = Normalize(p)
+	return policyHashWithQuestions(Normalize(p), Questions())
+}
+
+// policyHashWithQuestions is the pure hashing core behind PolicyHash. The
+// question list is a parameter so tests can prove sensitivity to question
+// text, option keys, option descriptions and option order.
+func policyHashWithQuestions(p domain.GatePolicy, qs []domain.Question) string {
 	var sb strings.Builder
 	sb.WriteString(`{"version":`)
 	sb.WriteString(strconv.Quote(p.Version))
@@ -61,9 +65,33 @@ func PolicyHash(p domain.GatePolicy) string {
 		}
 		sb.WriteString(strconv.Quote(c))
 	}
+	sb.WriteString(`],"questions":[`)
+	for i, q := range qs {
+		if i > 0 {
+			sb.WriteByte(',')
+		}
+		sb.WriteString(`{"id":`)
+		sb.WriteString(strconv.Quote(q.ID))
+		sb.WriteString(`,"type":`)
+		sb.WriteString(strconv.Quote(string(q.Type)))
+		sb.WriteString(`,"instructions":`)
+		sb.WriteString(strconv.Quote(q.Instructions))
+		sb.WriteString(`,"options":[`)
+		for j, o := range q.Options {
+			if j > 0 {
+				sb.WriteByte(',')
+			}
+			sb.WriteString(`{"key":`)
+			sb.WriteString(strconv.Quote(o.Key))
+			sb.WriteString(`,"description":`)
+			sb.WriteString(strconv.Quote(o.Description))
+			sb.WriteByte('}')
+		}
+		sb.WriteString(`]}`)
+	}
 	sb.WriteString(`]}`)
 	sum := sha256.Sum256([]byte(sb.String()))
-	return "sha256:" + hex.EncodeToString(sum[:])
+	return hex.EncodeToString(sum[:])
 }
 
 // Questions returns the frozen gate-v1 question set in fixed order.

@@ -2,11 +2,18 @@ package gate
 
 import (
 	"errors"
+	"math"
 	"reflect"
 	"testing"
 
 	"github.com/LevapVeeskela/lv24-vending-machine/core/domain"
 )
+
+// nan returns a quiet NaN for invalid-policy and invalid-output cases.
+func nan() float64 { return math.NaN() }
+
+// inf returns +Inf for invalid-policy cases.
+func inf() float64 { return math.Inf(1) }
 
 func entryReq() domain.GateRequest {
 	return domain.GateRequest{
@@ -193,7 +200,7 @@ func TestEvaluateTable(t *testing.T) {
 			name: "low_confidence",
 			req:  entryReq(),
 			outcome: okOutcome(func(a map[string]domain.Answer) {
-				a["risk_check"] = choiceAnswer("pass", map[string]float64{"pass": 0.5, "block": 0.1, "other": 0.4})
+				a["risk_check"] = choiceAnswer("pass", map[string]float64{"pass": 0.54, "block": 0.46})
 			}),
 			policy:      pol,
 			wantVerdict: domain.VerdictAbstain,
@@ -205,6 +212,113 @@ func TestEvaluateTable(t *testing.T) {
 			req:         entryReq(),
 			outcome:     okOutcome(nil),
 			policy:      pol,
+			wantVerdict: domain.VerdictAllow,
+			wantCode:    "allow",
+			wantChecks:  []string{"intent", "provider", "answers", "data_quality", "risk_check", "directional", "confidence"},
+		},
+		{
+			name:        "invalid_policy_zero_thresholds",
+			req:         entryReq(),
+			outcome:     okOutcome(nil),
+			policy:      domain.GatePolicy{Version: "gate-v1"},
+			wantVerdict: domain.VerdictAbstain,
+			wantCode:    "invalid_policy",
+			wantChecks:  []string{"policy"},
+		},
+		{
+			name:        "invalid_policy_negative",
+			req:         entryReq(),
+			outcome:     okOutcome(nil),
+			policy:      domain.GatePolicy{Version: "gate-v1", MinPass: -0.1, MinBlock: 0.5},
+			wantVerdict: domain.VerdictAbstain,
+			wantCode:    "invalid_policy",
+			wantChecks:  []string{"policy"},
+		},
+		{
+			name:        "invalid_policy_above_one",
+			req:         entryReq(),
+			outcome:     okOutcome(nil),
+			policy:      domain.GatePolicy{Version: "gate-v1", MinPass: 0.55, MinBlock: 1.5},
+			wantVerdict: domain.VerdictAbstain,
+			wantCode:    "invalid_policy",
+			wantChecks:  []string{"policy"},
+		},
+		{
+			name:        "invalid_policy_nan",
+			req:         entryReq(),
+			outcome:     okOutcome(nil),
+			policy:      domain.GatePolicy{Version: "gate-v1", MinPass: nan(), MinBlock: 0.5},
+			wantVerdict: domain.VerdictAbstain,
+			wantCode:    "invalid_policy",
+			wantChecks:  []string{"policy"},
+		},
+		{
+			name:        "invalid_policy_inf",
+			req:         entryReq(),
+			outcome:     okOutcome(nil),
+			policy:      domain.GatePolicy{Version: "gate-v1", MinPass: 0.55, MinBlock: inf()},
+			wantVerdict: domain.VerdictAbstain,
+			wantCode:    "invalid_policy",
+			wantChecks:  []string{"policy"},
+		},
+		{
+			name:        "invalid_policy_beats_exit",
+			req:         func() domain.GateRequest { r := entryReq(); r.IntentKind = domain.IntentExit; return r }(),
+			outcome:     domain.DecisionOutcome{},
+			policy:      domain.GatePolicy{MinPass: 0, MinBlock: 0},
+			wantVerdict: domain.VerdictAbstain,
+			wantCode:    "invalid_policy",
+			wantChecks:  []string{"policy"},
+		},
+		{
+			name: "answers extra probability key",
+			req:  entryReq(),
+			outcome: okOutcome(func(a map[string]domain.Answer) {
+				a["risk_check"] = choiceAnswer("pass", map[string]float64{"pass": 0.9, "block": 0.1, "other": 0.0})
+			}),
+			policy:      pol,
+			wantVerdict: domain.VerdictAbstain,
+			wantCode:    "invalid_output",
+			wantChecks:  []string{"intent", "provider", "answers"},
+		},
+		{
+			name: "answers missing probability key",
+			req:  entryReq(),
+			outcome: okOutcome(func(a map[string]domain.Answer) {
+				a["risk_check"] = choiceAnswer("pass", map[string]float64{"pass": 1.0})
+			}),
+			policy:      pol,
+			wantVerdict: domain.VerdictAbstain,
+			wantCode:    "invalid_output",
+			wantChecks:  []string{"intent", "provider", "answers"},
+		},
+		{
+			name: "answers probability out of range",
+			req:  entryReq(),
+			outcome: okOutcome(func(a map[string]domain.Answer) {
+				a["risk_check"] = choiceAnswer("pass", map[string]float64{"pass": 1.2, "block": -0.2})
+			}),
+			policy:      pol,
+			wantVerdict: domain.VerdictAbstain,
+			wantCode:    "invalid_output",
+			wantChecks:  []string{"intent", "provider", "answers"},
+		},
+		{
+			name: "answers probability nan",
+			req:  entryReq(),
+			outcome: okOutcome(func(a map[string]domain.Answer) {
+				a["data_quality"] = choiceAnswer("ok", map[string]float64{"ok": nan(), "insufficient": 0.1})
+			}),
+			policy:      pol,
+			wantVerdict: domain.VerdictAbstain,
+			wantCode:    "invalid_output",
+			wantChecks:  []string{"intent", "provider", "answers"},
+		},
+		{
+			name:        "empty version with valid thresholds still allows",
+			req:         entryReq(),
+			outcome:     okOutcome(nil),
+			policy:      domain.GatePolicy{MinPass: 0.55, MinBlock: 0.5},
 			wantVerdict: domain.VerdictAllow,
 			wantCode:    "allow",
 			wantChecks:  []string{"intent", "provider", "answers", "data_quality", "risk_check", "directional", "confidence"},
@@ -230,10 +344,14 @@ func TestEvaluateTable(t *testing.T) {
 			if !reflect.DeepEqual(names, tc.wantChecks) {
 				t.Fatalf("checks = %v, want %v", names, tc.wantChecks)
 			}
-			// Order must be a prefix of CheckOrder.
-			for i, n := range names {
-				if CheckOrder[i] != n {
-					t.Fatalf("check %d = %q, want CheckOrder %q", i, n, CheckOrder[i])
+			// Order must be a prefix of CheckOrder, except the policy
+			// guard: it runs before the ordered checks and is not part
+			// of the frozen order.
+			if !(len(names) == 1 && names[0] == "policy") {
+				for i, n := range names {
+					if CheckOrder[i] != n {
+						t.Fatalf("check %d = %q, want CheckOrder %q", i, n, CheckOrder[i])
+					}
 				}
 			}
 			// Last check fails except on ALLOW; earlier checks pass.
@@ -291,7 +409,7 @@ func TestEvaluateThresholdBoundaries(t *testing.T) {
 
 	// Just below minPass fails.
 	got = Evaluate(entryReq(), okOutcome(func(a map[string]domain.Answer) {
-		a["risk_check"] = choiceAnswer("pass", map[string]float64{"pass": 0.5499, "block": 0.1, "x": 0.3501})
+		a["risk_check"] = choiceAnswer("pass", map[string]float64{"pass": 0.5499, "block": 0.4501})
 	}), pol)
 	if got.Code != "low_confidence" {
 		t.Fatalf("below confidence: code = %q, want low_confidence", got.Code)
@@ -318,6 +436,53 @@ func TestEvaluateThresholdBoundaries(t *testing.T) {
 	}
 }
 
+func TestEvaluateInvalidPolicyThresholds(t *testing.T) {
+	valid := DefaultPolicy()
+	bads := map[string]float64{
+		"nan":       math.NaN(),
+		"pos_inf":   math.Inf(1),
+		"neg_inf":   math.Inf(-1),
+		"zero":      0,
+		"negative":  -0.25,
+		"above_one": 1.5,
+	}
+	for name, bad := range bads {
+		for _, field := range []string{"minPass", "minBlock"} {
+			pol := valid
+			if field == "minPass" {
+				pol.MinPass = bad
+			} else {
+				pol.MinBlock = bad
+			}
+			got := Evaluate(entryReq(), okOutcome(nil), pol)
+			if got.Verdict != domain.VerdictAbstain || got.Code != "invalid_policy" {
+				t.Fatalf("%s=%s: verdict=%q code=%q, want ABSTAIN invalid_policy",
+					field, name, got.Verdict, got.Code)
+			}
+			if len(got.Checks) != 1 || got.Checks[0].Name != "policy" || got.Checks[0].Passed {
+				t.Fatalf("%s=%s: checks=%+v, want single failed policy check", field, name, got.Checks)
+			}
+			if len(got.Reasons) == 0 {
+				t.Fatalf("%s=%s: reasons empty", field, name)
+			}
+			if got.PolicyHash == "" {
+				t.Fatalf("%s=%s: PolicyHash empty", field, name)
+			}
+		}
+	}
+	// Boundary 1 is valid for both thresholds.
+	edge := domain.GatePolicy{Version: "gate-v1", MinPass: 1, MinBlock: 1}
+	got := Evaluate(entryReq(), okOutcome(func(a map[string]domain.Answer) {
+		a["data_quality"] = choiceAnswer("ok", map[string]float64{"ok": 0.99, "insufficient": 0.01})
+		a["signal_alignment"] = choiceAnswer("aligned", map[string]float64{"aligned": 0.99, "neutral": 0.005, "conflict": 0.005})
+		a["market_regime"] = choiceAnswer("favorable", map[string]float64{"favorable": 0.99, "neutral": 0.005, "adverse": 0.005})
+		a["risk_check"] = choiceAnswer("pass", map[string]float64{"pass": 1.0, "block": 0.0})
+	}), edge)
+	if got.Code != "allow" {
+		t.Fatalf("thresholds at 1: code = %q, want allow", got.Code)
+	}
+}
+
 func TestEvaluateDeterminismAndModel(t *testing.T) {
 	pol := DefaultPolicy()
 	req := entryReq()
@@ -335,20 +500,31 @@ func TestEvaluateDeterminismAndModel(t *testing.T) {
 	}
 }
 
-func TestEvaluateDirectionalIgnoresJunkKeys(t *testing.T) {
+func TestEvaluateRejectsJunkKeys(t *testing.T) {
 	pol := DefaultPolicy()
-	// conflict + adverse chosen, but real option p_max below minBlock;
-	// a junk key with 0.99 must not inflate p_max into a directional_block.
+	// A junk key breaks the exact option-key match, so the gate must
+	// abstain with invalid_output instead of trusting the extra data.
 	got := Evaluate(entryReq(), okOutcome(func(a map[string]domain.Answer) {
-		a["signal_alignment"] = choiceAnswer("conflict", map[string]float64{
-			"aligned": 0.2, "neutral": 0.2, "conflict": 0.4, "junk": 0.99,
+		a["signal_alignment"] = choiceAnswer("aligned", map[string]float64{
+			"aligned": 0.8, "neutral": 0.1, "conflict": 0.05, "junk": 0.05,
 		})
-		a["market_regime"] = choiceAnswer("adverse", map[string]float64{
-			"favorable": 0.2, "neutral": 0.2, "adverse": 0.4, "junk": 0.99,
+		a["market_regime"] = choiceAnswer("favorable", map[string]float64{
+			"favorable": 0.7, "neutral": 0.2, "adverse": 0.05, "junk": 0.05,
 		})
 		a["risk_check"] = choiceAnswer("pass", map[string]float64{"pass": 0.9, "block": 0.1})
 	}), pol)
-	if got.Code != "allow" {
-		t.Fatalf("junk key inflated p_max: code = %q, want allow (checks %v)", got.Code, got.Checks)
+	if got.Code != "invalid_output" {
+		t.Fatalf("junk keys: code = %q, want invalid_output (checks %v)", got.Code, got.Checks)
+	}
+	if got.Verdict != domain.VerdictAbstain {
+		t.Fatalf("junk keys: verdict = %q, want ABSTAIN", got.Verdict)
+	}
+	names := make([]string, len(got.Checks))
+	for i, c := range got.Checks {
+		names[i] = c.Name
+	}
+	want := []string{"intent", "provider", "answers"}
+	if !reflect.DeepEqual(names, want) {
+		t.Fatalf("junk keys checks = %v, want %v", names, want)
 	}
 }

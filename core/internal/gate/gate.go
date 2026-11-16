@@ -2,6 +2,7 @@ package gate
 
 import (
 	"fmt"
+	"math"
 
 	"github.com/LevapVeeskela/lv24-vending-machine/core/domain"
 )
@@ -46,6 +47,14 @@ func Evaluate(req domain.GateRequest, outcome domain.DecisionOutcome, policy dom
 			Model:      model,
 			PolicyHash: hash,
 		}
+	}
+
+	// 0. policy (validated as given; only an empty version is defaulted).
+	if !validThreshold(policy.MinPass) || !validThreshold(policy.MinBlock) {
+		detail := fmt.Sprintf("minPass=%.4g minBlock=%.4g must both be in (0,1]", policy.MinPass, policy.MinBlock)
+		return fail(domain.VerdictAbstain, "invalid_policy", "policy",
+			detail,
+			"invalid policy: "+detail)
 	}
 
 	// 1. intent
@@ -173,8 +182,18 @@ func Evaluate(req domain.GateRequest, outcome domain.DecisionOutcome, policy dom
 	}
 }
 
-// validateAnswers checks presence, choice type, non-empty probabilities and
-// that each choice is one of the question's option keys.
+// validThreshold reports whether a gate threshold is usable: finite and in (0,1].
+func validThreshold(v float64) bool {
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return false
+	}
+	return v > 0 && v <= 1
+}
+
+// validateAnswers checks presence, choice type, and that every gate-v1
+// answer carries exactly the question's option keys (no missing, no extra)
+// with finite [0,1] values, and a choice that is one of the option keys.
+// The gate is the last line of defense and never trusts the provider adapter.
 func validateAnswers(answers map[string]domain.Answer) (string, bool) {
 	if answers == nil {
 		return "missing answers", false
@@ -187,13 +206,27 @@ func validateAnswers(answers map[string]domain.Answer) (string, bool) {
 		if a.Type != domain.QuestionChoice {
 			return fmt.Sprintf("question %q: expected type choice, got %q", id, string(a.Type)), false
 		}
-		if len(a.Probabilities) == 0 {
-			return fmt.Sprintf("question %q: empty probabilities", id), false
+		allowed := allowedChoices[id]
+		if len(a.Probabilities) != len(allowed) {
+			return fmt.Sprintf("question %q: probability keys do not exactly match options", id), false
+		}
+		for k, v := range a.Probabilities {
+			if !allowed[k] {
+				return fmt.Sprintf("question %q: unexpected probability key %q", id, k), false
+			}
+			if math.IsNaN(v) || math.IsInf(v, 0) || v < 0 || v > 1 {
+				return fmt.Sprintf("question %q: probability %q out of range [0, 1]", id, k), false
+			}
+		}
+		for k := range allowed {
+			if _, ok := a.Probabilities[k]; !ok {
+				return fmt.Sprintf("question %q: missing probability %q", id, k), false
+			}
 		}
 		if _, ok := a.Probabilities[a.Choice]; !ok {
 			return fmt.Sprintf("question %q: choice %q not in probabilities", id, a.Choice), false
 		}
-		if !allowedChoices[id][a.Choice] {
+		if !allowed[a.Choice] {
 			return fmt.Sprintf("question %q: unknown choice %q", id, a.Choice), false
 		}
 	}
