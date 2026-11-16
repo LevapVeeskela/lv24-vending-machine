@@ -52,7 +52,10 @@ apps/mobile/build/
 *.db
 *.db-wal
 *.db-shm
+*.db-journal
 *.sqlite
+*.sqlite-wal
+*.sqlite-shm
 data/
 tmp/
 logs/
