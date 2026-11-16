@@ -243,10 +243,10 @@ func CandleConformance(t *testing.T, newProvider CandleFactory) {
 		p := newProvider(t, srv.URL, ports.Deps{})
 		_, err := p.Candles(t.Context(), domain.CandleRequest{Symbol: "BTCUSDT", Interval: "1m", Limit: 5})
 		if err == nil {
-			t.Fatal("Candles = nil error, want rate_limit")
+			t.Fatal("Candles = nil error, want ip_banned")
 		}
-		if domain.CodeOf(err) != domain.CodeRateLimit {
-			t.Fatalf("code = %q, want %q", domain.CodeOf(err), domain.CodeRateLimit)
+		if domain.CodeOf(err) != domain.CodeIPBanned {
+			t.Fatalf("code = %q, want %q", domain.CodeOf(err), domain.CodeIPBanned)
 		}
 		var de *domain.Error
 		if !errors.As(err, &de) {

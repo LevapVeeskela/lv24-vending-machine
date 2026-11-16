@@ -78,7 +78,7 @@ func TestStatusMapping(t *testing.T) {
 		retryAfterW time.Duration
 	}{
 		{name: "region", status: 451, retryAfter: "7", code: domain.CodeRegionUnavailable, retryable: false, retryAfterW: 7 * time.Second},
-		{name: "ban", status: http.StatusTeapot, retryAfter: "5", code: domain.CodeRateLimit, retryable: false, retryAfterW: 5 * time.Second},
+		{name: "ban", status: http.StatusTeapot, retryAfter: "5", code: domain.CodeIPBanned, retryable: false, retryAfterW: 5 * time.Second},
 		{name: "throttle", status: http.StatusTooManyRequests, retryAfter: "5", code: domain.CodeRateLimit, retryable: true, retryAfterW: 5 * time.Second},
 		{name: "throttle_date", status: http.StatusTooManyRequests, retryAfter: fixedNow.Add(30 * time.Second).UTC().Format(http.TimeFormat), code: domain.CodeRateLimit, retryable: true, retryAfterW: 30 * time.Second},
 	}

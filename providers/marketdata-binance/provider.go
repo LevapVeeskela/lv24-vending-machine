@@ -228,7 +228,7 @@ func (p *Provider) fetchPage(ctx context.Context, symbol, interval string, limit
 		return nil, rateErr
 	case resp.StatusCode == http.StatusTeapot:
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-		banErr := domain.NewError(domain.CodeRateLimit, "marketdata-binance: IP banned (418)")
+		banErr := domain.NewError(domain.CodeIPBanned, "marketdata-binance: IP banned (418)")
 		banErr.Retryable = false
 		if ra := parseRetryAfter(resp.Header.Get("Retry-After"), now); ra > 0 {
 			banErr.RetryAfter = ra
