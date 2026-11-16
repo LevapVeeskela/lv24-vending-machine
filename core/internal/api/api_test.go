@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -441,5 +442,89 @@ func TestServeRoundTrip(t *testing.T) {
 	}
 	if v.SignalID != "sig-api-001" {
 		t.Fatalf("signalId = %q", v.SignalID)
+	}
+}
+
+func TestServeWaitsForInflight(t *testing.T) {
+	entered := make(chan struct{})
+	var once sync.Once
+	release := make(chan struct{})
+	canceled := make(chan error, 1)
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		once.Do(func() { close(entered) })
+		<-release
+		canceled <- r.Context().Err()
+		w.WriteHeader(http.StatusOK)
+	})
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("free port: %v", err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- Serve(ctx, addr, h, logger) }()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		c, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
+		if err == nil {
+			_ = c.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatalf("server never came up: %v", err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	respCh := make(chan *http.Response, 1)
+	go func() {
+		req, _ := http.NewRequest(http.MethodGet, "http://"+addr+"/healthz", nil)
+		resp, err := http.DefaultClient.Do(req)
+		if err == nil {
+			respCh <- resp
+		}
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handler never entered")
+	}
+	cancel()
+	select {
+	case err := <-serveDone:
+		t.Fatalf("Serve returned %v before the in-flight handler finished", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(release)
+	var herr error
+	select {
+	case herr = <-canceled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handler never finished")
+	}
+	if herr != nil {
+		t.Fatalf("handler context canceled before finish: %v", herr)
+	}
+	select {
+	case err := <-serveDone:
+		if err != nil {
+			t.Fatalf("Serve = %v, want nil", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Serve did not return after the handler finished")
+	}
+	select {
+	case resp := <-respCh:
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("client status = %d, want 200", resp.StatusCode)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("client never got a response")
 	}
 }

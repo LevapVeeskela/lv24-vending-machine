@@ -106,6 +106,9 @@ func ValidateAddr(addr string) error {
 
 // Serve listens on addr and serves h until ctx ends. It returns nil after a
 // graceful shutdown.
+// Serve waits for a graceful shutdown: it returns nil only after Shutdown
+// finishes, so in-flight evaluations complete before the caller tears down
+// the journal. The shutdown deadline exceeds the provider call deadline.
 func Serve(ctx context.Context, addr string, h http.Handler, logger *slog.Logger) error {
 	if err := ValidateAddr(addr); err != nil {
 		return err
@@ -128,14 +131,17 @@ func Serve(ctx context.Context, addr string, h http.Handler, logger *slog.Logger
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    16 << 10,
 	}
+	shutdownDone := make(chan struct{})
 	go func() {
+		defer close(shutdownDone)
 		<-ctx.Done()
-		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		shutCtx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(shutCtx)
 	}()
 	if err := srv.Serve(ln); err != nil {
 		if errors.Is(err, http.ErrServerClosed) {
+			<-shutdownDone
 			return nil
 		}
 		return err
