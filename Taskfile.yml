@@ -27,11 +27,17 @@ tasks:
 
   test:clients:python:
     desc: Test the stdlib Python client against a loopback server
-    preconditions:
-      - sh: python --version
-        msg: "Python 3 is required for examples/clients/python; install Python 3 and put 'python' on PATH"
     cmds:
-      - python -m unittest discover -s examples/clients/python -p "test_*.py"
+      - |
+        if command -v python >/dev/null 2>&1; then
+          py=python
+        elif command -v python3 >/dev/null 2>&1; then
+          py=python3
+        else
+          echo "Python 3 is required for examples/clients/python; install Python 3 and put 'python' or 'python3' on PATH" >&2
+          exit 1
+        fi
+        "$py" -m unittest discover -s examples/clients/python -p "test_*.py"
 
   test:core:
     desc: Test the core module

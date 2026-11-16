@@ -28,6 +28,12 @@
   python -m unittest discover -s examples/clients/python -p "test_*.py"  # test:clients:python
   go build all                                                   # build
   ```
+
+  Если `python` в PATH нет, но есть `python3`, используйте
+  `python3 -m unittest discover -s examples/clients/python -p "test_*.py"`:
+  задача `test:clients:python` сама выбирает доступную команду. Если нет ни
+  `python`, ни `python3`, клиентские тесты выполнить нельзя — установите
+  Python 3 и повторите; молча пропускать этот шаг не нужно.
 - [ ] `go run ./tools/release` ещё не запускался на грязном дереве.
 - [ ] Владелец подтвердил дату публикации: она станет датой старта G1.
 
