@@ -255,6 +255,7 @@ func TestParityReport(t *testing.T) {
 		LabeledCount:         42,
 		AwaitingLabeling:     4,
 		NoOutcomeByDeadline:  2,
+		SourceRejected:       1,
 		Sufficient:           true,
 		VerdictCounts:        map[string]int{"ALLOW": 25, "REJECT": 15, "ABSTAIN": 2},
 		DecisionCostUSD:      domain.MustParseDecimal("0.0003024"),
@@ -407,6 +408,9 @@ func TestParityReport(t *testing.T) {
 	if c.NoOutcomeByDeadline == nil || *c.NoOutcomeByDeadline != 2 {
 		t.Fatalf("noOutcomeByDeadline lost on the wire: %+v", c)
 	}
+	if c.SourceRejected == nil || *c.SourceRejected != 1 {
+		t.Fatalf("sourceRejected lost on the wire: %+v", c)
+	}
 	if c.Assumptions == nil || c.Assumptions.HorizonBars != 12 || c.Assumptions.FeeBpsRoundTrip != 20 {
 		t.Fatalf("assumptions lost on the wire: %+v", c.Assumptions)
 	}
@@ -454,7 +458,7 @@ func TestParityReport(t *testing.T) {
 	if back.BackfillLabeled != 5 || back.BackfillExcluded != 2 {
 		t.Fatalf("reverse backfill mismatch: %+v", back)
 	}
-	if back.AwaitingLabeling != 4 || back.NoOutcomeByDeadline != 2 {
+	if back.AwaitingLabeling != 4 || back.NoOutcomeByDeadline != 2 || back.SourceRejected != 1 {
 		t.Fatalf("reverse labeling progress mismatch: %+v", back)
 	}
 	if back.Assumptions == nil || back.Assumptions.EntryLagMedianMS != 72000 || back.Assumptions.EntryLagP95MS != 900000 {

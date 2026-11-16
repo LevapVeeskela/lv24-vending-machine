@@ -103,11 +103,23 @@ func seedSmallReport(t *testing.T, env Env, dataDir string) {
 			}),
 		}
 	}
+	mkUnlabelable := func(sig, reason string) domain.Event {
+		return domain.Event{
+			Kind:       domain.EventOutcomeUnlabelable,
+			DecisionID: "dec-" + sig,
+			Payload: mustJSON(t, domain.OutcomeUnlabelable{
+				SignalID:   sig,
+				DecisionID: "dec-" + sig,
+				Reason:     reason,
+			}),
+		}
+	}
 	for _, ev := range []domain.Event{
 		mkReq("a"), mkResp("a", "alpha", "0.010", 100, 0.75),
 		mkVerdict("a", domain.VerdictAllow), mkOutcome("a", "0.05"),
 		mkReq("b"), mkResp("b", "alpha", "0.020", 200, 0.5),
 		mkVerdict("b", domain.VerdictReject), mkOutcome("b", "-0.01"),
+		mkReq("c"), mkUnlabelable("c", "source_rejected"),
 	} {
 		appendReportEvent(t, env, dataDir, ev)
 	}
@@ -122,8 +134,8 @@ func TestGateReportInsufficient(t *testing.T) {
 		t.Fatalf("gate report = %d, stderr=%s", code, stderr.String())
 	}
 	got := stdout.String()
-	for _, want := range []string{"verdicts:", "labeled: 2", "ожидают разметки: 0",
-		"без исхода по сроку: 0", "decision cost:", "latency", "insufficient data"} {
+	for _, want := range []string{"verdicts:", "labeled: 2", "awaiting labeling: 0",
+		"no outcome by deadline: 0", "source rejected: 1", "decision cost:", "latency", "insufficient data"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("human report misses %q: %q", want, got)
 		}
@@ -151,9 +163,9 @@ func TestGateReportInsufficient(t *testing.T) {
 	if rep.LabeledCount != 2 {
 		t.Fatalf("labeled = %d, want 2", rep.LabeledCount)
 	}
-	if rep.AwaitingLabeling != 0 || rep.NoOutcomeByDeadline != 0 {
-		t.Fatalf("progress = awaiting %d, missed %d, want 0/0",
-			rep.AwaitingLabeling, rep.NoOutcomeByDeadline)
+	if rep.AwaitingLabeling != 0 || rep.NoOutcomeByDeadline != 0 || rep.SourceRejected != 1 {
+		t.Fatalf("progress = awaiting %d, missed %d, rejected %d, want 0/0/1",
+			rep.AwaitingLabeling, rep.NoOutcomeByDeadline, rep.SourceRejected)
 	}
 }
 

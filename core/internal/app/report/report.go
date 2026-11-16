@@ -245,6 +245,7 @@ func (b *Builder) Build(ctx context.Context) (domain.Report, error) {
 	labeledSignals := map[string]struct{}{}
 	unlabelableSignals := map[string]struct{}{}
 	missedDeadline := map[string]struct{}{}
+	sourceRejected := map[string]struct{}{}
 
 	if err := b.jr.Walk(ctx, 0, "", func(ev domain.Event) error {
 		switch ev.Kind {
@@ -327,8 +328,11 @@ func (b *Builder) Build(ctx context.Context) (domain.Report, error) {
 				return nil
 			}
 			unlabelableSignals[u.SignalID] = struct{}{}
-			if u.Reason == "timeout" {
+			switch u.Reason {
+			case "timeout":
 				missedDeadline[u.SignalID] = struct{}{}
+			case "source_rejected":
+				sourceRejected[u.SignalID] = struct{}{}
 			}
 		case domain.EventArenaDecision:
 			var a arenaPayload
@@ -451,6 +455,7 @@ func (b *Builder) Build(ctx context.Context) (domain.Report, error) {
 		LabeledCount:         len(labeled),
 		AwaitingLabeling:     awaiting,
 		NoOutcomeByDeadline:  len(missedDeadline),
+		SourceRejected:       len(sourceRejected),
 		VerdictCounts:        counts,
 		DecisionCostUSD:      costTotal,
 		LatencyP50MS:         nearestRank(latencies, 0.5),

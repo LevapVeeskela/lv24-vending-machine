@@ -646,13 +646,13 @@ func TestParseTimeframe(t *testing.T) {
 	}
 }
 
-// TestLabelingProgressCounts pins the awaiting-labeling and
-// no-outcome-by-deadline counters used by the report header. Exit requests do
-// not need an outcome, a labeled signal leaves the queue and a timeout record
-// counts as a deadline miss.
+// TestLabelingProgressCounts pins the awaiting-labeling,
+// no-outcome-by-deadline and source-rejected counters used by the report
+// header. Exit requests do not need an outcome, a labeled signal leaves the
+// queue and a timeout record counts as a deadline miss.
 func TestLabelingProgressCounts(t *testing.T) {
 	jr := &fakeJournal{}
-	for _, sig := range []string{"s1", "s2", "s3"} {
+	for _, sig := range []string{"s1", "s2", "s3", "s5"} {
 		appendEv(t, jr, domain.Event{
 			Kind:       domain.EventGateRequest,
 			DecisionID: "d-" + sig,
@@ -680,6 +680,10 @@ func TestLabelingProgressCounts(t *testing.T) {
 		Kind:    domain.EventOutcomeUnlabelable,
 		Payload: mustPayload(t, domain.OutcomeUnlabelable{SignalID: "s2", DecisionID: "d-s2", Reason: "timeout"}),
 	})
+	appendEv(t, jr, domain.Event{
+		Kind:    domain.EventOutcomeUnlabelable,
+		Payload: mustPayload(t, domain.OutcomeUnlabelable{SignalID: "s5", DecisionID: "d-s5", Reason: "source_rejected"}),
+	})
 
 	rep := buildReport(t, jr, Config{})
 	if rep.LabeledCount != 1 {
@@ -690,6 +694,9 @@ func TestLabelingProgressCounts(t *testing.T) {
 	}
 	if rep.NoOutcomeByDeadline != 1 {
 		t.Fatalf("noOutcomeByDeadline = %d, want 1 (s2)", rep.NoOutcomeByDeadline)
+	}
+	if rep.SourceRejected != 1 {
+		t.Fatalf("sourceRejected = %d, want 1 (s5)", rep.SourceRejected)
 	}
 }
 

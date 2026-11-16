@@ -134,8 +134,9 @@ func printReportHuman(w io.Writer, rep domain.Report, days int) {
 		counts[string(domain.VerdictAllow)], counts[string(domain.VerdictReject)],
 		counts[string(domain.VerdictAbstain)], counts[string(domain.VerdictSkip)])
 	fmt.Fprintf(w, "labeled: %d\n", rep.LabeledCount)
-	fmt.Fprintf(w, "ожидают разметки: %d\n", rep.AwaitingLabeling)
-	fmt.Fprintf(w, "без исхода по сроку: %d\n", rep.NoOutcomeByDeadline)
+	fmt.Fprintf(w, "awaiting labeling: %d\n", rep.AwaitingLabeling)
+	fmt.Fprintf(w, "no outcome by deadline: %d\n", rep.NoOutcomeByDeadline)
+	fmt.Fprintf(w, "source rejected: %d\n", rep.SourceRejected)
 	fmt.Fprintf(w, "policy: %s\n", shortPolicy(rep.PolicyHash))
 	fmt.Fprintf(w, "other policies: %d\n", rep.OtherPolicyDecisions)
 	fmt.Fprintf(w, "backfill: labeled=%d excluded=%d\n",
@@ -302,8 +303,9 @@ func shareMarkdown(rep domain.Report, ver string, decisions, days int) string {
 	fmt.Fprintf(&b, "- decisions: %d\n", decisions)
 	fmt.Fprintf(&b, "- days: %d\n", days)
 	fmt.Fprintf(&b, "- labeled outcomes: %d\n", rep.LabeledCount)
-	fmt.Fprintf(&b, "- ожидают разметки: %d\n", rep.AwaitingLabeling)
-	fmt.Fprintf(&b, "- без исхода по сроку: %d\n", rep.NoOutcomeByDeadline)
+	fmt.Fprintf(&b, "- awaiting labeling: %d\n", rep.AwaitingLabeling)
+	fmt.Fprintf(&b, "- no outcome by deadline: %d\n", rep.NoOutcomeByDeadline)
+	fmt.Fprintf(&b, "- source rejected: %d\n", rep.SourceRejected)
 	fmt.Fprintf(&b, "- verdicts: ALLOW=%d REJECT=%d ABSTAIN=%d\n\n",
 		rep.VerdictCounts[string(domain.VerdictAllow)],
 		rep.VerdictCounts[string(domain.VerdictReject)],
