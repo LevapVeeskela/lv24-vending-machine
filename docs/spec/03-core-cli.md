@@ -47,7 +47,7 @@ Application Support` на macOS): `vending.db` и `shadow-status.json` в M1; `r
 ### 2.0 Реализовано в M0/M1 (shadow-гейт)
 
 Установка (бинарник или сборка) — [install](../install.md) /
-[install.ru](../install.ru.md); живая проверка на 30–40 минут —
+[install.ru](../install.ru.md); живая проверка на 15 минут —
 [runbook-live-smoke](../runbook-live-smoke.md); выпуск предрелиза —
 [release-checklist](../release-checklist.md).
 
@@ -212,7 +212,10 @@ marketdata-провайдер; повтор не дублирует метки. 
 `outcome.unlabelable {signalId, decisionId, reason}`. `vend outcomes label`
 печатает labeled/skipped/already/failed/unlabelable.
 
-`gate report`: только журнал, без сети. Всегда: счётчики вердиктов, число
+`gate report`: только журнал, без сети. Всегда: счётчики вердиктов, окно
+`window: days=N active=N` (дни по времени приёма `gate.request` в журнале,
+а не по `ts` из тела сигнала; `days` — от первой до последней UTC-даты
+включительно, `active` — число разных UTC-дат с хотя бы одним запросом), число
 размеченных, число ожидающих разметки entry-сигналов (`awaiting labeling`),
 число сигналов без исхода по сроку (`no outcome by deadline`,
 `outcome.unlabelable` с причиной `timeout`), число сигналов, отклонённых
@@ -238,7 +241,9 @@ skill score не определён. Флаги: `--policy <64-hex>` — мет�
 решений других политик печатается отдельно);
 `--include-backfill` — включить поздние метки в сравнение (по умолчанию они
 только считаются). `--share` печатает обезличенную markdown-сводку: версию,
-префикс policy (8 hex), число решений и UTC-дней, число меток, число ожидающих
+префикс policy (8 hex), число решений, `days` и `active days` по времени приёма
+`gate.request` (UTC; `days` — включительный интервал от первой до последней
+даты, `active days` — число разных дат), число меток, число ожидающих
 разметки, просроченных без исхода и отклонённых источником (`awaiting
 labeling`, `no outcome by deadline`, `source rejected`), счётчики
 вердиктов, метрики или `insufficient data`, допущения с entry lag median/p95 (в

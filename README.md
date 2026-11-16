@@ -10,7 +10,7 @@
 > символы и локальная сборка релиза. Бинарники не подписаны; релиз собирается
 > `go run ./tools/release` и никуда не загружается.
 > Установка — [install](docs/install.md) / [install.ru](docs/install.ru.md);
-> живая проверка на 30–40 минут — [runbook](docs/runbook-live-smoke.md);
+> живая проверка на 15 минут — [runbook](docs/runbook-live-smoke.md);
 > выпуск — [release checklist](docs/release-checklist.md).
 > **НЕ сделано:** публикация релиза, адаптер TradingView webhook,
 > desktop/web/mobile, paper/live, команды Telegram (двусторонний бот).
@@ -51,6 +51,7 @@
 - [Установка (EN)](docs/install.md) · [Установка (RU)](docs/install.ru.md)
 - [Быстрый старт (EN)](docs/quickstart.md) · [Быстрый старт (RU)](docs/quickstart.ru.md)
 - [Живая проверка shadow-гейта](docs/runbook-live-smoke.md)
+- [Семь дней работы и критерий G1](docs/run-7-days.md)
 - [Чек-лист выпуска](docs/release-checklist.md)
 - [Спецификация](docs/spec/README.md)
 - [Ядро и CLI](docs/spec/03-core-cli.md)
@@ -81,6 +82,7 @@ vend gate report
 [quickstart.ru](docs/quickstart.ru.md). Живые пробы (один вызов decision, две
 свечи, тестовое сообщение Telegram при включении) — `vend doctor --live`;
 `--save-raw <file>` пишет сырой ответ провайдера с правами 0600.
+Длительный прогон для G1 (≥ 7 дней, ≥ 100 меток) — [семь дней работы](docs/run-7-days.md).
 
 Тесты офлайн; живые вызовы провайдеров — только ключом владельца.
 

@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
@@ -23,6 +22,19 @@ const shareDiscussionURL = "https://github.com/LevapVeeskela/lv24-vending-machin
 
 // sharePolicyLen is the policy-hash prefix length printed by --share.
 const sharePolicyLen = 8
+
+// shareDayLayout is the UTC date key used by the report window.
+const shareDayLayout = "2006-01-02"
+
+// reportWindow describes when the journal accepted gate requests: the
+// inclusive UTC-day span, the number of distinct UTC dates and the request
+// count. Payload timestamps are ignored so a late or replayed signal cannot
+// stretch the window.
+type reportWindow struct {
+	decisions int
+	days      int
+	active    int
+}
 
 func (r *runner) cmdGateReport(args []string) int {
 	g, rest, gerr := splitGlobals(args)
@@ -102,7 +114,12 @@ func (r *runner) cmdGateReport(args []string) int {
 		r.printJSON(rep)
 		return exitOK
 	}
-	printReportHuman(r.stdout, rep, b.Days())
+	win, err := journalWindow(ctx, jr)
+	if err != nil {
+		return r.fail(jsonOut, exitGeneral, codeGeneral, err.Error(),
+			"check the database file is a valid sqlite database", false, nil)
+	}
+	printReportHuman(r.stdout, rep, b.Days(), win)
 	return exitOK
 }
 
@@ -123,7 +140,7 @@ func isPolicyHash(s string) bool {
 // printReportHuman prints the assumptions and base stats always, the
 // comparison block only when the report holds enough labeled outcomes,
 // and per-model metrics only at or above the model threshold.
-func printReportHuman(w io.Writer, rep domain.Report, days int) {
+func printReportHuman(w io.Writer, rep domain.Report, days int, win reportWindow) {
 	if a := rep.Assumptions; a != nil {
 		fmt.Fprintf(w, "assumptions: horizon=%d bars, fees=%d bps round-trip, "+
 			"price source=%s, equal size, no slippage, no funding\n",
@@ -133,6 +150,7 @@ func printReportHuman(w io.Writer, rep domain.Report, days int) {
 	fmt.Fprintf(w, "verdicts: ALLOW=%d REJECT=%d ABSTAIN=%d SKIP=%d\n",
 		counts[string(domain.VerdictAllow)], counts[string(domain.VerdictReject)],
 		counts[string(domain.VerdictAbstain)], counts[string(domain.VerdictSkip)])
+	fmt.Fprintf(w, "window: days=%d active=%d\n", win.days, win.active)
 	fmt.Fprintf(w, "labeled: %d\n", rep.LabeledCount)
 	fmt.Fprintf(w, "awaiting labeling: %d\n", rep.AwaitingLabeling)
 	fmt.Fprintf(w, "no outcome by deadline: %d\n", rep.NoOutcomeByDeadline)
@@ -222,12 +240,12 @@ func shortPolicy(hash string) string {
 // printShare writes the sanitized markdown summary either to stdout or to
 // path, and never echoes journal content beyond aggregate counts.
 func (r *runner) printShare(ctx context.Context, jr ports.Journal, rep domain.Report, path string) int {
-	decisions, days, err := shareWindow(ctx, jr)
+	win, err := journalWindow(ctx, jr)
 	if err != nil {
 		return r.fail(false, exitGeneral, codeGeneral, err.Error(),
 			"check the database file is a valid sqlite database", false, nil)
 	}
-	body := shareMarkdown(rep, r.ver, decisions, days)
+	body := shareMarkdown(rep, r.ver, win)
 	if path == "" {
 		fmt.Fprint(r.stdout, body)
 		return exitOK
@@ -240,54 +258,57 @@ func (r *runner) printShare(ctx context.Context, jr ports.Journal, rep domain.Re
 	return exitOK
 }
 
-// shareWindow counts gate requests and the UTC-day span covered by their
-// timestamps. Any request means at least one day.
-func shareWindow(ctx context.Context, jr ports.Journal) (decisions, days int, err error) {
+// journalWindow counts gate requests and the UTC-day span covered by the
+// journal acceptance time (event ts), never by the signal payload ts. Any
+// request means at least one day; active counts distinct UTC dates.
+func journalWindow(ctx context.Context, jr ports.Journal) (reportWindow, error) {
+	win := reportWindow{}
 	var first, last time.Time
+	dates := map[string]struct{}{}
 	if err := jr.Walk(ctx, 0, "", func(ev domain.Event) error {
 		if ev.Kind != domain.EventGateRequest {
 			return nil
 		}
-		decisions++
-		var req struct {
-			TS time.Time `json:"ts"`
-		}
-		if uerr := json.Unmarshal(ev.Payload, &req); uerr != nil || req.TS.IsZero() {
+		win.decisions++
+		ts := ev.TS.UTC()
+		if ts.IsZero() {
 			return nil
 		}
-		ts := req.TS.UTC()
 		if first.IsZero() || ts.Before(first) {
 			first = ts
 		}
 		if last.IsZero() || ts.After(last) {
 			last = ts
 		}
+		dates[ts.Format(shareDayLayout)] = struct{}{}
 		return nil
 	}); err != nil {
-		return 0, 0, fmt.Errorf("report: walk journal: %w", err)
+		return reportWindow{}, fmt.Errorf("report: walk journal: %w", err)
 	}
-	if decisions == 0 {
-		return 0, 0, nil
+	if win.decisions == 0 {
+		return win, nil
 	}
-	days = 1
+	win.days = 1
 	if !first.IsZero() && !last.IsZero() {
 		span := int(last.Truncate(24*time.Hour).Sub(first.Truncate(24*time.Hour)).Hours()/24) + 1
-		if span > days {
-			days = span
+		if span > win.days {
+			win.days = span
 		}
 	}
-	return decisions, days, nil
+	win.active = len(dates)
+	return win, nil
 }
 
 // shareMarkdown renders the anonymized summary: aggregate counts, model
 // quality metrics and assumptions only. State, instruments, venues, prices,
 // return sums, paths and identifiers never appear here.
-func shareMarkdown(rep domain.Report, ver string, decisions, days int) string {
+func shareMarkdown(rep domain.Report, ver string, win reportWindow) string {
 	var b strings.Builder
 	total := 0
 	for _, v := range rep.VerdictCounts {
 		total += v
 	}
+	decisions := win.decisions
 	if decisions == 0 {
 		decisions = total
 	}
@@ -301,7 +322,8 @@ func shareMarkdown(rep domain.Report, ver string, decisions, days int) string {
 	fmt.Fprintf(&b, "- version: %s\n", displayVersion(ver))
 	fmt.Fprintf(&b, "- policy: %s\n", policy)
 	fmt.Fprintf(&b, "- decisions: %d\n", decisions)
-	fmt.Fprintf(&b, "- days: %d\n", days)
+	fmt.Fprintf(&b, "- days: %d\n", win.days)
+	fmt.Fprintf(&b, "- active days: %d\n", win.active)
 	fmt.Fprintf(&b, "- labeled outcomes: %d\n", rep.LabeledCount)
 	fmt.Fprintf(&b, "- awaiting labeling: %d\n", rep.AwaitingLabeling)
 	fmt.Fprintf(&b, "- no outcome by deadline: %d\n", rep.NoOutcomeByDeadline)

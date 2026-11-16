@@ -62,6 +62,7 @@ func seedShareReport(t *testing.T, env Env, dataDir string) {
 			{
 				Kind:       domain.EventGateRequest,
 				DecisionID: dec,
+				TS:         ts,
 				Payload: mustJSON(t, domain.GateRequest{
 					SignalID:   sig,
 					Instrument: domain.Instrument{Venue: "CANARYVENUE", Symbol: "CANARYSYMBOL"},
@@ -157,6 +158,7 @@ func TestGateReportShare(t *testing.T) {
 		"policy: abababab",
 		"decisions: 120",
 		"days: 7",
+		"- active days: 7",
 		"labeled outcomes: 100",
 		"- awaiting labeling: 20",
 		"- no outcome by deadline: 0",

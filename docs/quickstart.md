@@ -10,6 +10,9 @@ Two paths to a working shadow gate:
 Everything below runs from the repository root. There are no paid services and
 no CI calls.
 
+For the multi-day run towards G1 (≥ 7 days, ≥ 100 labels) see
+[run-7-days.md](run-7-days.md) (Russian).
+
 ## 0. Install
 
 Get `vend` first: a prebuilt binary from the release page or a source build — see
@@ -117,6 +120,12 @@ curl -sS -X POST http://127.0.0.1:8420/v1/gate \
 On Windows PowerShell 5.1 `curl` is an alias for `Invoke-WebRequest`; call
 `curl.exe` instead.
 
+`contracts/examples/gate-request.json` is a template. Replace `signalId` with a
+unique value and `ts` with the current UTC time: an old `ts` journals the signal
+as `backfill`, and the same `signalId` replays the recorded verdict. Instead of
+`<token>`, substitute `VENDING_SECRET_CONN_LOCAL_APITOKEN` (PowerShell:
+`$env:VENDING_SECRET_CONN_LOCAL_APITOKEN`).
+
 Response (HTTP 200):
 
 ```json
@@ -127,7 +136,10 @@ Response (HTTP 200):
     "verdict": "ALLOW",
     "code": "allow",
     "reasons": ["all gate checks passed"],
-    "checks": [],
+    "checks": [
+      { "name": "intent", "passed": true, "detail": "intentKind=entry" },
+      { "name": "provider", "passed": true, "detail": "provider response ok" }
+    ],
     "decisionId": "<decision-id>",
     "model": "drex-max-v1.1",
     "policyHash": "<64 hex>",
@@ -135,6 +147,9 @@ Response (HTTP 200):
   }
 }
 ```
+
+A real response fills `checks` with every check (`intent`, `provider`, `answers`,
+`data_quality`, `risk_check`, `directional`, `confidence`); two are shown above.
 
 `mode` is the configured mode (`shadow` by default) and is reported as-is.
 The gate only evaluates: M1 places no orders, and `live` is rejected by config
@@ -161,9 +176,8 @@ answered) → optional `decision.model_changed` → `gate.verdict`, all under on
 ### 7. Let outcomes label themselves
 
 The runner labels every entry request (`intentKind: entry`) that has no outcome
-yet. A label takes
-the first bar opening at or after the signal time and closing after the gate
-verdict (the receipt time when the journal has no verdict), exactly
+yet. A label takes the first bar opening at or after the signal time and closing
+after the gate verdict (the receipt time when the journal has no verdict), exactly
 `outcome.horizonBars` consecutive bars, entry at the first open, exit at
 the last close, net of `2 × outcome.feeBps` (default `feeBps: 10` per side, 20
 round-trip). If that first bar opened more than `min(10% of one bar, 30
@@ -172,6 +186,11 @@ and the outcome records `entryShifted`; without a spare bar the signal waits
 for a later cycle. `entryLagMs` is the delay from the entry-bar open to that
 moment. Raw provider candles come from `providers.marketdata`, so this
 step needs network access to the exchange.
+
+With the defaults (`horizonBars: 12`, `1h` timeframe) the first label appears
+only after several hours. For a quick check use the
+[runbook](runbook-live-smoke.md): `horizonBars: 3` and a manual `timeframe: "1m"`
+request.
 
 Signals that arrive later than one timeframe (`receivedAt − ts > timeframe`)
 are marked `backfill`: they may enter a bar that had already closed when the
@@ -202,9 +221,10 @@ Useful variants:
 
 `--share` prints aggregate counts, model quality metrics, assumptions and the
 entry-lag median/p95 (as a fraction of one bar) with the shifted-entry count
-only: no symbols, venues, prices, state, paths or identifiers. Publish it
-manually. `--share` cannot be combined with `--json`; `--out` requires
-`--share`.
+only: no symbols, venues, prices, state, paths or identifiers. The summary has
+`days` (the acceptance-time window) and `active days` (distinct UTC dates with
+at least one `gate.request`). Publish it manually. `--share` cannot be combined
+with `--json`; `--out` requires `--share`.
 
 ### 9. Status and integrity
 
@@ -238,9 +258,12 @@ argmax choice and recomputed confidence all have to match. `gate test` writes
 the same journal events as a live evaluation, so the offline path is a safe way
 to validate the wiring.
 
-`gate report` after one request says:
+`gate report` after one request prints, among other lines:
 
 ```text
+window: days=1 active=1
+labeled: 0
+awaiting labeling: 1
 insufficient data: 0 labeled, need 100
 ```
 

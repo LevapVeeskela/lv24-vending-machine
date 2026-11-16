@@ -25,6 +25,7 @@
   go -C providers/marketdata-binance test ./...
   go -C providers/notify-telegram test ./...
   go -C tools test ./...
+  python -m unittest discover -s examples/clients/python -p "test_*.py"  # test:clients:python
   go build all                                                   # build
   ```
 - [ ] `go run ./tools/release` ещё не запускался на грязном дереве.
@@ -118,7 +119,7 @@ go run ./tools/release
 - [ ] Создать обсуждение (Announcements) с тем же заголовком.
 - [ ] Указать: что это shadow-режим (ордеров нет), как установить, что
       бинарники не подписаны, как проверить сумму.
-- [ ] Дать ссылку на runbook 30–40 минут и список того, что прислать
+- [ ] Дать ссылку на runbook 15 минут и список того, что прислать
       (`doctor --live`, `status --json`, `gate report --share`,
       `journal verify`).
 - [ ] Написать, что присылать **нельзя**: конфиг, ключи, `--save-raw`, журнал.
@@ -132,6 +133,8 @@ go run ./tools/release
 - [ ] Критерий G1 (`docs/spec/10-roadmap.md`): число внешних инсталляций с
       ≥ 7 днями непрерывной работы и ≥ 100 размеченными решениями.
       ≥ 20 — M2; 5–19 — одна итерация на 2 недели; < 5 — стоп или пивот.
+      Сверять по строкам `active days` и `labeled outcomes` сводки
+      `vend gate report --share`: `active days` ≥ 7 и `labeled outcomes` ≥ 100.
 - [ ] Собирать метрики только из `--share`-сводок и `status --json`; не
       запрашивать у пользователей журналы и ключи.
 

@@ -23,6 +23,15 @@ tasks:
       - task: test:core
       - task: test:providers
       - task: test:tools
+      - task: test:clients:python
+
+  test:clients:python:
+    desc: Test the stdlib Python client against a loopback server
+    preconditions:
+      - sh: python --version
+        msg: "Python 3 is required for examples/clients/python; install Python 3 and put 'python' on PATH"
+    cmds:
+      - python -m unittest discover -s examples/clients/python -p "test_*.py"
 
   test:core:
     desc: Test the core module

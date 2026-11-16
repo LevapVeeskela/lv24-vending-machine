@@ -9,6 +9,9 @@
 
 Всё выполняется из корня репозитория. Платных сервисов и обращений к CI нет.
 
+Для длительного прогона к G1 (≥ 7 дней, ≥ 100 меток) — отдельный документ
+[run-7-days.md](run-7-days.md).
+
 ## 0. Установка
 
 Сначала получите `vend`: готовый бинарник со страницы релизов или сборку из
@@ -115,6 +118,12 @@ curl -sS -X POST http://127.0.0.1:8420/v1/gate \
 
 В PowerShell 5.1 `curl` — алиас `Invoke-WebRequest`; вызывайте `curl.exe`.
 
+`contracts/examples/gate-request.json` — шаблон. Замените `signalId` на
+уникальный, а `ts` — на текущее UTC-время: со старым `ts` сигнал попадёт в
+журнал как `backfill`, а повтор с тем же `signalId` вернёт записанный вердикт.
+Вместо `<token>` подставьте значение `VENDING_SECRET_CONN_LOCAL_APITOKEN`
+(PowerShell: `$env:VENDING_SECRET_CONN_LOCAL_APITOKEN`).
+
 Ответ (HTTP 200):
 
 ```json
@@ -125,7 +134,10 @@ curl -sS -X POST http://127.0.0.1:8420/v1/gate \
     "verdict": "ALLOW",
     "code": "allow",
     "reasons": ["all gate checks passed"],
-    "checks": [],
+    "checks": [
+      { "name": "intent", "passed": true, "detail": "intentKind=entry" },
+      { "name": "provider", "passed": true, "detail": "provider response ok" }
+    ],
     "decisionId": "<decision-id>",
     "model": "drex-max-v1.1",
     "policyHash": "<64 hex>",
@@ -133,6 +145,10 @@ curl -sS -X POST http://127.0.0.1:8420/v1/gate \
   }
 }
 ```
+
+В реальном ответе `checks` содержит все проверки (`intent`, `provider`,
+`answers`, `data_quality`, `risk_check`, `directional`, `confidence`); выше
+показаны две.
 
 `mode` — фактический режим из конфига (`shadow` по умолчанию) и возвращается
 как есть. Гейт только оценивает: M1 не выставляет ордера, `live` отклоняется
@@ -169,6 +185,11 @@ curl -sS -X POST http://127.0.0.1:8420/v1/gate \
 `entryLagMs` хранит задержку от open входного бара до этого момента. Свечи
 берутся у `providers.marketdata`, поэтому на этом шаге нужна сеть до биржи.
 
+С значениями по умолчанию (`horizonBars: 12`, таймфрейм `1h`) первая метка
+появится только через несколько часов. Для быстрой проверки используйте
+[runbook](runbook-live-smoke.md): там `horizonBars: 3` и ручной запрос с
+`timeframe: "1m"`.
+
 Сигналы, пришедшие позже чем через один таймфрейм
 (`receivedAt − ts > timeframe`), помечаются `backfill`: они могут входить в бар,
 уже закрывшийся к моменту приёма, и не входят в сравнения отчёта без
@@ -197,8 +218,10 @@ curl -sS -X POST http://127.0.0.1:8420/v1/gate \
 
 `--share` печатает только агрегаты, метрики качества модели, допущения и
 медиану/p95 entry lag (в долях бара) с числом сдвинутых входов: без символов,
-площадок, цен, state, путей и идентификаторов. Публикуется вручную. `--share`
-нельзя совмещать с `--json`; `--out` требует `--share`.
+площадок, цен, state, путей и идентификаторов. В сводке есть строки `days`
+(окно по времени приёма) и `active days` (число разных UTC-дат с хотя бы одним
+`gate.request`). Публикуется вручную. `--share` нельзя совмещать с `--json`;
+`--out` требует `--share`.
 
 ### 9. Статус и целостность
 
@@ -231,9 +254,12 @@ go build -o vend ./core/cmd/vend
 единице, argmax и пересчитанная уверенность. `gate test` пишет те же события
 журнала, что и живая оценка, поэтому офлайн-путь безопасно проверяет связку.
 
-`gate report` после одного запроса скажет:
+`gate report` после одного запроса печатает среди прочего:
 
 ```text
+window: days=1 active=1
+labeled: 0
+awaiting labeling: 1
 insufficient data: 0 labeled, need 100
 ```
 

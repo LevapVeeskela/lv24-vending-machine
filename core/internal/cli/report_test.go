@@ -196,7 +196,7 @@ func TestPrintReportHumanModelThreshold(t *testing.T) {
 		},
 	}
 	var buf strings.Builder
-	printReportHuman(&buf, rep, 0)
+	printReportHuman(&buf, rep, 0, reportWindow{})
 	got := buf.String()
 	if !strings.Contains(got, "big: n=30") {
 		t.Fatalf("report misses the >=30 model: %q", got)
@@ -238,7 +238,7 @@ func TestPrintReportHumanInsufficientDays(t *testing.T) {
 		},
 	}
 	var buf strings.Builder
-	printReportHuman(&buf, rep, 2)
+	printReportHuman(&buf, rep, 2, reportWindow{})
 	got := buf.String()
 	if !strings.Contains(got, "difference ALLOW-REJECT: mean=0.045") {
 		t.Fatalf("report misses the point mean: %q", got)
@@ -271,7 +271,7 @@ func TestPrintReportHumanBSSUndefined(t *testing.T) {
 	}
 	for _, baseRate := range []float64{0, 1} {
 		var buf strings.Builder
-		printReportHuman(&buf, newRep(baseRate, 0), 0)
+		printReportHuman(&buf, newRep(baseRate, 0), 0, reportWindow{})
 		got := buf.String()
 		if !strings.Contains(got, "bss: n/a") {
 			t.Fatalf("base rate %v misses bss n/a: %q", baseRate, got)
@@ -281,7 +281,7 @@ func TestPrintReportHumanBSSUndefined(t *testing.T) {
 		}
 	}
 	var buf strings.Builder
-	printReportHuman(&buf, newRep(0.5, 0.25), 0)
+	printReportHuman(&buf, newRep(0.5, 0.25), 0, reportWindow{})
 	if !strings.Contains(buf.String(), "bss: 0.250000") {
 		t.Fatalf("defined base rate misses the skill score: %q", buf.String())
 	}
