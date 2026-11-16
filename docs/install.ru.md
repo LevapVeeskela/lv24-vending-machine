@@ -114,7 +114,8 @@ Rename-Item .\vend_windows_amd64.exe vend.exe
 
 `init` печатает пути конфига и данных, `doctor` проверяет их без сети. Дальше —
 [quickstart.ru.md](quickstart.ru.md) или живая проверка на 15 минут в
-[runbook-live-smoke.md](runbook-live-smoke.md).
+[runbook-live-smoke.md](runbook-live-smoke.md). Длительный прогон для G1
+(≥ 7 дней, ≥ 100 меток) — [run-7-days.md](run-7-days.md).
 
 ## Неподписанные бинарники
 

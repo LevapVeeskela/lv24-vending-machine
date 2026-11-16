@@ -10,6 +10,9 @@ Two paths to a working shadow gate:
 Everything below runs from the repository root. There are no paid services and
 no CI calls.
 
+For the multi-day run towards G1 (≥ 7 days, ≥ 100 labels) see
+[run-7-days.md](run-7-days.md) (Russian).
+
 ## 0. Install
 
 Get `vend` first: a prebuilt binary from the release page or a source build — see
