@@ -634,3 +634,104 @@ func TestDebugSizeStable(t *testing.T) {
 		t.Fatalf("debugSize = %d, want <= 3 (bounded)", got)
 	}
 }
+
+func TestNotificationCursorPersistsAcrossRestart(t *testing.T) {
+	jr := &memJournal{}
+	seedEvent(t, jr, domain.EventDecisionModelChanged, domain.ModelChanged{
+		RequestedModel: "test-model",
+		PreviousModel:  "model-v1",
+		ActualModel:    "model-v2",
+	})
+	dir := t.TempDir()
+	path := filepath.Join(dir, "status.json")
+
+	n1 := &fakeNotifier{}
+	r1 := newRunner(jr, fixedDeps(), testConfig(path), nil, nil, nil, nil, n1)
+	if err := r1.Step(context.Background()); err != nil {
+		t.Fatalf("first Step() = %v", err)
+	}
+	if got := n1.sent(); len(got) != 1 {
+		t.Fatalf("first runner sends = %d, want 1", len(got))
+	}
+
+	// A new runner on the same journal and status path must not re-send.
+	n2 := &fakeNotifier{}
+	r2 := newRunner(jr, fixedDeps(), testConfig(path), nil, nil, nil, nil, n2)
+	if err := r2.Step(context.Background()); err != nil {
+		t.Fatalf("second Step() = %v", err)
+	}
+	if got := n2.sent(); len(got) != 0 {
+		t.Fatalf("second runner sends = %d, want 0 (cursor persisted)", len(got))
+	}
+	if got := jr.eventsOf(domain.EventNotifySent); len(got) != 1 {
+		t.Fatalf("notify.sent = %d, want 1 across restart", len(got))
+	}
+}
+
+func TestStatusOmitsZeroTimes(t *testing.T) {
+	jr := &memJournal{}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "status.json")
+	r := newRunner(jr, fixedDeps(), testConfig(path), nil, nil, nil, nil, nil)
+	if err := r.Step(context.Background()); err != nil {
+		t.Fatalf("Step() = %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read status file: %v", err)
+	}
+	s := string(raw)
+	if strings.Contains(s, "0001-01-01") {
+		t.Fatalf("status serializes a zero time: %s", s)
+	}
+	if strings.Contains(s, "lastLabelAt") {
+		t.Fatalf("status serializes zero lastLabelAt: %s", s)
+	}
+	if strings.Contains(s, "lastSeq") {
+		t.Fatalf("status serializes zero lastSeq: %s", s)
+	}
+}
+
+func TestLastLabelAtOnlyWhenLabeledPositive(t *testing.T) {
+	jr := &memJournal{}
+	l := &fakeLabeler{sum: outcome.Summary{Labeled: 0}}
+	r := newRunner(jr, fixedDeps(), testConfig(""), l, nil, nil, nil, nil)
+	if err := r.Step(context.Background()); err != nil {
+		t.Fatalf("Step() = %v", err)
+	}
+	if !r.Status().LastLabelAt.IsZero() {
+		t.Fatalf("lastLabelAt = %v, want zero when nothing labeled", r.Status().LastLabelAt)
+	}
+	l.sum = outcome.Summary{Labeled: 3}
+	if err := r.Step(context.Background()); err != nil {
+		t.Fatalf("Step() = %v", err)
+	}
+	if r.Status().LastLabelAt.IsZero() {
+		t.Fatalf("lastLabelAt zero, want set after labeling")
+	}
+}
+
+type cancelingEvaluator struct {
+	cancel context.CancelFunc
+	calls  int
+}
+
+func (c *cancelingEvaluator) Evaluate(context.Context, domain.GateRequest) (gateflow.Result, error) {
+	c.calls++
+	c.cancel()
+	return gateflow.Result{}, nil
+}
+
+func TestStepStopsEvaluatingWhenCancelled(t *testing.T) {
+	jr := &memJournal{}
+	s := &fakeSignals{reqs: []domain.GateRequest{{SignalID: "a"}, {SignalID: "b"}, {SignalID: "c"}}}
+	ctx, cancel := context.WithCancel(context.Background())
+	e := &cancelingEvaluator{cancel: cancel}
+	r := newRunner(jr, fixedDeps(), testConfig(""), nil, s, e, nil, nil)
+	if err := r.Step(ctx); err != nil {
+		t.Fatalf("Step() = %v", err)
+	}
+	if e.calls != 1 {
+		t.Fatalf("evaluator calls = %d, want 1 (stop starting new calls after cancel)", e.calls)
+	}
+}

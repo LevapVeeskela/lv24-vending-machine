@@ -6,145 +6,187 @@ import (
 	"fmt"
 	"path/filepath"
 	"runtime"
+	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/LevapVeeskela/lv24-vending-machine/core/domain"
+	"github.com/LevapVeeskela/lv24-vending-machine/core/internal/app/gateflow"
 	"github.com/LevapVeeskela/lv24-vending-machine/core/internal/app/outcome"
 	"github.com/LevapVeeskela/lv24-vending-machine/core/internal/store/sqlite"
 	"github.com/LevapVeeskela/lv24-vending-machine/core/ports"
 )
 
-// Seven-day shadow soak parameters: 2000 entry signals, one 5m cycle each,
-// 2016 cycles == 7 days.
+// TestShadowSevenDays drives the real shadow Runner through a full simulated
+// week (2016 five-minute cycles) against a real SQLite journal, the real
+// outcome.Labeler and the real gateflow.Flow, with generated candles and a
+// scripted decision provider. No network and no secrets are involved.
 const (
-	sevenDaySignals  = 2000
 	sevenDaySteps    = 2016
+	sevenDaySignals  = 2000
 	sevenDayInterval = 5 * time.Minute
 )
 
-// sevenDayBase is the signal grid origin: 2026-01-01T00:00:00Z.
-var sevenDayBase = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+var sevenDayBase = time.Date(2026, time.November, 16, 6, 0, 0, 0, time.UTC)
 
-// fixtureCandles serves exactly one synthetic 5m bar per request, opening at
-// the requested (5m-rounded) time and closing one interval later.
-type fixtureCandles struct {
-	calls int
+// sevenDayDec converts an integer count into a positive Decimal.
+func sevenDayDec(v int64) domain.Decimal {
+	return domain.MustParseDecimal(strconv.FormatInt(v, 10))
 }
 
-func (f *fixtureCandles) Candles(_ context.Context, req domain.CandleRequest) ([]domain.Candle, error) {
-	f.calls++
-	open := req.From.UTC().Truncate(sevenDayInterval)
-	return []domain.Candle{{
-		Symbol:    req.Symbol,
-		Interval:  req.Interval,
+// sevenDayBar returns deterministic positive OHLC values for the 5-minute bar
+// opening at open. open always lies on the 5m grid: the fake clock advances
+// from sevenDayBase by exactly one interval per step.
+func sevenDayBar(open time.Time) (o, h, l, c int64) {
+	n := open.Unix() / int64(sevenDayInterval/time.Second)
+	o = 60000 + (n % 500)
+	c = o + 10 + (n % 21)
+	if c > o {
+		h = c + 5
+		l = o - 5
+	} else {
+		h = o + 5
+		l = c - 5
+	}
+	return o, h, l, c
+}
+
+// sevenDayCandle builds one generated 5m BTCUSDT candle for open.
+func sevenDayCandle(open time.Time) domain.Candle {
+	o, h, l, c := sevenDayBar(open)
+	n := open.Unix() / int64(sevenDayInterval/time.Second)
+	return domain.Candle{
+		Symbol:    "BTCUSDT",
+		Interval:  "5m",
 		OpenTime:  open,
 		CloseTime: open.Add(sevenDayInterval),
-		Open:      domain.MustParseDecimal("100"),
-		High:      domain.MustParseDecimal("101"),
-		Low:       domain.MustParseDecimal("99"),
-		Close:     domain.MustParseDecimal("100.5"),
-		Volume:    domain.MustParseDecimal("1"),
+		Open:      sevenDayDec(o),
+		High:      sevenDayDec(h),
+		Low:       sevenDayDec(l),
+		Close:     sevenDayDec(c),
+		Volume:    sevenDayDec(1000 + (n % 1000)),
+	}
+}
+
+// sevenDayCandleSource serves generated 5m bars, returning only bars that
+// already closed before the fake now.
+type sevenDayCandleSource struct {
+	now func() time.Time
+}
+
+func (s *sevenDayCandleSource) Candles(_ context.Context, req domain.CandleRequest) ([]domain.Candle, error) {
+	now := s.now().UTC()
+	from := req.From.UTC().Truncate(sevenDayInterval)
+	var out []domain.Candle
+	for k := 0; k < req.Limit; k++ {
+		open := from.Add(time.Duration(k) * sevenDayInterval)
+		if !open.Add(sevenDayInterval).Before(now) {
+			break
+		}
+		out = append(out, sevenDayCandle(open))
+	}
+	return out, nil
+}
+
+// sevenDaySignalSource emits exactly one entry signal per Scan for the first
+// sevenDaySignals calls, then none.
+type sevenDaySignalSource struct {
+	now func() time.Time
+	i   int
+}
+
+func (s *sevenDaySignalSource) Scan(_ context.Context) ([]domain.GateRequest, error) {
+	if s.i >= sevenDaySignals {
+		return nil, nil
+	}
+	i := s.i
+	s.i++
+	ts := s.now().Add(-sevenDayInterval)
+	_, _, _, c := sevenDayBar(ts)
+	return []domain.GateRequest{{
+		SignalID:   fmt.Sprintf("sig-%d", i),
+		Instrument: domain.Instrument{Venue: "binance", Symbol: "BTCUSDT"},
+		Side:       domain.SideBuy,
+		IntentKind: domain.IntentEntry,
+		Timeframe:  "5m",
+		TS:         ts,
+		Price:      sevenDayDec(c),
+		Source:     "fixture",
+		State:      map[string]float64{"rsi": 50},
 	}}, nil
 }
 
-// seedSevenDayRequests appends 2000 gate.request events on a 5m grid.
-func seedSevenDayRequests(t *testing.T, ctx context.Context, jr *sqlite.Store) {
-	t.Helper()
-	for i := 0; i < sevenDaySignals; i++ {
-		ts := sevenDayBase.Add(time.Duration(i) * sevenDayInterval)
-		req := domain.GateRequest{
-			SignalID:   fmt.Sprintf("sig-%d", i),
-			Instrument: domain.Instrument{Venue: "test", Symbol: "BTCUSDT"},
-			Side:       domain.SideBuy,
-			IntentKind: domain.IntentEntry,
-			Timeframe:  "5m",
-			TS:         ts,
-			Price:      domain.MustParseDecimal("100"),
-			Source:     "test",
-			State:      map[string]float64{"x": 1},
-		}
-		raw, err := json.Marshal(req)
-		if err != nil {
-			t.Fatalf("marshal gate request %d: %v", i, err)
-		}
-		if _, err := jr.Append(ctx, domain.Event{
-			Kind:          domain.EventGateRequest,
-			TS:            ts,
-			SchemaVersion: domain.EventSchemaVersion,
-			Payload:       raw,
-			CodeVersion:   "test",
-			DecisionID:    fmt.Sprintf("dec-%d", i),
-		}); err != nil {
-			t.Fatalf("append gate request %d: %v", i, err)
-		}
-	}
+// sevenDayPtr returns a pointer to v for optional Answer fields.
+func sevenDayPtr(v float64) *float64 { return &v }
+
+// sevenDayDecision answers every request with a gate-v1 ALLOW.
+type sevenDayDecision struct{}
+
+func (sevenDayDecision) Descriptor() ports.Descriptor {
+	return ports.Descriptor{ID: "fixture-decision", Name: "fixture", Kind: ports.KindDecision, Version: "v0"}
 }
 
-// labeledSignalIDs walks the journal and returns the signalId of every
-// outcome.labeled event.
-func labeledSignalIDs(t *testing.T, ctx context.Context, jr *sqlite.Store) []string {
-	t.Helper()
-	var ids []string
-	if err := jr.Walk(ctx, 0, domain.EventOutcomeLabeled, func(ev domain.Event) error {
-		var v struct {
-			SignalID string `json:"signalId"`
-		}
-		if err := json.Unmarshal(ev.Payload, &v); err != nil {
-			t.Errorf("decode outcome.labeled seq %d: %v", ev.Seq, err)
-			return nil
-		}
-		ids = append(ids, v.SignalID)
-		return nil
-	}); err != nil {
-		t.Fatalf("walk outcome.labeled: %v", err)
-	}
-	return ids
+func (sevenDayDecision) Decide(_ context.Context, _ domain.DecisionRequest) (domain.DecisionResponse, error) {
+	return domain.DecisionResponse{
+		Answers: map[string]domain.Answer{
+			"data_quality":     {Type: domain.QuestionChoice, Choice: "ok", Probabilities: map[string]float64{"ok": 0.9, "insufficient": 0.1}, Confidence: sevenDayPtr(0.9)},
+			"signal_alignment": {Type: domain.QuestionChoice, Choice: "aligned", Probabilities: map[string]float64{"aligned": 0.8, "neutral": 0.15, "conflict": 0.05}, Confidence: sevenDayPtr(0.8)},
+			"market_regime":    {Type: domain.QuestionChoice, Choice: "favorable", Probabilities: map[string]float64{"favorable": 0.7, "neutral": 0.25, "adverse": 0.05}, Confidence: sevenDayPtr(0.7)},
+			"risk_check":       {Type: domain.QuestionChoice, Choice: "pass", Probabilities: map[string]float64{"pass": 0.9, "block": 0.1}, Confidence: sevenDayPtr(0.9)},
+		},
+		Model: "fixture",
+		Usage: domain.Usage{InputTokens: 1, OutputTokens: 1, CostUSD: domain.MustParseDecimal("0")},
+	}, nil
 }
 
 func TestShadowSevenDays(t *testing.T) {
 	ctx := context.Background()
+	now := sevenDayBase
+	clock := func() time.Time { return now }
 
-	jr, err := sqlite.Open(ctx,
-		filepath.Join(t.TempDir(), "journal.sqlite"),
-		sqlite.WithClock(func() time.Time { return sevenDayBase }),
-	)
+	store, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "journal.db"), sqlite.WithClock(clock))
 	if err != nil {
-		t.Fatalf("open journal: %v", err)
+		t.Fatalf("open store: %v", err)
 	}
-	t.Cleanup(func() {
-		if err := jr.Close(); err != nil {
-			t.Errorf("close journal: %v", err)
-		}
-	})
+	defer func() { _ = store.Close() }()
 
-	seedSevenDayRequests(t, ctx, jr)
-
-	// One advancing fake clock drives both the labeler and the runner.
-	now := sevenDayBase.Add(10 * time.Minute)
-	deps := ports.Deps{Clock: func() time.Time { return now }}
-
-	src := &fixtureCandles{}
-	labeler, err := outcome.New(jr, src, deps, outcome.Config{
-		HorizonBars: 1,
-		FeeBps:      0,
-		PriceSource: "fixture",
-		CodeVersion: "test",
-	})
-	if err != nil {
-		t.Fatalf("new labeler: %v", err)
+	var idSeq atomic.Int64
+	deps := ports.Deps{
+		Clock: clock,
+		NewID: func() string { return fmt.Sprintf("dec-%d", idSeq.Add(1)) },
 	}
 
+	labeler, err := outcome.New(store, &sevenDayCandleSource{now: clock}, deps, outcome.Config{
+		HorizonBars: 1, FeeBps: 0, CodeVersion: "test", PriceSource: "fixture",
+	})
+	if err != nil {
+		t.Fatalf("outcome.New: %v", err)
+	}
+	flow, err := gateflow.New(store, sevenDayDecision{}, deps, gateflow.Config{
+		Model: "fixture", Policy: domain.DefaultGatePolicy(), CodeVersion: "test",
+	})
+	if err != nil {
+		t.Fatalf("gateflow.New: %v", err)
+	}
+
+	reporter := &fakeReporter{rep: domain.Report{
+		LabeledCount:  sevenDaySignals,
+		VerdictCounts: map[string]int{string(domain.VerdictAllow): sevenDaySignals},
+	}}
 	notifier := &fakeNotifier{}
-	reporter := &fakeReporter{}
 
-	runner, err := New(jr, labeler, nil, nil, reporter, notifier, deps, Config{CodeVersion: "test"})
+	runner, err := New(store, labeler, &sevenDaySignalSource{now: clock}, flow, reporter, notifier, deps, Config{
+		LabelInterval: sevenDayInterval,
+		StatusPath:    filepath.Join(t.TempDir(), "status.json"),
+		CodeVersion:   "test",
+	})
 	if err != nil {
-		t.Fatalf("new runner: %v", err)
+		t.Fatalf("shadow.New: %v", err)
 	}
 
-	sizeStart := runner.debugSize()
-	goroutinesStart := runtime.NumGoroutine()
+	startDebug := runner.debugSize()
+	beforeG := runtime.NumGoroutine()
 
 	start := time.Now()
 	for i := 0; i < sevenDaySteps; i++ {
@@ -153,55 +195,101 @@ func TestShadowSevenDays(t *testing.T) {
 		}
 		now = now.Add(sevenDayInterval)
 	}
-	elapsed := time.Since(start)
+	loopDur := time.Since(start)
+	t.Logf("7-day loop: %d steps duration=%v", sevenDaySteps, loopDur)
 
-	ids := labeledSignalIDs(t, ctx, jr)
-	if len(ids) != sevenDaySignals {
-		t.Fatalf("outcome.labeled = %d, want %d", len(ids), sevenDaySignals)
+	reqs, err := store.Query(ctx, 0, domain.EventGateRequest)
+	if err != nil {
+		t.Fatalf("query gate.request: %v", err)
 	}
-	seen := make(map[string]bool, len(ids))
-	for _, id := range ids {
-		if seen[id] {
-			t.Fatalf("duplicate outcome for signal %q", id)
-		}
-		seen[id] = true
-	}
-	for i := 0; i < sevenDaySignals; i++ {
-		if !seen[fmt.Sprintf("sig-%d", i)] {
-			t.Fatalf("signal sig-%d never labeled", i)
-		}
+	if len(reqs) != sevenDaySignals {
+		t.Fatalf("gate.request = %d, want %d", len(reqs), sevenDaySignals)
 	}
 
-	// One further cycle must not append anything.
-	before := len(ids)
+	labeled, err := store.Query(ctx, 0, domain.EventOutcomeLabeled)
+	if err != nil {
+		t.Fatalf("query outcome.labeled: %v", err)
+	}
+	if len(labeled) != sevenDaySignals {
+		t.Fatalf("outcome.labeled = %d, want %d", len(labeled), sevenDaySignals)
+	}
+	seen := make(map[string]bool, len(labeled))
+	for _, ev := range labeled {
+		var oc domain.Outcome
+		if err := json.Unmarshal(ev.Payload, &oc); err != nil {
+			t.Fatalf("decode outcome seq %d: %v", ev.Seq, err)
+		}
+		if oc.SignalID == "" {
+			t.Fatalf("outcome seq %d: empty signalId", ev.Seq)
+		}
+		if seen[oc.SignalID] {
+			t.Fatalf("duplicate outcome signalId %q", oc.SignalID)
+		}
+		seen[oc.SignalID] = true
+	}
+
+	vr, err := store.Verify(ctx)
+	if err != nil {
+		t.Fatalf("journal verify: %v", err)
+	}
+	if !vr.OK {
+		t.Fatalf("journal verify not ok: %+v", vr)
+	}
+
+	// One extra Step must add neither outcomes nor new signals.
+	reqCount, labeledCount := len(reqs), len(labeled)
 	if err := runner.Step(ctx); err != nil {
 		t.Fatalf("extra step: %v", err)
 	}
-	if got := len(labeledSignalIDs(t, ctx, jr)); got != before {
-		t.Fatalf("outcome.labeled after idle step = %d, want %d", got, before)
-	}
-
-	res, err := jr.Verify(ctx)
+	reqsAfter, err := store.Query(ctx, 0, domain.EventGateRequest)
 	if err != nil {
-		t.Fatalf("verify journal: %v", err)
+		t.Fatalf("query gate.request after: %v", err)
 	}
-	if !res.OK {
-		t.Fatalf("verify journal: ok=false brokenSeq=%d reason=%q", res.BrokenSeq, res.Reason)
+	labeledAfter, err := store.Query(ctx, 0, domain.EventOutcomeLabeled)
+	if err != nil {
+		t.Fatalf("query outcome.labeled after: %v", err)
+	}
+	if len(reqsAfter) != reqCount {
+		t.Fatalf("extra step added signals: before=%d after=%d", reqCount, len(reqsAfter))
+	}
+	if len(labeledAfter) != labeledCount {
+		t.Fatalf("extra step added outcomes: before=%d after=%d", labeledCount, len(labeledAfter))
 	}
 
-	if sizeEnd := runner.debugSize(); sizeEnd != sizeStart {
-		t.Fatalf("debugSize start=%d end=%d, want bounded", sizeStart, sizeEnd)
-	}
-
-	// Wait for background goroutines to settle before comparing counts.
-	deadline := time.Now().Add(10 * time.Second)
-	for runtime.NumGoroutine() > goroutinesStart && time.Now().Before(deadline) {
+	var afterG int
+	settled := false
+	for attempt := 1; attempt <= 3; attempt++ {
+		runtime.GC()
 		time.Sleep(10 * time.Millisecond)
+		afterG = runtime.NumGoroutine()
+		if afterG == beforeG {
+			settled = true
+			break
+		}
 	}
-	if got := runtime.NumGoroutine(); got != goroutinesStart {
-		t.Fatalf("goroutines before=%d after=%d, want no leak", goroutinesStart, got)
+	if !settled {
+		t.Fatalf("goroutines did not settle: before=%d after=%d", beforeG, afterG)
 	}
 
-	t.Logf("7d shadow soak: %d steps, %d signals, %d candles calls, %d journal events, %s",
-		sevenDaySteps, sevenDaySignals, src.calls, res.Count, elapsed.Round(time.Millisecond))
+	endDebug := runner.debugSize()
+	t.Logf("debugSize start=%d end=%d", startDebug, endDebug)
+	// debugSize must stay bounded regardless of the 2000 signals: exactly two
+	// persistent keys are expected (the provider_unavailable streak counter,
+	// reset to zero on every non-ABSTAIN verdict, and the weekly rate-limit
+	// timestamp). Anything more would mean per-signal growth.
+	if endDebug > 2 {
+		t.Fatalf("debugSize grew unboundedly: start=%d end=%d", startDebug, endDebug)
+	}
+
+	if sends := notifier.sent(); len(sends) > 0 {
+		kinds := make([]string, len(sends))
+		for i, n := range sends {
+			kinds[i] = n.Kind
+		}
+		t.Logf("notifier sends=%d kinds=%v", len(sends), kinds)
+	} else {
+		t.Fatalf("notifier recorded no sends; weekly summary should have fired")
+	}
+
+	t.Logf("total duration=%v", time.Since(start))
 }

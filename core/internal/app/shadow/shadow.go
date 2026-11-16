@@ -56,9 +56,12 @@ type Status struct {
 	PolicyHash     string    `json:"policyHash"`
 	Events         int64     `json:"events"`
 	Labeled        int       `json:"labeled"`
-	LastLabelAt    time.Time `json:"lastLabelAt,omitempty"`
+	LastLabelAt    time.Time `json:"lastLabelAt,omitzero"`
 	LastCycleError string    `json:"lastCycleError,omitempty"`
 	UpdatedAt      time.Time `json:"updatedAt"`
+	// LastSeq is the highest journal seq whose notifications were processed;
+	// it is restored on restart so already-notified events are not re-sent.
+	LastSeq int64 `json:"lastSeq,omitzero"`
 }
 
 // defaultInterval is the cycle period applied when Config.LabelInterval is
@@ -110,7 +113,7 @@ func New(jr ports.Journal, labeler Labeler, signals SignalSource, evaluator Eval
 	if jr == nil {
 		return nil, fmt.Errorf("shadow: nil journal")
 	}
-	return &Runner{
+	r := &Runner{
 		jr:        jr,
 		labeler:   labeler,
 		signals:   signals,
@@ -121,7 +124,19 @@ func New(jr ports.Journal, labeler Labeler, signals SignalSource, evaluator Eval
 		cfg:       cfg,
 		streaks:   make(map[string]int),
 		lastSent:  make(map[string]time.Time),
-	}, nil
+	}
+	// Restore the notification cursor from a previous run so notifications
+	// only process events appended after the last persisted seq. A missing or
+	// corrupt status file leaves the cursor at zero (reprocess from scratch).
+	if cfg.StatusPath != "" {
+		if raw, err := os.ReadFile(cfg.StatusPath); err == nil {
+			var st Status
+			if json.Unmarshal(raw, &st) == nil {
+				r.lastSeq = st.LastSeq
+			}
+		}
+	}
+	return r, nil
 }
 
 // Step runs one full cycle. It returns nil: per-phase errors are recorded in
@@ -169,6 +184,7 @@ func (r *Runner) Status() Status {
 		LastLabelAt:    r.lastLabelAt,
 		LastCycleError: r.lastCycleError,
 		UpdatedAt:      r.lastUpdated(),
+		LastSeq:        r.lastSeq,
 	}
 }
 
@@ -196,9 +212,10 @@ func (r *Runner) step(ctx context.Context) {
 
 	// a) Label outcomes.
 	if r.labeler != nil {
-		if _, err := r.labeler.Run(ctx); err != nil {
+		sum, err := r.labeler.Run(ctx)
+		if err != nil {
 			record(err)
-		} else {
+		} else if sum.Labeled > 0 {
 			r.lastLabelAt = r.deps.Now()
 		}
 	}
@@ -210,6 +227,11 @@ func (r *Runner) step(ctx context.Context) {
 			record(err)
 		} else if r.evaluator != nil {
 			for _, req := range reqs {
+				// On shutdown, stop starting new (up to 20s) evaluations; the
+				// in-flight Evaluate still finishes.
+				if ctx.Err() != nil {
+					break
+				}
 				if _, err := r.evaluator.Evaluate(ctx, req); err != nil {
 					record(err)
 				}
@@ -408,6 +430,7 @@ func (r *Runner) writeStatus(ctx context.Context) error {
 		LastLabelAt:    r.lastLabelAt,
 		LastCycleError: r.lastCycleError,
 		UpdatedAt:      now,
+		LastSeq:        r.lastSeq,
 	}
 
 	// Persist the snapshot fields even if the file write fails.
