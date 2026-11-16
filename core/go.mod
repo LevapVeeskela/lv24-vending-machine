@@ -5,6 +5,7 @@ go 1.27.0
 require (
 	github.com/LevapVeeskela/lv24-vending-machine/providers/decision-drex v0.0.0
 	github.com/LevapVeeskela/lv24-vending-machine/providers/marketdata-binance v0.0.0
+	github.com/LevapVeeskela/lv24-vending-machine/providers/notify-telegram v0.0.0
 	github.com/oklog/ulid/v2 v2.1.2
 	modernc.org/sqlite v1.62.0
 )
@@ -24,4 +25,5 @@ require (
 replace (
 	github.com/LevapVeeskela/lv24-vending-machine/providers/decision-drex => ../providers/decision-drex
 	github.com/LevapVeeskela/lv24-vending-machine/providers/marketdata-binance => ../providers/marketdata-binance
+	github.com/LevapVeeskela/lv24-vending-machine/providers/notify-telegram => ../providers/notify-telegram
 )
