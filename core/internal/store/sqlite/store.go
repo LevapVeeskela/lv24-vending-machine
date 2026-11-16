@@ -8,8 +8,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
-	_ "embed"
-	"encoding/json"
+	"embed"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -24,20 +23,46 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-//go:embed schema.sql
-var schema string
+//go:embed migrations/*.sql
+var migrationsFS embed.FS
+
+// migrations lists the schema migrations in application order.
+var migrations = []struct {
+	version int
+	file    string
+}{
+	{version: 1, file: "migrations/001_v1.sql"},
+}
+
+// latestVersion is the newest schema version.
+const latestVersion = 1
 
 var _ ports.Journal = (*Store)(nil)
 
 // Store is a file-backed journal.
 type Store struct {
-	db   *sql.DB
-	path string
+	db    *sql.DB
+	path  string
+	clock func() time.Time
+}
+
+// Option configures a Store.
+type Option func(*Store)
+
+// WithClock sets the clock used for the zero-TS fallback in Append.
+// A nil clock is ignored; the default is time.Now.
+func WithClock(clock func() time.Time) Option {
+	return func(s *Store) {
+		if clock != nil {
+			s.clock = clock
+		}
+	}
 }
 
 // Open creates the parent directory if needed, opens the database,
-// applies the schema idempotently and enables WAL with a busy timeout.
-func Open(ctx context.Context, path string) (*Store, error) {
+// applies pending migrations idempotently and enables WAL with a busy
+// timeout.
+func Open(ctx context.Context, path string, opts ...Option) (*Store, error) {
 	if path == "" {
 		return nil, fmt.Errorf("journal store: empty path")
 	}
@@ -54,7 +79,7 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	dsn := "file:" + filepath.ToSlash(path) +
 		"?_pragma=journal_mode(WAL)" +
 		"&_pragma=busy_timeout(10000)" +
-		"&_pragma=synchronous(NORMAL)" +
+		"&_pragma=synchronous(FULL)" +
 		"&_pragma=foreign_keys(1)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -66,7 +91,7 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		return nil, fmt.Errorf("journal store: ping %s: %w", path, err)
 	}
 	// Belt and suspenders: the _pragma DSN parameters above are honored by
-	// modernc.org/sqlite, but enforce the two mandatory settings explicitly
+	// modernc.org/sqlite, but enforce the mandatory settings explicitly
 	// so a platform-specific DSN quirk cannot silently disable them.
 	if _, err := db.ExecContext(ctx, "PRAGMA journal_mode=WAL"); err != nil {
 		_ = db.Close()
@@ -76,11 +101,67 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("journal store: set busy_timeout: %w", err)
 	}
-	if _, err := db.ExecContext(ctx, schema); err != nil {
+	if _, err := db.ExecContext(ctx, "PRAGMA synchronous=FULL"); err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("journal store: migrate %s: %w", path, err)
+		return nil, fmt.Errorf("journal store: set synchronous: %w", err)
 	}
-	return &Store{db: db, path: path}, nil
+	var syncMode string
+	if err := db.QueryRowContext(ctx, "PRAGMA synchronous").Scan(&syncMode); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("journal store: read synchronous: %w", err)
+	}
+	if syncMode != "2" && !strings.EqualFold(syncMode, "FULL") {
+		_ = db.Close()
+		return nil, fmt.Errorf("journal store: synchronous is %q, want FULL", syncMode)
+	}
+	if err := migrate(ctx, db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	s := &Store{db: db, path: path, clock: time.Now}
+	for _, opt := range opts {
+		opt(s)
+	}
+	if s.clock == nil {
+		s.clock = time.Now
+	}
+	return s, nil
+}
+
+// migrate applies pending embedded migrations in order. Each migration
+// runs in its own transaction, then PRAGMA user_version is advanced.
+// The DDL is idempotent, so databases created before migrations existed
+// (table present, user_version 0) open cleanly and end at latestVersion.
+func migrate(ctx context.Context, db *sql.DB) error {
+	var version int
+	if err := db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
+		return fmt.Errorf("journal store: read user_version: %w", err)
+	}
+	for _, m := range migrations {
+		if m.version <= version {
+			continue
+		}
+		sqlBytes, err := migrationsFS.ReadFile(m.file)
+		if err != nil {
+			return fmt.Errorf("journal store: read migration %s: %w", m.file, err)
+		}
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("journal store: begin migration %d: %w", m.version, err)
+		}
+		if _, err := tx.ExecContext(ctx, string(sqlBytes)); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("journal store: apply migration %d: %w", m.version, err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("journal store: commit migration %d: %w", m.version, err)
+		}
+		if _, err := db.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version=%d", m.version)); err != nil {
+			return fmt.Errorf("journal store: set user_version %d: %w", m.version, err)
+		}
+		version = m.version
+	}
+	return nil
 }
 
 // Close releases the database handle.
@@ -91,9 +172,25 @@ func (s *Store) Close() error {
 	return nil
 }
 
+// now returns the current time from the store clock.
+func (s *Store) now() time.Time {
+	if s.clock == nil {
+		return time.Now().UTC()
+	}
+	return s.clock().UTC()
+}
+
 // Append stores ev assigning Seq, EventID (ULID), TS (UTC), PrevHash and
-// Hash, and returns the stored event.
+// Hash, and returns the stored event. The payload is canonicalized before
+// sealing and the exact canonical bytes are stored; a payload that fails
+// canonicalization is rejected and no row is written.
 func (s *Store) Append(ctx context.Context, ev domain.Event) (domain.Event, error) {
+	canon, err := journal.CanonicalizePayload(ev.Payload)
+	if err != nil {
+		return domain.Event{}, fmt.Errorf("journal store: canonicalize payload: %w", err)
+	}
+	ev.Payload = canon
+
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
 		return domain.Event{}, fmt.Errorf("journal store: conn: %w", err)
@@ -128,7 +225,7 @@ func (s *Store) Append(ctx context.Context, ev domain.Event) (domain.Event, erro
 		ev.EventID = ulid.Make().String()
 	}
 	if ev.TS.IsZero() {
-		ev.TS = time.Now().UTC()
+		ev.TS = s.now()
 	} else {
 		ev.TS = ev.TS.UTC()
 	}
@@ -139,13 +236,6 @@ func (s *Store) Append(ctx context.Context, ev domain.Event) (domain.Event, erro
 	if err != nil {
 		return domain.Event{}, fmt.Errorf("journal store: seal: %w", err)
 	}
-	payload := sealed.Payload
-	if len(payload) == 0 {
-		payload = []byte("null")
-	}
-	if !json.Valid(payload) {
-		return domain.Event{}, fmt.Errorf("journal store: invalid payload JSON at seq %d", sealed.Seq)
-	}
 	if _, err := conn.ExecContext(ctx,
 		`INSERT INTO events (seq, event_id, kind, ts, schema_version, payload,
 			code_version, prev_hash, hash, run_id, decision_id, policy_hash, snapshot_hash)
@@ -155,7 +245,7 @@ func (s *Store) Append(ctx context.Context, ev domain.Event) (domain.Event, erro
 		sealed.Kind,
 		sealed.TS.UTC().Format(time.RFC3339Nano),
 		sealed.SchemaVersion,
-		payload,
+		sealed.Payload,
 		sealed.CodeVersion,
 		sealed.PrevHash,
 		sealed.Hash,
@@ -170,7 +260,6 @@ func (s *Store) Append(ctx context.Context, ev domain.Event) (domain.Event, erro
 		return domain.Event{}, fmt.Errorf("journal store: commit seq %d: %w", sealed.Seq, err)
 	}
 	committed = true
-	sealed.Payload = payload
 	return sealed, nil
 }
 
@@ -248,13 +337,32 @@ func (s *Store) Head(ctx context.Context) (domain.Event, bool, error) {
 	return ev, true, nil
 }
 
-// Verify reads the whole chain in order and checks its integrity.
+// Verify streams the whole chain in order and checks its integrity: seq
+// continuity, prevHash linkage, byte-for-byte canonical payload equality,
+// then the event hash.
 func (s *Store) Verify(ctx context.Context) (domain.VerifyResult, error) {
-	events, err := s.Query(ctx, 0, "")
-	if err != nil {
-		return domain.VerifyResult{}, err
-	}
-	return journal.Verify(events), nil
+	return journal.VerifyStream(ctx, func(ctx context.Context, fn func(domain.Event) error) error {
+		rows, err := s.db.QueryContext(ctx, `SELECT seq, event_id, kind, ts, schema_version, payload, code_version,
+			prev_hash, hash, run_id, decision_id, policy_hash, snapshot_hash
+			FROM events ORDER BY seq ASC`)
+		if err != nil {
+			return fmt.Errorf("journal store: query: %w", err)
+		}
+		defer func() { _ = rows.Close() }()
+		for rows.Next() {
+			ev, err := scanEvent(rows)
+			if err != nil {
+				return err
+			}
+			if err := fn(ev); err != nil {
+				return err
+			}
+		}
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("journal store: rows: %w", err)
+		}
+		return nil
+	})
 }
 
 func nullStr(s string) any {

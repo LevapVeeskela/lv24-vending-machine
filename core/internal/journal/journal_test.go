@@ -1,6 +1,8 @@
 package journal
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -164,5 +166,160 @@ func TestCanonicalKeysSortedNoSpaces(t *testing.T) {
 		if strings.Contains(string(b2), `"`+k+`"`) {
 			t.Fatalf("empty optional %s must be omitted: %s", k, b2)
 		}
+	}
+}
+
+func TestCanonicalizePayloadCases(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"empty means null", ``, `null`},
+		{"whitespace-only means null", " \t\n ", `null`},
+		{"null stays null", `null`, `null`},
+		{"sorted keys", `{"b":1,"a":2}`, `{"a":2,"b":1}`},
+		{"whitespace stripped", " \t{\n  \"a\" : [1, 2] } ", `{"a":[1,2]}`},
+		{"number literal preserved", `{"n":1.10}`, `{"n":1.10}`},
+		{"exponent preserved", `{"n":1e2}`, `{"n":1e2}`},
+		{"scalar number", `42`, `42`},
+		{"scalar string", `"x"`, `"x"`},
+		{"nested sort", `{"z":{"d":1,"c":2},"a":[{"y":1,"x":2}]}`, `{"a":[{"x":2,"y":1}],"z":{"c":2,"d":1}}`},
+		{"no html escaping", `{"s":"<a>&"}`, `{"s":"<a>&"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := CanonicalizePayload([]byte(tc.raw))
+			if err != nil {
+				t.Fatalf("CanonicalizePayload(%q): %v", tc.raw, err)
+			}
+			if string(got) != tc.want {
+				t.Fatalf("CanonicalizePayload(%q) = %s, want %s", tc.raw, got, tc.want)
+			}
+			// Canonical output is a fixed point.
+			again, err := CanonicalizePayload(got)
+			if err != nil {
+				t.Fatalf("re-canonicalize: %v", err)
+			}
+			if !bytes.Equal(again, got) {
+				t.Fatalf("not a fixed point: %s vs %s", again, got)
+			}
+		})
+	}
+}
+
+func TestCanonicalizePayloadRejects(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+	}{
+		{"duplicate top-level keys", `{"a":1,"a":2}`},
+		{"duplicate nested keys", `{"a":{"b":1,"b":2}}`},
+		{"duplicate keys in array element", `{"a":[{"b":1,"b":2}]}`},
+		{"duplicate keys deeply nested", `{"a":[{"b":{"c":1,"c":2}}]}`},
+		{"trailing value", `{"a":1} {"b":2}`},
+		{"trailing garbage", `{"a":1} x`},
+		{"invalid json", `{"a":`},
+		{"empty object close", `{`},
+		{"bare word", `abc`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := CanonicalizePayload([]byte(tc.raw)); err == nil {
+				t.Fatalf("CanonicalizePayload(%q): want error, got nil", tc.raw)
+			}
+		})
+	}
+	// Same key in sibling objects is fine: duplicates are per-object.
+	if _, err := CanonicalizePayload([]byte(`[{"a":1},{"a":2}]`)); err != nil {
+		t.Fatalf("sibling keys must not count as duplicates: %v", err)
+	}
+}
+
+func TestCanonicalJSONRejectsDuplicateKeys(t *testing.T) {
+	ts := time.Date(2026, 11, 16, 10, 0, 1, 0, time.UTC)
+	ev := testEvent(1, ts)
+	ev.PrevHash = ZeroHash
+	ev.Payload = json.RawMessage(`{"a":1,"a":2}`)
+	if _, err := CanonicalJSON(ev); err == nil {
+		t.Fatalf("CanonicalJSON with duplicate payload keys: want error, got nil")
+	}
+	if _, err := Seal(ev, ZeroHash); err == nil {
+		t.Fatalf("Seal with duplicate payload keys: want error, got nil")
+	}
+}
+
+func TestWhitespaceEquivalentPayloadsSameHash(t *testing.T) {
+	ts := time.Date(2026, 11, 16, 10, 0, 1, 0, time.UTC)
+	a := testEvent(1, ts)
+	a.Payload = json.RawMessage(" \n" + `{"b":1,"a":2}` + " ")
+	b := testEvent(1, ts)
+	b.Payload = json.RawMessage(`{"a":2,"b":1}`)
+	sa, err := Seal(a, ZeroHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sb, err := Seal(b, ZeroHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sa.Hash != sb.Hash {
+		t.Fatalf("whitespace/key-order variants must hash equally: %s vs %s", sa.Hash, sb.Hash)
+	}
+}
+
+func TestVerifyDetectsNonCanonicalPayload(t *testing.T) {
+	events := sealChain(t, 3)
+	tampered := events[1]
+	tampered.Payload = json.RawMessage(`{"s": "x" , "n" : 1}`)
+	events[1] = tampered
+	res := Verify(events)
+	if res.OK || res.BrokenSeq != 2 || !strings.Contains(res.Reason, "payload") || !strings.Contains(res.Reason, "2") {
+		t.Fatalf("want payload break at seq 2, got %+v", res)
+	}
+}
+
+func TestVerifyDetectsDuplicateKeyPayload(t *testing.T) {
+	events := sealChain(t, 3)
+	tampered := events[2]
+	tampered.Payload = json.RawMessage(`{"a":1,"a":2}`)
+	events[2] = tampered
+	res := Verify(events)
+	if res.OK || res.BrokenSeq != 3 || !strings.Contains(res.Reason, "payload") {
+		t.Fatalf("want payload break at seq 3, got %+v", res)
+	}
+}
+
+func TestVerifyStreamMatchesSlice(t *testing.T) {
+	ctx := context.Background()
+	events := sealChain(t, 5)
+	walk := func(_ context.Context, fn func(domain.Event) error) error {
+		for _, ev := range events {
+			if err := fn(ev); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	res, err := VerifyStream(ctx, walk)
+	if err != nil {
+		t.Fatalf("VerifyStream: %v", err)
+	}
+	if want := Verify(events); res != want {
+		t.Fatalf("VerifyStream = %+v, Verify = %+v", res, want)
+	}
+	// Broken chain reports the same first break without an error.
+	events[3].Payload = json.RawMessage(`{"evil":true} `)
+	res, err = VerifyStream(ctx, walk)
+	if err != nil {
+		t.Fatalf("VerifyStream broken: %v", err)
+	}
+	if want := Verify(events); res != want || res.OK || res.BrokenSeq != 4 {
+		t.Fatalf("VerifyStream = %+v, Verify = %+v", res, want)
+	}
+	// Empty stream is valid.
+	res, err = VerifyStream(ctx, func(_ context.Context, _ func(domain.Event) error) error { return nil })
+	if err != nil || !res.OK || res.Count != 0 {
+		t.Fatalf("empty stream: %+v, err %v", res, err)
 	}
 }

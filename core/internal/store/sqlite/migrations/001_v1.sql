@@ -14,3 +14,13 @@ CREATE TABLE IF NOT EXISTS events (
   snapshot_hash  TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_events_kind_seq ON events(kind, seq);
+DROP TRIGGER IF EXISTS events_no_update;
+CREATE TRIGGER events_no_update BEFORE UPDATE ON events
+BEGIN
+  SELECT RAISE(ABORT, 'events is append-only');
+END;
+DROP TRIGGER IF EXISTS events_no_delete;
+CREATE TRIGGER events_no_delete BEFORE DELETE ON events
+BEGIN
+  SELECT RAISE(ABORT, 'events is append-only');
+END;
