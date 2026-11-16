@@ -2,8 +2,12 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"os"
+	"strings"
+	"time"
 
 	"github.com/LevapVeeskela/lv24-vending-machine/core/domain"
 	"github.com/LevapVeeskela/lv24-vending-machine/core/internal/app/report"
@@ -15,6 +19,12 @@ import (
 // human report prints its comparison metrics.
 const minModelLabeled = 30
 
+// shareDiscussionURL is the manual publication target of a --share summary.
+const shareDiscussionURL = "https://github.com/LevapVeeskela/lv24-vending-machine/discussions"
+
+// sharePolicyLen is the policy-hash prefix length printed by --share.
+const sharePolicyLen = 8
+
 func (r *runner) cmdGateReport(args []string) int {
 	g, rest, gerr := splitGlobals(args)
 	if gerr != nil {
@@ -25,13 +35,26 @@ func (r *runner) cmdGateReport(args []string) int {
 	fs := r.newFlagSet("gate report")
 	policy := fs.String("policy", "", "only report decisions made under this 64-hex policy hash")
 	includeBackfill := fs.Bool("include-backfill", false, "count backfilled outcomes in the comparison")
+	share := fs.Bool("share", false, "print a sanitized markdown summary instead of the full report")
+	shareOut := fs.String("out", "", "write the --share markdown to FILE (0600)")
 	if err := fs.Parse(rest); err != nil {
 		return exitUsage
 	}
 	if fs.NArg() > 0 {
 		return r.fail(jsonOut, exitUsage, codeUsage,
 			fmt.Sprintf("unexpected argument %q", fs.Arg(0)),
-			"run vend gate report [--policy HASH] [--include-backfill] [--json]", false, nil)
+			"run vend gate report [--policy HASH] [--include-backfill] [--share [--out FILE]] [--json]", false, nil)
+	}
+	if *share && jsonOut {
+		// A shareable summary is the opposite of the full JSON report.
+		return r.fail(false, exitUsage, codeUsage,
+			"--share cannot be combined with --json",
+			"run vend gate report --share [--out FILE]", false, nil)
+	}
+	if *shareOut != "" && !*share {
+		return r.fail(jsonOut, exitUsage, codeUsage,
+			"--out requires --share",
+			"run vend gate report --share --out FILE", false, nil)
 	}
 	if *policy != "" && !isPolicyHash(*policy) {
 		return r.fail(jsonOut, exitUsage, codeUsage,
@@ -72,6 +95,9 @@ func (r *runner) cmdGateReport(args []string) int {
 	if err != nil {
 		return r.fail(jsonOut, exitGeneral, codeGeneral, err.Error(),
 			"check the database file is a valid sqlite database", false, nil)
+	}
+	if *share {
+		return r.printShare(ctx, jr, rep, *shareOut)
 	}
 	if jsonOut {
 		r.printJSON(rep)
@@ -178,4 +204,165 @@ func shortPolicy(hash string) string {
 		return hash[:12]
 	}
 	return hash
+}
+
+// printShare writes the sanitized markdown summary either to stdout or to
+// path, and never echoes journal content beyond aggregate counts.
+func (r *runner) printShare(ctx context.Context, jr ports.Journal, rep domain.Report, path string) int {
+	decisions, days, err := shareWindow(ctx, jr)
+	if err != nil {
+		return r.fail(false, exitGeneral, codeGeneral, err.Error(),
+			"check the database file is a valid sqlite database", false, nil)
+	}
+	body := shareMarkdown(rep, r.ver, decisions, days)
+	if path == "" {
+		fmt.Fprint(r.stdout, body)
+		return exitOK
+	}
+	if werr := os.WriteFile(path, []byte(body), 0o600); werr != nil {
+		return r.fail(false, exitGeneral, codeGeneral, werr.Error(),
+			"check the output path is writable and retry", false, nil)
+	}
+	// Best effort: an existing file must not keep wide permissions.
+	_ = os.Chmod(path, 0o600)
+	fmt.Fprintf(r.stdout, "written to %s\n", path)
+	return exitOK
+}
+
+// shareWindow counts gate requests and the UTC-day span covered by their
+// timestamps. Any request means at least one day.
+func shareWindow(ctx context.Context, jr ports.Journal) (decisions, days int, err error) {
+	var first, last time.Time
+	if err := jr.Walk(ctx, 0, "", func(ev domain.Event) error {
+		if ev.Kind != domain.EventGateRequest {
+			return nil
+		}
+		decisions++
+		var req struct {
+			TS time.Time `json:"ts"`
+		}
+		if uerr := json.Unmarshal(ev.Payload, &req); uerr != nil || req.TS.IsZero() {
+			return nil
+		}
+		ts := req.TS.UTC()
+		if first.IsZero() || ts.Before(first) {
+			first = ts
+		}
+		if last.IsZero() || ts.After(last) {
+			last = ts
+		}
+		return nil
+	}); err != nil {
+		return 0, 0, fmt.Errorf("report: walk journal: %w", err)
+	}
+	if decisions == 0 {
+		return 0, 0, nil
+	}
+	days = 1
+	if !first.IsZero() && !last.IsZero() {
+		span := int(last.Truncate(24*time.Hour).Sub(first.Truncate(24*time.Hour)).Hours()/24) + 1
+		if span > days {
+			days = span
+		}
+	}
+	return decisions, days, nil
+}
+
+// shareMarkdown renders the anonymized summary: aggregate counts, model
+// quality metrics and assumptions only. State, instruments, venues, prices,
+// return sums, paths and identifiers never appear here.
+func shareMarkdown(rep domain.Report, ver string, decisions, days int) string {
+	var b strings.Builder
+	total := 0
+	for _, v := range rep.VerdictCounts {
+		total += v
+	}
+	if decisions == 0 {
+		decisions = total
+	}
+	policy := "n/a"
+	if len(rep.PolicyHash) >= sharePolicyLen {
+		policy = rep.PolicyHash[:sharePolicyLen]
+	} else if rep.PolicyHash != "" {
+		policy = rep.PolicyHash
+	}
+	fmt.Fprintf(&b, "# LV24 Vending — shadow gate summary\n\n")
+	fmt.Fprintf(&b, "- version: %s\n", displayVersion(ver))
+	fmt.Fprintf(&b, "- policy: %s\n", policy)
+	fmt.Fprintf(&b, "- decisions: %d\n", decisions)
+	fmt.Fprintf(&b, "- days: %d\n", days)
+	fmt.Fprintf(&b, "- labeled outcomes: %d\n", rep.LabeledCount)
+	fmt.Fprintf(&b, "- verdicts: ALLOW=%d REJECT=%d ABSTAIN=%d\n\n",
+		rep.VerdictCounts[string(domain.VerdictAllow)],
+		rep.VerdictCounts[string(domain.VerdictReject)],
+		rep.VerdictCounts[string(domain.VerdictAbstain)])
+
+	if rep.Sufficient && rep.Comparisons != nil {
+		c := rep.Comparisons
+		fmt.Fprintf(&b, "## Metrics\n\n")
+		fmt.Fprintf(&b, "- Brier score: %.4f\n", c.Brier)
+		fmt.Fprintf(&b, "- base rate: %.4f\n", c.BaseRate)
+		fmt.Fprintf(&b, "- AUC: %.4f\n", c.AUC)
+		fmt.Fprintf(&b, "- Brier skill score: %.4f\n", c.BrierSkillScore)
+		if d := c.Difference; d != nil {
+			fmt.Fprintf(&b, "- ALLOW vs REJECT mean difference: %s\n", d.Mean.String())
+			fmt.Fprintf(&b, "- 95%% CI: [%s, %s] (%s)\n\n",
+				d.Low.String(), d.High.String(), zeroWording(d.ContainsZero))
+		} else {
+			fmt.Fprintf(&b, "- ALLOW vs REJECT mean difference: insufficient data\n\n")
+		}
+	} else {
+		fmt.Fprintf(&b, "## Metrics\n\n")
+		fmt.Fprintf(&b, "- insufficient data: %d labeled outcomes, need %d\n\n",
+			rep.LabeledCount, report.DefaultMinLabeled)
+	}
+
+	fmt.Fprintf(&b, "## Assumptions\n\n")
+	if a := rep.Assumptions; a != nil {
+		fmt.Fprintf(&b, "- horizon: %d bars\n", a.HorizonBars)
+		fmt.Fprintf(&b, "- round-trip fee: %d bps\n", a.FeeBpsRoundTrip)
+		if src := safePriceSource(a.PriceSource); src != "" {
+			fmt.Fprintf(&b, "- price source: %s\n", src)
+		}
+		fmt.Fprintf(&b, "- equal size, no slippage, no funding\n\n")
+	} else {
+		fmt.Fprintf(&b, "- no labeled outcomes yet\n\n")
+	}
+
+	fmt.Fprintf(&b, "## Publishing\n\n")
+	fmt.Fprintf(&b, "Post this summary manually: %s\n", shareDiscussionURL)
+	return b.String()
+}
+
+// displayVersion keeps the summary readable when the build has no version.
+func displayVersion(ver string) string {
+	if strings.TrimSpace(ver) == "" {
+		return "dev"
+	}
+	return ver
+}
+
+// zeroWording describes whether a confidence interval covers zero.
+func zeroWording(containsZero bool) string {
+	if containsZero {
+		return "contains zero"
+	}
+	return "does not contain zero"
+}
+
+// safePriceSource returns s only when it is a plain provider id or "file".
+// Anything resembling a path, URL or free text is dropped.
+func safePriceSource(s string) string {
+	if s == "" || len(s) > 64 {
+		return ""
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		ok := (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+			c == '.' || c == '_' || c == '-'
+		if !ok {
+			return ""
+		}
+	}
+	return s
 }
