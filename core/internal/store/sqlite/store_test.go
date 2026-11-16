@@ -5,8 +5,10 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -448,6 +450,69 @@ func TestWithClock(t *testing.T) {
 	}
 	if !ev2.TS.Equal(explicit) {
 		t.Fatalf("explicit TS must be kept: got %v want %v", ev2.TS, explicit)
+	}
+}
+
+func TestReopenRestoresDroppedTriggers(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "journal.db")
+	s, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if _, err := s.Append(ctx, domain.Event{Kind: "k", Payload: json.RawMessage(`{}`), CodeVersion: "c"}); err != nil {
+		_ = s.Close()
+		t.Fatalf("append: %v", err)
+	}
+	dropAppendOnlyTriggers(t, s, ctx)
+	if err := s.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	s2, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer func() { _ = s2.Close() }()
+	if _, err := s2.db.ExecContext(ctx, `UPDATE events SET kind = 'x' WHERE seq = 1`); err == nil {
+		t.Fatalf("UPDATE after reopen: want append-only error, got nil")
+	} else if !strings.Contains(err.Error(), "append-only") {
+		t.Fatalf("UPDATE after reopen: want append-only error, got %v", err)
+	}
+	if _, err := s2.db.ExecContext(ctx, `DELETE FROM events WHERE seq = 1`); err == nil {
+		t.Fatalf("DELETE after reopen: want append-only error, got nil")
+	} else if !strings.Contains(err.Error(), "append-only") {
+		t.Fatalf("DELETE after reopen: want append-only error, got %v", err)
+	}
+	if res, err := s2.Verify(ctx); err != nil || !res.OK || res.Count != 1 {
+		t.Fatalf("verify after reopen: %+v err=%v", res, err)
+	}
+}
+
+func TestDbFilePermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix permission bits are not enforced on Windows")
+	}
+	ctx := context.Background()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sub", "journal.db")
+	s, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	_ = s.Close()
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat db: %v", err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("db file mode = %o, want 600", perm)
+	}
+	di, err := os.Stat(filepath.Dir(path))
+	if err != nil {
+		t.Fatalf("stat dir: %v", err)
+	}
+	if perm := di.Mode().Perm(); perm&0o077 != 0 {
+		t.Fatalf("data dir mode = %o, want no group/other access", perm)
 	}
 }
 

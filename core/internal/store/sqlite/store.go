@@ -72,7 +72,7 @@ func Open(ctx context.Context, path string, opts ...Option) (*Store, error) {
 		return nil, fmt.Errorf("journal store: invalid path: %q", path)
 	}
 	if dir := filepath.Dir(path); dir != "" {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return nil, fmt.Errorf("journal store: mkdir %s: %w", dir, err)
 		}
 	}
@@ -118,6 +118,13 @@ func Open(ctx context.Context, path string, opts ...Option) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	if err := ensureConstraints(ctx, db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	// Best effort: restrict the data file on Unix. Modes are ignored on
+	// Windows and a failed chmod must not fail Open.
+	_ = os.Chmod(path, 0o600)
 	s := &Store{db: db, path: path, clock: time.Now}
 	for _, opt := range opts {
 		opt(s)
@@ -126,6 +133,29 @@ func Open(ctx context.Context, path string, opts ...Option) (*Store, error) {
 		s.clock = time.Now
 	}
 	return s, nil
+}
+
+// appendOnlyTriggers holds the DDL that guarantees the events table is
+// append-only. It runs on every Open (after migrations), so a database
+// whose triggers were dropped externally regains them on next open.
+// The bodies must match migrations/001_v1.sql.
+const appendOnlyTriggers = `
+CREATE TRIGGER IF NOT EXISTS events_no_update BEFORE UPDATE ON events
+BEGIN
+  SELECT RAISE(ABORT, 'events is append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS events_no_delete BEFORE DELETE ON events
+BEGIN
+  SELECT RAISE(ABORT, 'events is append-only');
+END;
+`
+
+// ensureConstraints re-creates the append-only triggers if missing.
+func ensureConstraints(ctx context.Context, db *sql.DB) error {
+	if _, err := db.ExecContext(ctx, appendOnlyTriggers); err != nil {
+		return fmt.Errorf("journal store: ensure append-only triggers: %w", err)
+	}
+	return nil
 }
 
 // migrate applies pending embedded migrations in order. Each migration
