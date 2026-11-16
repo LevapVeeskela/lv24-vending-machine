@@ -16,6 +16,8 @@
    (машиночитаемый список).
 
 Итог: **13 категорий, ~170 записей в манифестах, ~117 клонов, ~3 ГБ**.
+Часть клонов повторяется между категориями (ccxt, vn.py, Nautilus, Lean,
+backtrader, ai-hedge-fund) — это разные линзы анализа, а не ошибка.
 
 Категории: `crypto-bots-python`, `crypto-bots-go-rust`, `ai-trading-agents`,
 `decision-model-trading`, `quant-backtest-engines`, `market-data-connectors`,
