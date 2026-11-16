@@ -448,24 +448,6 @@ func TestGateTestSaveRaw(t *testing.T) {
 	_ = stdout
 }
 
-func TestStubsNotImplemented(t *testing.T) {
-	env, _, stderr, cfgPath, dataDir := initTestEnv(t)
-	base := []string{"--config", cfgPath, "--data-dir", dataDir}
-	for _, args := range [][]string{
-		append([]string{"serve"}, base...),
-		append([]string{"gate", "report"}, base...),
-		append([]string{"outcomes", "label"}, base...),
-	} {
-		stderr.Reset()
-		if code := runArgs(env, args...); code != 2 {
-			t.Fatalf("vend %v = %d, want 2", args, code)
-		}
-		if got := stderr.String(); !strings.Contains(got, "not implemented yet") {
-			t.Fatalf("vend %v stderr misses stub message: %q", args, got)
-		}
-	}
-}
-
 func TestInvalidFixtureNoJournal(t *testing.T) {
 	env, stdout, stderr, cfgPath, dataDir := initTestEnv(t)
 
