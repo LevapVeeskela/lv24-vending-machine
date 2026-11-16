@@ -16,7 +16,10 @@
       "format": "date-time"
     },
     "schemaVersion": { "type": "integer", "minimum": 1 },
-    "payload": { "type": "object" },
+    "payload": {
+      "description": "Arbitrary event object. The only object allowing additional properties.",
+      "type": "object"
+    },
     "codeVersion": { "type": "string", "minLength": 1 },
     "prevHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },

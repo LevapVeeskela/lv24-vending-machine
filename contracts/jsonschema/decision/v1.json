@@ -49,7 +49,7 @@
     "DecisionResponse": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["answers", "model", "requestedModel"],
+      "required": ["answers", "model"],
       "properties": {
         "answers": {
           "type": "object",
@@ -62,7 +62,7 @@
           "minLength": 1
         },
         "requestedModel": {
-          "description": "Model that was requested.",
+          "description": "Model that was requested. Optional: omitted when the caller did not pin a model.",
           "type": "string",
           "minLength": 1
         },
@@ -94,7 +94,8 @@
       "properties": {
         "inputTokens": { "type": "integer", "minimum": 0 },
         "outputTokens": { "type": "integer", "minimum": 0 },
-        "costUsd": { "$ref": "../common/v1.json#/$defs/Decimal" }
+        "costUsd": { "$ref": "../common/v1.json#/$defs/Decimal" },
+        "latencyMs": { "type": "integer", "minimum": 0 }
       }
     }
   }

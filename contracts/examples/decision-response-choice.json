@@ -4,11 +4,11 @@
       "type": "choice",
       "choice": "long",
       "probabilities": { "long": 0.6, "flat": 0.3, "short": 0.1 },
-      "confidence": 0.6
+      "confidence": 0.4
     }
   },
   "model": "dre-x-1",
   "requestedModel": "dre-x-1",
-  "usage": { "inputTokens": 120, "outputTokens": 40, "costUsd": "0.0012" },
+  "usage": { "inputTokens": 120, "outputTokens": 40, "costUsd": "0.0000072", "latencyMs": 12 },
   "requestId": "req-001"
 }

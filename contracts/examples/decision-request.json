@@ -14,8 +14,7 @@
     },
     {
       "id": "volatility",
-      "type": "noul",
-      "criteria": "Probability that 1h realized volatility exceeds 2%."
+      "type": "noul"
     }
   ]
 }

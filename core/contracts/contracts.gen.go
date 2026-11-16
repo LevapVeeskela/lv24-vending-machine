@@ -202,8 +202,9 @@ type DecisionResponse struct {
 	// RequestID corresponds to the JSON schema field "requestId".
 	RequestID *string `json:"requestId,omitempty,omitzero"`
 
-	// Model that was requested.
-	RequestedModel string `json:"requestedModel"`
+	// Model that was requested. Optional: omitted when the caller did not pin a
+	// model.
+	RequestedModel *string `json:"requestedModel,omitempty,omitzero"`
 
 	// Usage corresponds to the JSON schema field "usage".
 	Usage *Usage `json:"usage,omitempty,omitzero"`
@@ -223,9 +224,6 @@ func (j *DecisionResponse) UnmarshalJSON(value []byte) error {
 	if _, ok := raw["model"]; raw != nil && !ok {
 		return fmt.Errorf("field model in DecisionResponse: required")
 	}
-	if _, ok := raw["requestedModel"]; raw != nil && !ok {
-		return fmt.Errorf("field requestedModel in DecisionResponse: required")
-	}
 	type Plain DecisionResponse
 	var plain Plain
 	if err := json.Unmarshal(value, &plain); err != nil {
@@ -234,7 +232,7 @@ func (j *DecisionResponse) UnmarshalJSON(value []byte) error {
 	if utf8.RuneCountInString(string(plain.Model)) < 1 {
 		return fmt.Errorf("field %s length: must be >= %d", "model", 1)
 	}
-	if utf8.RuneCountInString(string(plain.RequestedModel)) < 1 {
+	if plain.RequestedModel != nil && utf8.RuneCountInString(string(*plain.RequestedModel)) < 1 {
 		return fmt.Errorf("field %s length: must be >= %d", "requestedModel", 1)
 	}
 	*j = DecisionResponse(plain)
@@ -258,7 +256,7 @@ type Event struct {
 	// Kind corresponds to the JSON schema field "kind".
 	Kind string `json:"kind"`
 
-	// Payload corresponds to the JSON schema field "payload".
+	// Arbitrary event object. The only object allowing additional properties.
 	Payload EventPayload `json:"payload"`
 
 	// PolicyHash corresponds to the JSON schema field "policyHash".
@@ -283,6 +281,7 @@ type Event struct {
 	Ts time.Time `json:"ts"`
 }
 
+// Arbitrary event object. The only object allowing additional properties.
 type EventPayload map[string]interface{}
 
 // UnmarshalJSON implements json.Unmarshaler.
@@ -743,6 +742,9 @@ type Usage struct {
 	// InputTokens corresponds to the JSON schema field "inputTokens".
 	InputTokens int `json:"inputTokens"`
 
+	// LatencyMs corresponds to the JSON schema field "latencyMs".
+	LatencyMs *int `json:"latencyMs,omitempty,omitzero"`
+
 	// OutputTokens corresponds to the JSON schema field "outputTokens".
 	OutputTokens int `json:"outputTokens"`
 }
@@ -766,6 +768,9 @@ func (j *Usage) UnmarshalJSON(value []byte) error {
 	}
 	if 0 > plain.InputTokens {
 		return fmt.Errorf("field %s: must be >= %v", "inputTokens", 0)
+	}
+	if plain.LatencyMs != nil && 0 > *plain.LatencyMs {
+		return fmt.Errorf("field %s: must be >= %v", "latencyMs", 0)
 	}
 	if 0 > plain.OutputTokens {
 		return fmt.Errorf("field %s: must be >= %v", "outputTokens", 0)

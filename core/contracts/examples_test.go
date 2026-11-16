@@ -33,6 +33,18 @@ func TestContractExamples(t *testing.T) {
 		"invalid-gate-verdict.json": func() any { return &GateVerdict{} },
 		// invalid-event.json: "hash" is not 64 hex chars.
 		"invalid-event.json": func() any { return &Event{} },
+		// invalid-question.json: "type" outside choice|noul|score enum.
+		"invalid-question.json": func() any { return &Question{} },
+		// invalid-option.json: missing required "key".
+		"invalid-option.json": func() any { return &Option{} },
+		// invalid-answer.json: "noul" above maximum 1.
+		"invalid-answer.json": func() any { return &Answer{} },
+		// invalid-usage.json: missing required "inputTokens".
+		"invalid-usage.json": func() any { return &Usage{} },
+		// invalid-decimal.json: "1e5" violates the Decimal pattern.
+		"invalid-decimal.json": func() any { return new(Decimal) },
+		// invalid-instrument-ref.json: missing required "symbol".
+		"invalid-instrument-ref.json": func() any { return &InstrumentRef{} },
 	}
 
 	files, err := filepath.Glob(filepath.Join(examplesDir, "*.json"))
