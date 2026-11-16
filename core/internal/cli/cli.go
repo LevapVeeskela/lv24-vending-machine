@@ -13,21 +13,18 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/oklog/ulid/v2"
 
-	decisiondrex "github.com/LevapVeeskela/lv24-vending-machine/providers/decision-drex"
-	marketdatabinance "github.com/LevapVeeskela/lv24-vending-machine/providers/marketdata-binance"
-
 	"github.com/LevapVeeskela/lv24-vending-machine/core/domain"
 	"github.com/LevapVeeskela/lv24-vending-machine/core/internal/config"
 	"github.com/LevapVeeskela/lv24-vending-machine/core/internal/gate"
 	"github.com/LevapVeeskela/lv24-vending-machine/core/internal/registry"
 	"github.com/LevapVeeskela/lv24-vending-machine/core/internal/resilience"
-	"github.com/LevapVeeskela/lv24-vending-machine/core/internal/store/sqlite"
 	"github.com/LevapVeeskela/lv24-vending-machine/core/ports"
 )
 
@@ -57,21 +54,33 @@ const (
 	codeTimeout   = "timeout"
 )
 
+// docsURL points at the CLI contract; it is included in every JSON
+// error envelope (spec 03 §3) but never in human-readable output.
+const docsURL = "https://github.com/LevapVeeskela/lv24-vending-machine/blob/main/docs/spec/03-core-cli.md"
+
 // Env carries the process environment for Run. No os.Exit happens inside.
+//
+// NewRegistry and OpenJournal are composition-root factories filled by
+// core/cmd/vend: the cli package never imports providers or the journal
+// store itself.
 type Env struct {
-	Args    []string
-	Stdout  io.Writer
-	Stderr  io.Writer
-	Getenv  func(string) string
-	Version string
+	Args        []string
+	Stdout      io.Writer
+	Stderr      io.Writer
+	Getenv      func(string) string
+	Version     string
+	NewRegistry func(cfg config.Config, logger *slog.Logger) (*registry.Registry, error)
+	OpenJournal func(path string) (ports.Journal, io.Closer, error)
 }
 
 // runner holds resolved I/O for one Run call.
 type runner struct {
-	stdout io.Writer
-	stderr io.Writer
-	getenv func(string) string
-	ver    string
+	stdout          io.Writer
+	stderr          io.Writer
+	getenv          func(string) string
+	ver             string
+	registryFactory func(cfg config.Config, logger *slog.Logger) (*registry.Registry, error)
+	openJournal     func(path string) (ports.Journal, io.Closer, error)
 }
 
 // errBody is the structured error envelope.
@@ -87,10 +96,12 @@ type errBody struct {
 // Run executes the CLI and returns the process exit code.
 func Run(env Env) int {
 	r := &runner{
-		stdout: env.Stdout,
-		stderr: env.Stderr,
-		getenv: env.Getenv,
-		ver:    env.Version,
+		stdout:          env.Stdout,
+		stderr:          env.Stderr,
+		getenv:          env.Getenv,
+		ver:             env.Version,
+		registryFactory: env.NewRegistry,
+		openJournal:     env.OpenJournal,
 	}
 	if r.stdout == nil {
 		r.stdout = os.Stdout
@@ -143,7 +154,7 @@ func (r *runner) usage() {
 func (r *runner) fail(jsonMode bool, exit int, code, msg, hint string, retryable bool, details any) int {
 	if jsonMode {
 		raw, err := json.Marshal(errBody{
-			Code: code, Message: msg, Hint: hint, Retryable: retryable, Details: details,
+			Code: code, Message: msg, Hint: hint, DocsURL: docsURL, Retryable: retryable, Details: details,
 		})
 		if err == nil {
 			fmt.Fprintln(r.stderr, string(raw))
@@ -285,6 +296,25 @@ func statMissing(path string) error {
 	return nil
 }
 
+// newRegistry builds the provider registry via the composition-root
+// factory. A nil factory is a wiring error of the vend binary.
+func (r *runner) newRegistry(cfg config.Config, logger *slog.Logger) (*registry.Registry, error) {
+	if r.registryFactory == nil {
+		return nil, errors.New("registry factory is not configured")
+	}
+	return r.registryFactory(cfg, logger)
+}
+
+// openJournalAt opens the journal database via the composition-root factory.
+// The database file itself is checked by the caller with os.Stat where a
+// not-found exit code matters; OpenJournal only opens it.
+func (r *runner) openJournalAt(path string) (ports.Journal, io.Closer, error) {
+	if r.openJournal == nil {
+		return nil, nil, errors.New("journal factory is not configured")
+	}
+	return r.openJournal(path)
+}
+
 // loadConfig loads and validates the config file.
 func (r *runner) loadConfig(path string) (config.Config, error) {
 	if err := statMissing(path); err != nil {
@@ -381,12 +411,12 @@ func (r *runner) cmdInit(args []string) int {
 			"check the directory is writable and retry", false, nil)
 	}
 	dbPath := config.DBPath(dataDir)
-	st, err := sqlite.Open(context.Background(), dbPath)
+	_, closer, err := r.openJournalAt(dbPath)
 	if err != nil {
 		return r.fail(jsonOut, exitGeneral, codeGeneral, err.Error(),
 			"check the data directory is writable and retry", false, nil)
 	}
-	if err := st.Close(); err != nil {
+	if err := closer.Close(); err != nil {
 		return r.fail(jsonOut, exitGeneral, codeGeneral, err.Error(),
 			"retry vend init", false, nil)
 	}
@@ -567,10 +597,10 @@ func (r *runner) cmdDoctor(args []string) int {
 	dbOK := false
 	if _, err := os.Stat(dbPath); err != nil {
 		add("database", false, fmt.Sprintf("database file not found at %s: run vend init", dbPath))
-	} else if st, err := sqlite.Open(context.Background(), dbPath); err != nil {
+	} else if _, closer, err := r.openJournalAt(dbPath); err != nil {
 		add("database", false, err.Error())
 	} else {
-		_ = st.Close()
+		_ = closer.Close()
 		dbOK = true
 		add("database", true, dbPath)
 	}
@@ -578,12 +608,12 @@ func (r *runner) cmdDoctor(args []string) int {
 	if !dbOK {
 		add("journal", false, "database is unavailable")
 	} else {
-		st, err := sqlite.Open(context.Background(), dbPath)
+		jr, closer, err := r.openJournalAt(dbPath)
 		if err != nil {
 			add("journal", false, err.Error())
 		} else {
-			res, err := st.Verify(context.Background())
-			_ = st.Close()
+			res, err := jr.Verify(context.Background())
+			_ = closer.Close()
 			if err != nil {
 				add("journal", false, err.Error())
 			} else if !res.OK {
@@ -596,11 +626,14 @@ func (r *runner) cmdDoctor(args []string) int {
 
 	if cfgErr != nil {
 		add("providers", false, "config is unavailable")
-	} else if _, err := buildProviders(r.getenv, cfg, nil); err != nil {
+	} else if reg, err := r.newRegistry(cfg, nil); err != nil {
 		add("providers", false, err.Error())
 	} else {
-		add("providers", true, fmt.Sprintf("%s, %s",
-			cfg.Providers.Decision.ID, cfg.Providers.MarketData.ID))
+		var ids []string
+		for _, d := range reg.Descriptors() {
+			ids = append(ids, d.ID)
+		}
+		add("providers", true, strings.Join(ids, ", "))
 	}
 
 	if cfgErr != nil {
@@ -670,35 +703,25 @@ type errMsg string
 
 func (e errMsg) Error() string { return string(e) }
 
-// buildProviders constructs both providers from the config without network I/O.
-func buildProviders(getenv func(string) string, cfg config.Config, logger *slog.Logger) (*registry.Registry, error) {
-	reg := registry.New()
-	dec, err := decisiondrex.New(decisiondrex.Config{
-		Profile:         decisiondrex.Profile(cfg.Providers.Decision.Profile),
-		BaseURL:         cfg.Providers.Decision.BaseURL,
-		SecretRef:       cfg.Providers.Decision.SecretRef,
-		PricePerBillion: cfg.Providers.Decision.PricePerBillion,
-	}, ports.Deps{
-		Clock:   time.Now,
-		Logger:  logger,
-		Secrets: config.EnvSecretStore{Getenv: getenv},
+// appendVerdict records the verdict in the journal database.
+func (r *runner) appendVerdict(dbPath string, verdict domain.GateVerdict) error {
+	payload, err := json.Marshal(verdict)
+	if err != nil {
+		return err
+	}
+	jr, closer, err := r.openJournalAt(dbPath)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = closer.Close() }()
+	_, err = jr.Append(context.Background(), domain.Event{
+		Kind:        "gate.verdict",
+		CodeVersion: r.ver,
+		DecisionID:  verdict.DecisionID,
+		PolicyHash:  verdict.PolicyHash,
+		Payload:     payload,
 	})
-	if err != nil {
-		return nil, err
-	}
-	if err := reg.RegisterDecision(dec); err != nil {
-		return nil, err
-	}
-	md, err := marketdatabinance.New(marketdatabinance.Config{
-		BaseURL: cfg.Providers.MarketData.BaseURL,
-	}, ports.Deps{Clock: time.Now})
-	if err != nil {
-		return nil, err
-	}
-	if err := reg.RegisterCandle(md); err != nil {
-		return nil, err
-	}
-	return reg, nil
+	return err
 }
 
 // --- gate ---
@@ -788,8 +811,11 @@ func (r *runner) cmdGateTest(args []string) int {
 			return r.fail(jsonOut, failCode, errCode, failErr.Error(), hint, false, nil)
 		}
 		outcome = domain.DecisionOutcome{Response: &resp}
+		if verr := validateFixture(resp, gate.Questions()); verr != nil {
+			return r.fail(jsonOut, exitUsage, codeUsage, verr.Error(), "fix the fixture file", false, nil)
+		}
 	} else if gateReq.IntentKind != domain.IntentExit {
-		reg, err := buildProviders(r.getenv, cfg,
+		reg, err := r.newRegistry(cfg,
 			slog.New(slog.NewTextHandler(r.stderr, nil)))
 		if err != nil {
 			return r.fail(jsonOut, exitProvider, codeProvider, err.Error(),
@@ -802,7 +828,7 @@ func (r *runner) cmdGateTest(args []string) int {
 		}
 		var resp domain.DecisionResponse
 		var callErr error
-		rerr := resilience.Do(context.Background(), resilience.DefaultPolicy(),
+		if rerr := resilience.Do(context.Background(), resilience.DefaultPolicy(),
 			func(ctx context.Context) error {
 				rr, derr := p.Decide(ctx, decReq)
 				if derr != nil {
@@ -812,8 +838,9 @@ func (r *runner) cmdGateTest(args []string) int {
 				resp = rr
 				callErr = nil
 				return nil
-			})
-		_ = rerr
+			}); rerr != nil && callErr == nil {
+			callErr = rerr
+		}
 		if callErr != nil {
 			outcome = domain.DecisionOutcome{Err: callErr}
 		} else {
@@ -829,7 +856,7 @@ func (r *runner) cmdGateTest(args []string) int {
 	verdict.DecisionID = ulid.Make().String()
 	verdict.DecidedAt = time.Now().UTC()
 
-	if err := appendVerdict(r.ver, config.DBPath(dataDir), verdict); err != nil {
+	if err := r.appendVerdict(config.DBPath(dataDir), verdict); err != nil {
 		return r.fail(jsonOut, exitGeneral, codeGeneral, err.Error(),
 			"check the data directory is writable and retry", false, nil)
 	}
@@ -955,26 +982,101 @@ func readDecisionFixture(path, model string) (domain.DecisionResponse, int, erro
 	return resp, exitOK, nil
 }
 
-// appendVerdict records the verdict in the journal database.
-func appendVerdict(codeVersion, dbPath string, verdict domain.GateVerdict) error {
-	payload, err := json.Marshal(verdict)
-	if err != nil {
-		return err
+// validateFixture checks an offline decision response against the gate
+// question set with the same strictness as the provider adapter, so a
+// replayed verdict is as trustworthy as a live one.
+func validateFixture(resp domain.DecisionResponse, questions []domain.Question) error {
+	if len(resp.Answers) != len(questions) {
+		return fmt.Errorf("invalid fixture: answer count %d does not match question count %d",
+			len(resp.Answers), len(questions))
 	}
-	ctx := context.Background()
-	st, err := sqlite.Open(ctx, dbPath)
-	if err != nil {
-		return err
+	for _, q := range questions {
+		a, ok := resp.Answers[q.ID]
+		if !ok {
+			return fmt.Errorf("invalid fixture: missing answer for question %q", q.ID)
+		}
+		if a.Type != q.Type {
+			return fmt.Errorf("invalid fixture: question %q: expected type %q, got %q",
+				q.ID, string(q.Type), string(a.Type))
+		}
+		if err := validateFixtureAnswer(q, a); err != nil {
+			return err
+		}
 	}
-	defer func() { _ = st.Close() }()
-	_, err = st.Append(ctx, domain.Event{
-		Kind:        "gate.verdict",
-		CodeVersion: codeVersion,
-		DecisionID:  verdict.DecisionID,
-		PolicyHash:  verdict.PolicyHash,
-		Payload:     payload,
-	})
-	return err
+	return nil
+}
+
+// validateFixtureAnswer checks one replayed answer by question type.
+func validateFixtureAnswer(q domain.Question, a domain.Answer) error {
+	switch q.Type {
+	case domain.QuestionChoice:
+		return validateFixtureChoice(q, a)
+	case domain.QuestionNoul:
+		if a.Noul == nil || math.IsNaN(*a.Noul) || math.IsInf(*a.Noul, 0) ||
+			*a.Noul < 0 || *a.Noul > 1 {
+			return fmt.Errorf("invalid fixture: question %q: noul out of range [0, 1]", q.ID)
+		}
+		return nil
+	case domain.QuestionScore:
+		if a.Score == nil || math.IsNaN(*a.Score) || math.IsInf(*a.Score, 0) {
+			return fmt.Errorf("invalid fixture: question %q: score is missing or not finite", q.ID)
+		}
+		if len(a.Legend) == 0 {
+			return fmt.Errorf("invalid fixture: question %q: score legend is empty", q.ID)
+		}
+		if len(a.Probabilities) == 0 {
+			return fmt.Errorf("invalid fixture: question %q: score probabilities are empty", q.ID)
+		}
+		return nil
+	default:
+		return fmt.Errorf("invalid fixture: question %q: unknown type %q", q.ID, string(q.Type))
+	}
+}
+
+// validateFixtureChoice mirrors the provider choice validation: exact
+// option keys, finite [0, 1] values, unit sum, argmax choice and a
+// recomputed confidence within 0.02.
+func validateFixtureChoice(q domain.Question, a domain.Answer) error {
+	n := len(q.Options)
+	if n < 2 {
+		return fmt.Errorf("invalid fixture: question %q: choice needs at least two options", q.ID)
+	}
+	if len(a.Probabilities) != n {
+		return fmt.Errorf("invalid fixture: question %q: probability count does not match options", q.ID)
+	}
+	max := math.Inf(-1)
+	sum := 0.0
+	for _, o := range q.Options {
+		p, ok := a.Probabilities[o.Key]
+		if !ok {
+			return fmt.Errorf("invalid fixture: question %q: probabilities miss option %q", q.ID, o.Key)
+		}
+		if math.IsNaN(p) || math.IsInf(p, 0) || p < 0 || p > 1 {
+			return fmt.Errorf("invalid fixture: question %q: probability out of range [0, 1]", q.ID)
+		}
+		sum += p
+		if p > max {
+			max = p
+		}
+	}
+	if math.Abs(sum-1) > 0.001 {
+		return fmt.Errorf("invalid fixture: question %q: probabilities do not sum to 1", q.ID)
+	}
+	got, ok := a.Probabilities[a.Choice]
+	if !ok || got != max {
+		return fmt.Errorf("invalid fixture: question %q: choice is not the argmax", q.ID)
+	}
+	if a.Confidence == nil {
+		return fmt.Errorf("invalid fixture: question %q: choice confidence is missing", q.ID)
+	}
+	if math.IsNaN(*a.Confidence) || math.IsInf(*a.Confidence, 0) {
+		return fmt.Errorf("invalid fixture: question %q: choice confidence is not finite", q.ID)
+	}
+	want := (max - 1/float64(n)) / (1 - 1/float64(n))
+	if math.Abs(*a.Confidence-want) > 0.02 {
+		return fmt.Errorf("invalid fixture: question %q: choice confidence does not match recomputed value", q.ID)
+	}
+	return nil
 }
 
 // printVerdictHuman prints the verdict in human-readable form.
@@ -1041,13 +1143,13 @@ func (r *runner) cmdJournalVerify(args []string) int {
 			"check the data directory is readable and retry", false, nil)
 	}
 	ctx := context.Background()
-	st, err := sqlite.Open(ctx, dbPath)
+	jr, closer, err := r.openJournalAt(dbPath)
 	if err != nil {
 		return r.fail(jsonOut, exitGeneral, codeGeneral, err.Error(),
 			"check the database file is a valid sqlite database", false, nil)
 	}
-	res, err := st.Verify(ctx)
-	_ = st.Close()
+	res, err := jr.Verify(ctx)
+	_ = closer.Close()
 	if err != nil {
 		return r.fail(jsonOut, exitGeneral, codeGeneral, err.Error(),
 			"check the database file is a valid sqlite database", false, nil)

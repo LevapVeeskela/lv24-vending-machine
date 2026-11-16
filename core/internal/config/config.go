@@ -118,6 +118,9 @@ func (c Config) Validate() error {
 	if strings.TrimSpace(d.Model) == "" {
 		return invalid("providers.decision.model must not be empty")
 	}
+	if strings.HasSuffix(strings.TrimSpace(d.Model), "-latest") {
+		return invalid("providers.decision.model must pin a concrete model id, aliases like *-latest are not allowed")
+	}
 	if d.Profile != "drex" && d.Profile != "jev" {
 		return invalid(fmt.Sprintf("providers.decision.profile must be drex or jev, got %q", d.Profile))
 	}

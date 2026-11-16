@@ -26,6 +26,7 @@ func TestValidateBad(t *testing.T) {
 		{"minBlockHigh", func(c *Config) { c.Gate.MinBlock = 2 }},
 		{"decisionID", func(c *Config) { c.Providers.Decision.ID = "" }},
 		{"model", func(c *Config) { c.Providers.Decision.Model = "" }},
+		{"modelLatest", func(c *Config) { c.Providers.Decision.Model = "drex-max-latest" }},
 		{"profile", func(c *Config) { c.Providers.Decision.Profile = "openai" }},
 		{"secretRef", func(c *Config) { c.Providers.Decision.SecretRef = "" }},
 		{"priceBad", func(c *Config) { c.Providers.Decision.PricePerBillion = "abc" }},
@@ -53,6 +54,18 @@ func TestLiveMessage(t *testing.T) {
 	}
 	if got := err.Error(); !contains(got, "live mode is not available in M0") {
 		t.Fatalf("error %q misses live M0 text", got)
+	}
+}
+
+func TestModelAliasBanned(t *testing.T) {
+	c := Default()
+	c.Providers.Decision.Model = "drex-max-latest"
+	err := c.Validate()
+	if err == nil {
+		t.Fatalf("Validate() = nil, want error")
+	}
+	if got := err.Error(); !contains(got, "aliases like *-latest are not allowed") {
+		t.Fatalf("error %q misses alias text", got)
 	}
 }
 

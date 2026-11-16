@@ -5,12 +5,14 @@
 //
 //	core/domain      -> stdlib only
 //	core/ports       -> stdlib + .../core/domain
+//	core/internal/*  -> anything except .../providers/* (any provider).
+//	                    Only core/cmd (the composition root) wires providers.
 //	providers/<name> -> stdlib + .../core/domain + .../core/ports
 //	                    + .../core/porttest (only in _test.go)
 //	                    + own provider module packages.
 //	                    core/internal/* and other providers/* are forbidden.
 //
-// All other locations (tools, core/internal, core/cmd, core/contracts, ...)
+// All other locations (tools, core/cmd, core/contracts, ...)
 // are not restricted by this tool.
 package main
 
@@ -39,7 +41,8 @@ func isStdlib(importPath string) bool {
 }
 
 // classify reports whether an import is allowed in a layer.
-// layer is one of "core/domain", "core/ports", "providers/<name>" or "other".
+// layer is one of "core/domain", "core/ports", "core/internal",
+// "providers/<name>" or "other".
 func classify(layer, importPath string, isTest bool) bool {
 	if isStdlib(importPath) {
 		return true
@@ -53,6 +56,9 @@ func classify(layer, importPath string, isTest bool) bool {
 		return inModule("/core/domain")
 	case layer == "core/ports":
 		return inModule("/core/domain") || inModule("/core/ports")
+	case layer == "core/internal":
+		// Only the cmd composition root wires providers.
+		return !strings.HasPrefix(importPath, modulePrefix+"/providers/")
 	case strings.HasPrefix(layer, "providers/"):
 		name := strings.TrimPrefix(layer, "providers/")
 		if inModule("/core/domain") || inModule("/core/ports") {
@@ -78,6 +84,8 @@ func layerOf(relSlash string) string {
 		return "core/domain"
 	case strings.HasPrefix(relSlash, "core/ports/"):
 		return "core/ports"
+	case strings.HasPrefix(relSlash, "core/internal/"):
+		return "core/internal"
 	case strings.HasPrefix(relSlash, "providers/"):
 		rest := strings.TrimPrefix(relSlash, "providers/")
 		name := rest

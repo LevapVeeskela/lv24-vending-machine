@@ -37,6 +37,16 @@ func TestClassify(t *testing.T) {
 
 		{"other unrestricted", "other", "github.com/foo/bar", false, true},
 		{"other internal ok", "other", p + "/core/internal/gate", false, true},
+
+		{"internal stdlib", "core/internal", "encoding/json", false, true},
+		{"internal cross ok", "core/internal", p + "/core/internal/config", false, true},
+		{"internal registry ok", "core/internal", p + "/core/internal/registry", false, true},
+		{"internal store ok", "core/internal", p + "/core/internal/store/sqlite", false, true},
+		{"internal store test ok", "core/internal", p + "/core/internal/store/sqlite", true, true},
+		{"internal providers banned", "core/internal", p + "/providers/decision-drex", false, false},
+		{"internal providers sub banned", "core/internal", p + "/providers/marketdata-binance", false, false},
+		{"internal providers test banned", "core/internal", p + "/providers/decision-drex", true, false},
+		{"internal cmd allowed", "core/internal", p + "/core/cmd/vend", false, true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -58,7 +68,9 @@ func TestLayerOf(t *testing.T) {
 		{"providers/decision-drex/provider.go", "providers/decision-drex"},
 		{"providers/marketdata-binance/x_test.go", "providers/marketdata-binance"},
 		{"tools/lintimports/main.go", "other"},
-		{"core/internal/gate/gate.go", "other"},
+		{"core/internal/gate/gate.go", "core/internal"},
+		{"core/internal/cli/cli.go", "core/internal"},
+		{"core/internal/cli/cli_test.go", "core/internal"},
 		{"core/cmd/vend/main.go", "other"},
 	}
 	for _, tc := range tests {

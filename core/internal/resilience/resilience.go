@@ -21,10 +21,16 @@ func DefaultPolicy() Policy {
 	return Policy{MaxAttempts: 3, BaseDelay: 200 * time.Millisecond, MaxDelay: 2 * time.Second}
 }
 
+// maxRetryAfter caps a provider-requested retry delay. It is a var so
+// tests can shrink it; production code never changes it.
+var maxRetryAfter = 30 * time.Second
+
 // Do runs fn until it succeeds, fails non-retryably, or the attempts run
-// out. Only domain.IsRetryable errors are retried; the backoff doubles
-// from BaseDelay and is capped at MaxDelay. The context is respected
-// while waiting between attempts. No error content is logged here.
+// out. Only domain.IsRetryable errors are retried. Between attempts it
+// waits the provider-requested domain.RetryAfterOf delay (capped at
+// maxRetryAfter) when positive, otherwise an exponential backoff doubling
+// from BaseDelay and capped at MaxDelay. The context is respected while
+// waiting. No error content is logged here.
 func Do(ctx context.Context, p Policy, fn func(context.Context) error) error {
 	max := p.MaxAttempts
 	if max < 1 {
@@ -45,12 +51,17 @@ func Do(ctx context.Context, p Policy, fn func(context.Context) error) error {
 		if attempt == max {
 			return err
 		}
-		delay := p.BaseDelay << (attempt - 1)
-		if delay < 0 {
-			delay = p.BaseDelay
-		}
-		if p.MaxDelay > 0 && delay > p.MaxDelay {
-			delay = p.MaxDelay
+		delay := domain.RetryAfterOf(err)
+		if delay <= 0 {
+			delay = p.BaseDelay << (attempt - 1)
+			if delay < 0 {
+				delay = p.BaseDelay
+			}
+			if p.MaxDelay > 0 && delay > p.MaxDelay {
+				delay = p.MaxDelay
+			}
+		} else if delay > maxRetryAfter {
+			delay = maxRetryAfter
 		}
 		if delay <= 0 {
 			continue
