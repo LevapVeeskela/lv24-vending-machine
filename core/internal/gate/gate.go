@@ -7,6 +7,20 @@ import (
 	"github.com/LevapVeeskela/lv24-vending-machine/core/domain"
 )
 
+// Verdict codes for provider failures. They keep the verdict ABSTAIN but
+// separate operator-actionable causes (bad credentials, bad request) from
+// transient outages and malformed output.
+const (
+	// CodeProviderAuth marks missing/invalid credentials or exhausted quota.
+	CodeProviderAuth = "provider_auth"
+	// CodeProviderMisconfigured marks a provider-rejected request.
+	CodeProviderMisconfigured = "provider_misconfigured"
+	// CodeProviderUnavailable marks transient or unclassified provider failures.
+	CodeProviderUnavailable = "provider_unavailable"
+	// CodeProviderInvalidOutput marks malformed provider output.
+	CodeProviderInvalidOutput = "invalid_output"
+)
+
 // questionIDs lists the expected gate-v1 answers in order.
 var questionIDs = []string{"data_quality", "signal_alignment", "market_regime", "risk_check"}
 
@@ -65,20 +79,33 @@ func Evaluate(req domain.GateRequest, outcome domain.DecisionOutcome, policy dom
 	}
 	pass("intent", fmt.Sprintf("intentKind=%s", string(req.IntentKind)))
 
-	// 2a. provider error
+	// 2a. provider error: the verdict is ABSTAIN for every provider failure;
+	// only the code separates the cause. Auth and misconfiguration reasons
+	// stay generic so no credential, token or request body reaches the
+	// journal.
 	if outcome.Err != nil {
-		code := "provider_unavailable"
-		if domain.CodeOf(outcome.Err) == domain.CodeInvalidOutput {
-			code = "invalid_output"
-		}
+		code := CodeProviderUnavailable
 		detail := outcome.Err.Error()
+		reason := "provider error: " + detail
+		switch domain.CodeOf(outcome.Err) {
+		case domain.CodeInvalidOutput:
+			code = CodeProviderInvalidOutput
+		case domain.CodeAuth, domain.CodePaymentRequired:
+			code = CodeProviderAuth
+			detail = "provider rejected credentials or the quota is exhausted"
+			reason = "provider auth error: " + detail
+		case domain.CodeInvalidRequest:
+			code = CodeProviderMisconfigured
+			detail = "provider rejected the request as invalid"
+			reason = "provider misconfigured: " + detail
+		}
 		return fail(domain.VerdictAbstain, code, "provider",
 			detail,
-			"provider error: "+detail)
+			reason)
 	}
 	if outcome.Response == nil {
 		detail := "nil decision response"
-		return fail(domain.VerdictAbstain, "invalid_output", "provider",
+		return fail(domain.VerdictAbstain, CodeProviderInvalidOutput, "provider",
 			detail,
 			"invalid provider output: "+detail)
 	}
@@ -87,7 +114,7 @@ func Evaluate(req domain.GateRequest, outcome domain.DecisionOutcome, policy dom
 	// 2b. answers validation
 	answers := outcome.Response.Answers
 	if msg, ok := validateAnswers(answers); !ok {
-		return fail(domain.VerdictAbstain, "invalid_output", "answers",
+		return fail(domain.VerdictAbstain, CodeProviderInvalidOutput, "answers",
 			msg,
 			"invalid provider output: "+msg)
 	}
@@ -118,7 +145,7 @@ func Evaluate(req domain.GateRequest, outcome domain.DecisionOutcome, policy dom
 	pIns, ok := prob("data_quality", "insufficient")
 	if !ok {
 		msg := `missing probability "insufficient" for question "data_quality"`
-		return fail(domain.VerdictAbstain, "invalid_output", "answers", msg, "invalid provider output: "+msg)
+		return fail(domain.VerdictAbstain, CodeProviderInvalidOutput, "answers", msg, "invalid provider output: "+msg)
 	}
 	if pIns >= policy.MinBlock {
 		detail := fmt.Sprintf("p(insufficient)=%.4f threshold=%.4f", pIns, policy.MinBlock)
@@ -132,7 +159,7 @@ func Evaluate(req domain.GateRequest, outcome domain.DecisionOutcome, policy dom
 	pBlock, ok := prob("risk_check", "block")
 	if !ok {
 		msg := `missing probability "block" for question "risk_check"`
-		return fail(domain.VerdictAbstain, "invalid_output", "answers", msg, "invalid provider output: "+msg)
+		return fail(domain.VerdictAbstain, CodeProviderInvalidOutput, "answers", msg, "invalid provider output: "+msg)
 	}
 	if pBlock >= policy.MinBlock {
 		detail := fmt.Sprintf("p(block)=%.4f threshold=%.4f", pBlock, policy.MinBlock)
@@ -160,7 +187,7 @@ func Evaluate(req domain.GateRequest, outcome domain.DecisionOutcome, policy dom
 	pPass, ok := prob("risk_check", "pass")
 	if !ok {
 		msg := `missing probability "pass" for question "risk_check"`
-		return fail(domain.VerdictAbstain, "invalid_output", "answers", msg, "invalid provider output: "+msg)
+		return fail(domain.VerdictAbstain, CodeProviderInvalidOutput, "answers", msg, "invalid provider output: "+msg)
 	}
 	if pPass < policy.MinPass {
 		detail := fmt.Sprintf("p(pass)=%.4f threshold=%.4f", pPass, policy.MinPass)

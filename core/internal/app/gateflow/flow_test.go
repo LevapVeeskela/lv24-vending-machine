@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/LevapVeeskela/lv24-vending-machine/core/domain"
+	"github.com/LevapVeeskela/lv24-vending-machine/core/internal/gate"
 	"github.com/LevapVeeskela/lv24-vending-machine/core/ports"
 )
 
@@ -303,6 +305,83 @@ func TestProviderFailureWritesAbstain(t *testing.T) {
 	if got := kinds(jr); len(got) != 2 ||
 		got[0] != domain.EventGateRequest || got[1] != domain.EventGateVerdict {
 		t.Fatalf("kinds = %v, want [request verdict]", got)
+	}
+}
+
+// TestProviderErrorVerdictCodes drives the flow with provider failures that
+// mirror HTTP status classes and asserts the recorded verdict code while the
+// verdict stays ABSTAIN. Retryable failures (500, timeout) are retried by the
+// resilience policy, so the call count is asserted as "at least one".
+func TestProviderErrorVerdictCodes(t *testing.T) {
+	const probe = "token=sk-live-abc123 body={\"secret\":true}"
+
+	cases := []struct {
+		name        string
+		err         error
+		wantCode    string
+		wantGeneric bool
+	}{
+		{"401", domain.NewError(domain.CodeAuth, "401 unauthorized "+probe), gate.CodeProviderAuth, true},
+		{"403", domain.NewError(domain.CodeAuth, "403 forbidden "+probe), gate.CodeProviderAuth, true},
+		{"402", domain.NewError(domain.CodePaymentRequired, "402 payment required "+probe), gate.CodeProviderAuth, true},
+		{"400", domain.NewError(domain.CodeInvalidRequest, "400 bad request "+probe), gate.CodeProviderMisconfigured, true},
+		{"404", domain.NewError(domain.CodeInvalidRequest, "404 not found "+probe), gate.CodeProviderMisconfigured, true},
+		{"413", domain.NewError(domain.CodeInvalidRequest, "413 payload too large "+probe), gate.CodeProviderMisconfigured, true},
+		{"422", domain.NewError(domain.CodeInvalidRequest, "422 unprocessable "+probe), gate.CodeProviderMisconfigured, true},
+		{"500", domain.NewError(domain.CodeUnavailable, "500 upstream"), gate.CodeProviderUnavailable, false},
+		{"timeout", domain.NewError(domain.CodeTimeout, "deadline exceeded"), gate.CodeProviderUnavailable, false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			jr := &memJournal{}
+			prov := &fnDecision{fn: func(context.Context, domain.DecisionRequest) (domain.DecisionResponse, error) {
+				return domain.DecisionResponse{}, tc.err
+			}}
+			f, err := New(jr, prov, testDeps("dec-1"), testConfig())
+			if err != nil {
+				t.Fatalf("New() = %v", err)
+			}
+			res, err := f.Evaluate(context.Background(), entryReq())
+			if err != nil {
+				t.Fatalf("Evaluate() = %v", err)
+			}
+			if res.Verdict.Verdict != domain.VerdictAbstain {
+				t.Fatalf("verdict = %v, want ABSTAIN", res.Verdict.Verdict)
+			}
+			if res.Verdict.Code != tc.wantCode {
+				t.Fatalf("code = %q, want %q", res.Verdict.Code, tc.wantCode)
+			}
+			if res.ProviderErr == nil || res.Response != nil {
+				t.Fatalf("result = %+v, want ProviderErr with nil response", res)
+			}
+			if prov.calls < 1 {
+				t.Fatalf("provider calls = %d, want >= 1", prov.calls)
+			}
+			if got := kinds(jr); len(got) != 2 ||
+				got[0] != domain.EventGateRequest || got[1] != domain.EventGateVerdict {
+				t.Fatalf("kinds = %v, want [request verdict]", got)
+			}
+			// The persisted verdict must carry the same code and no secret.
+			evs, err := jr.Query(context.Background(), 0, domain.EventGateVerdict)
+			if err != nil || len(evs) != 1 {
+				t.Fatalf("recorded verdict events = %d (err %v), want 1", len(evs), err)
+			}
+			var recorded domain.GateVerdict
+			if err := json.Unmarshal(evs[0].Payload, &recorded); err != nil {
+				t.Fatalf("decode recorded verdict: %v", err)
+			}
+			if recorded.Code != tc.wantCode || recorded.Verdict != domain.VerdictAbstain {
+				t.Fatalf("recorded verdict = %q code %q, want ABSTAIN %q", recorded.Verdict, recorded.Code, tc.wantCode)
+			}
+			if tc.wantGeneric {
+				for _, r := range recorded.Reasons {
+					if strings.Contains(r, probe) || strings.Contains(r, "sk-live") {
+						t.Fatalf("recorded reason leaks provider error text: %q", r)
+					}
+				}
+			}
+		})
 	}
 }
 

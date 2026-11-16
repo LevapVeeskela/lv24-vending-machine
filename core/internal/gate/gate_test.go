@@ -4,6 +4,7 @@ import (
 	"errors"
 	"math"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/LevapVeeskela/lv24-vending-machine/core/domain"
@@ -375,6 +376,64 @@ func TestEvaluateTable(t *testing.T) {
 			}
 			if got.PolicyHash == "" {
 				t.Fatalf("PolicyHash empty")
+			}
+		})
+	}
+}
+
+// TestEvaluateProviderErrorCodes pins the provider-error mapping: every
+// provider failure is ABSTAIN, and only the code separates auth, request
+// misconfiguration, invalid output and transient outage.
+func TestEvaluateProviderErrorCodes(t *testing.T) {
+	pol := DefaultPolicy()
+	// probe is a fake credential/body marker that must never reach the
+	// verdict for auth and misconfiguration failures.
+	const probe = "token=sk-live-abc123 body={\"secret\":true}"
+
+	cases := []struct {
+		name        string
+		err         error
+		wantCode    string
+		wantGeneric bool // reason and check detail must not carry err text
+	}{
+		{"auth 401", domain.NewError(domain.CodeAuth, "401 unauthorized "+probe), CodeProviderAuth, true},
+		{"auth 403", domain.NewError(domain.CodeAuth, "403 forbidden "+probe), CodeProviderAuth, true},
+		{"payment 402", domain.NewError(domain.CodePaymentRequired, "402 payment required "+probe), CodeProviderAuth, true},
+		{"invalid_request 400", domain.NewError(domain.CodeInvalidRequest, "400 bad request "+probe), CodeProviderMisconfigured, true},
+		{"invalid_request 404", domain.NewError(domain.CodeInvalidRequest, "404 not found "+probe), CodeProviderMisconfigured, true},
+		{"invalid_request 413", domain.NewError(domain.CodeInvalidRequest, "413 too large "+probe), CodeProviderMisconfigured, true},
+		{"invalid_request 422", domain.NewError(domain.CodeInvalidRequest, "422 unprocessable "+probe), CodeProviderMisconfigured, true},
+		{"invalid_output", domain.NewError(domain.CodeInvalidOutput, "bad json"), CodeProviderInvalidOutput, false},
+		{"unavailable 500", domain.NewError(domain.CodeUnavailable, "500 upstream"), CodeProviderUnavailable, false},
+		{"timeout", domain.NewError(domain.CodeTimeout, "deadline exceeded"), CodeProviderUnavailable, false},
+		{"rate_limit", domain.NewError(domain.CodeRateLimit, "429 too many"), CodeProviderUnavailable, false},
+		{"unknown", errors.New("boom"), CodeProviderUnavailable, false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Evaluate(entryReq(), domain.DecisionOutcome{Err: tc.err}, pol)
+			if got.Verdict != domain.VerdictAbstain {
+				t.Fatalf("verdict = %q, want ABSTAIN", got.Verdict)
+			}
+			if got.Code != tc.wantCode {
+				t.Fatalf("code = %q, want %q", got.Code, tc.wantCode)
+			}
+			if len(got.Checks) != 2 || got.Checks[1].Name != "provider" || got.Checks[1].Passed {
+				t.Fatalf("checks = %+v, want failed provider check after intent", got.Checks)
+			}
+			if len(got.Reasons) == 0 {
+				t.Fatalf("reasons empty")
+			}
+			if tc.wantGeneric {
+				for _, r := range got.Reasons {
+					if strings.Contains(r, probe) || strings.Contains(r, "sk-live") {
+						t.Fatalf("reason leaks provider error text: %q", r)
+					}
+				}
+				if d := got.Checks[1].Detail; strings.Contains(d, probe) || strings.Contains(d, "sk-live") {
+					t.Fatalf("check detail leaks provider error text: %q", d)
+				}
 			}
 		})
 	}
