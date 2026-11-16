@@ -93,9 +93,11 @@ type stubSource struct {
 	err        error
 	errSymbols map[string]error
 	lastReq    domain.CandleRequest
+	calls      int
 }
 
 func (s *stubSource) Candles(_ context.Context, req domain.CandleRequest) ([]domain.Candle, error) {
+	s.calls++
 	s.lastReq = req
 	if err := s.errSymbols[req.Symbol]; err != nil {
 		return nil, err
@@ -107,7 +109,7 @@ func (s *stubSource) Candles(_ context.Context, req domain.CandleRequest) ([]dom
 }
 
 var (
-	fixedNow = time.Date(2026, time.November, 16, 8, 0, 0, 0, time.UTC)
+	fixedNow = time.Date(2026, time.November, 16, 10, 0, 0, 0, time.UTC)
 	sigTS    = time.Date(2026, time.November, 10, 6, 0, 0, 0, time.UTC)
 )
 
@@ -186,6 +188,31 @@ func seedRequestAt(t *testing.T, jr *memJournal, req domain.GateRequest, decisio
 		DecisionID:    decisionID,
 	}); err != nil {
 		t.Fatalf("seed request: %v", err)
+	}
+}
+
+// seedVerdict appends one gate.verdict carrying the decision id and the time
+// the gate decided the signal.
+func seedVerdict(t *testing.T, jr *memJournal, decisionID string, decidedAt time.Time) {
+	t.Helper()
+	raw, err := json.Marshal(domain.GateVerdict{
+		Verdict:    domain.VerdictAllow,
+		DecisionID: decisionID,
+		PolicyHash: "policy-test",
+		DecidedAt:  decidedAt,
+	})
+	if err != nil {
+		t.Fatalf("encode verdict: %v", err)
+	}
+	if _, err := jr.Append(context.Background(), domain.Event{
+		Kind:          domain.EventGateVerdict,
+		TS:            decidedAt,
+		SchemaVersion: domain.EventSchemaVersion,
+		Payload:       raw,
+		CodeVersion:   "v-test",
+		DecisionID:    decisionID,
+	}); err != nil {
+		t.Fatalf("seed verdict: %v", err)
 	}
 }
 
@@ -789,7 +816,8 @@ func TestSignalAtBarOpenUsesNextBar(t *testing.T) {
 }
 
 // TestLateSignalBackfill: the signal is accepted hours after its ts, so it is
-// flagged as backfill and may enter a bar that had already closed at receipt.
+// flagged as backfill. The bar that closed before receipt cannot be entered,
+// so the entry is the next closed bar and its lag is recorded.
 func TestLateSignalBackfill(t *testing.T) {
 	jr := &memJournal{}
 	req := entryReq("sig-late", domain.SideBuy)
@@ -816,13 +844,20 @@ func TestLateSignalBackfill(t *testing.T) {
 	if !oc.ReceivedAt.Equal(receivedAt) {
 		t.Fatalf("receivedAt = %v, want %v", oc.ReceivedAt, receivedAt)
 	}
-	// Entry bar closed at 07:00, before receipt: allowed only because it is a
-	// backfill sample.
-	if !oc.EntryTS.Equal(sigTS) {
-		t.Fatalf("entryTs = %v, want %v", oc.EntryTS, sigTS)
+	// The 06:00 bar closed at 07:00, before receipt: not enterable.
+	if want := sigTS.Add(time.Hour); !oc.EntryTS.Equal(want) {
+		t.Fatalf("entryTs = %v, want %v (bar closed at the anchor is not enterable)", oc.EntryTS, want)
 	}
-	if !oc.ExitTS.Equal(sigTS.Add(time.Hour)) {
-		t.Fatalf("exitTs = %v, want %v (closed before receipt)", oc.ExitTS, sigTS.Add(time.Hour))
+	if !oc.ExitTS.Equal(sigTS.Add(2 * time.Hour)) {
+		t.Fatalf("exitTs = %v, want %v", oc.ExitTS, sigTS.Add(2*time.Hour))
+	}
+	// The entry bar opened 30m before the anchor, but no spare bar exists to
+	// shift into, so the entry stays and only the lag is recorded.
+	if oc.EntryLagMS != 30*60*1000 {
+		t.Fatalf("entryLagMs = %d, want %d", oc.EntryLagMS, 30*60*1000)
+	}
+	if oc.EntryShifted {
+		t.Fatalf("entryShifted = true, want false without a spare bar")
 	}
 	if oc.PriceSource != "marketdata-stub" {
 		t.Fatalf("priceSource = %q, want marketdata-stub", oc.PriceSource)
@@ -930,5 +965,358 @@ func TestOldOutcomeJSONDecodes(t *testing.T) {
 	if !oc.ReceivedAt.IsZero() || oc.Backfill || oc.PriceSource != "" {
 		t.Fatalf("new fields = %v/%v/%q, want zero values",
 			oc.ReceivedAt, oc.Backfill, oc.PriceSource)
+	}
+	if oc.EntryLagMS != 0 || oc.EntryShifted {
+		t.Fatalf("lag/shifted = %d/%v, want 0/false", oc.EntryLagMS, oc.EntryShifted)
+	}
+}
+
+// TestCanonicalSymbolMatch: the signal names BTC/USDT while the provider
+// returns BTCUSDT; the canonical comparison must accept them as one market.
+func TestCanonicalSymbolMatch(t *testing.T) {
+	jr := &memJournal{}
+	req := entryReq("sig-canon", domain.SideBuy)
+	req.Instrument.Symbol = "BTC/USDT"
+	src := &stubSource{candles: twoBars()}
+	seedRequest(t, jr, req, "dec-1")
+	cfg := testConfig()
+	cfg.HorizonBars = 1
+	lb, err := New(jr, src, testDeps(), cfg)
+	if err != nil {
+		t.Fatalf("New() = %v", err)
+	}
+	sum, err := lb.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run() = %v", err)
+	}
+	if sum != (Summary{Labeled: 1}) {
+		t.Fatalf("summary = %+v, want {Labeled:1}", sum)
+	}
+	oc := labeledOutcome(t, jr)
+	if oc.EntryPrice.String() != "100" || !oc.EntryTS.Equal(sigTS) {
+		t.Fatalf("entry = %q @ %v, want 100 @ %v", oc.EntryPrice.String(), oc.EntryTS, sigTS)
+	}
+	if oc.Instrument.Symbol != "BTC/USDT" {
+		t.Fatalf("instrument symbol = %q, want the request form BTC/USDT", oc.Instrument.Symbol)
+	}
+}
+
+// TestVerdictDecidedAtAnchor: the gate decided 40m after the signal, so the
+// 06:00 bar had already closed and the entry moves to the 07:00 bar.
+func TestVerdictDecidedAtAnchor(t *testing.T) {
+	jr := &memJournal{}
+	seedRequest(t, jr, entryReq("sig-anchor", domain.SideBuy), "dec-1")
+	seedVerdict(t, jr, "dec-1", sigTS.Add(40*time.Minute))
+	cfg := testConfig()
+	cfg.HorizonBars = 1
+	lb, err := New(jr, &stubSource{candles: twoBars()}, testDeps(), cfg)
+	if err != nil {
+		t.Fatalf("New() = %v", err)
+	}
+	sum, err := lb.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run() = %v", err)
+	}
+	if sum != (Summary{Labeled: 1}) {
+		t.Fatalf("summary = %+v, want {Labeled:1}", sum)
+	}
+	oc := labeledOutcome(t, jr)
+	if want := sigTS.Add(time.Hour); !oc.EntryTS.Equal(want) {
+		t.Fatalf("entryTs = %v, want %v (bar closed at 07:00 <= decidedAt 06:40 is excluded)",
+			oc.EntryTS, want)
+	}
+	if !oc.EntryShifted {
+		t.Fatalf("entryShifted = false, want true after the verdict-time shift")
+	}
+	if oc.EntryLagMS != 0 {
+		t.Fatalf("entryLagMs = %d, want 0 for a bar opening after the anchor", oc.EntryLagMS)
+	}
+
+	// Control: without the verdict the same signal enters the 06:00 bar.
+	jr2 := &memJournal{}
+	seedRequest(t, jr2, entryReq("sig-anchor", domain.SideBuy), "dec-1")
+	lb2, err := New(jr2, &stubSource{candles: twoBars()}, testDeps(), cfg)
+	if err != nil {
+		t.Fatalf("New() = %v", err)
+	}
+	if _, err := lb2.Run(context.Background()); err != nil {
+		t.Fatalf("Run() = %v", err)
+	}
+	if oc2 := labeledOutcome(t, jr2); !oc2.EntryTS.Equal(sigTS) {
+		t.Fatalf("control entryTs = %v, want %v", oc2.EntryTS, sigTS)
+	}
+}
+
+// TestEntryLagWithinThreshold: a 5m lag is under 10% of the 1h interval, so
+// the entry bar stays and only the lag is recorded.
+func TestEntryLagWithinThreshold(t *testing.T) {
+	jr := &memJournal{}
+	req := entryReq("sig-lag5", domain.SideBuy)
+	seedRequestAt(t, jr, req, "dec-1", sigTS.Add(5*time.Minute))
+	cfg := testConfig()
+	cfg.HorizonBars = 1
+	lb, err := New(jr, &stubSource{candles: twoBars()}, testDeps(), cfg)
+	if err != nil {
+		t.Fatalf("New() = %v", err)
+	}
+	if sum, err := lb.Run(context.Background()); err != nil {
+		t.Fatalf("Run() = %v", err)
+	} else if sum != (Summary{Labeled: 1}) {
+		t.Fatalf("summary = %+v, want {Labeled:1}", sum)
+	}
+	oc := labeledOutcome(t, jr)
+	if !oc.EntryTS.Equal(sigTS) {
+		t.Fatalf("entryTs = %v, want %v", oc.EntryTS, sigTS)
+	}
+	if want := int64(5 * 60 * 1000); oc.EntryLagMS != want {
+		t.Fatalf("entryLagMs = %d, want %d", oc.EntryLagMS, want)
+	}
+	if oc.EntryShifted {
+		t.Fatalf("entryShifted = true, want false under the 10%% threshold")
+	}
+}
+
+// TestEntryShiftWhenLagExceedsTenPercent: a 20m lag is over 10% of the 1h
+// interval, so the entry moves to the next bar and the flag is set.
+func TestEntryShiftWhenLagExceedsTenPercent(t *testing.T) {
+	jr := &memJournal{}
+	req := entryReq("sig-lag20", domain.SideBuy)
+	seedRequestAt(t, jr, req, "dec-1", sigTS.Add(20*time.Minute))
+	cfg := testConfig()
+	cfg.HorizonBars = 1
+	lb, err := New(jr, &stubSource{candles: twoBars()}, testDeps(), cfg)
+	if err != nil {
+		t.Fatalf("New() = %v", err)
+	}
+	if sum, err := lb.Run(context.Background()); err != nil {
+		t.Fatalf("Run() = %v", err)
+	} else if sum != (Summary{Labeled: 1}) {
+		t.Fatalf("summary = %+v, want {Labeled:1}", sum)
+	}
+	oc := labeledOutcome(t, jr)
+	if want := sigTS.Add(time.Hour); !oc.EntryTS.Equal(want) {
+		t.Fatalf("entryTs = %v, want %v (shifted)", oc.EntryTS, want)
+	}
+	if !oc.EntryShifted {
+		t.Fatalf("entryShifted = false, want true")
+	}
+	if oc.EntryPrice.String() != "105" {
+		t.Fatalf("entryPrice = %q, want 105 (next bar open)", oc.EntryPrice.String())
+	}
+	if oc.EntryLagMS != 0 {
+		t.Fatalf("entryLagMs = %d, want 0 recomputed on the final entry bar", oc.EntryLagMS)
+	}
+}
+
+// TestSourceNotCalledBeforeWindow: the labeler must not touch the candle
+// source before anchor + (HorizonBars+1) intervals.
+func TestSourceNotCalledBeforeWindow(t *testing.T) {
+	jr := &memJournal{}
+	now := sigTS.Add(2 * time.Hour) // anchor 06:00 + 3h is not reached yet
+	deps := testDeps()
+	deps.Clock = func() time.Time { return now }
+	src := &stubSource{candles: twoBars()}
+	seedRequest(t, jr, entryReq("sig-early", domain.SideBuy), "dec-1")
+	lb, err := New(jr, src, deps, testConfig())
+	if err != nil {
+		t.Fatalf("New() = %v", err)
+	}
+	sum, err := lb.Run(context.Background())
+	if err != nil {
+		t.Fatalf("early Run() = %v", err)
+	}
+	if sum != (Summary{Skipped: 1}) {
+		t.Fatalf("early summary = %+v, want {Skipped:1}", sum)
+	}
+	if src.calls != 0 {
+		t.Fatalf("candle source calls = %d, want 0 before the window closes", src.calls)
+	}
+	if n := jr.count(); n != 1 {
+		t.Fatalf("events = %d, want 1 (no label yet)", n)
+	}
+
+	now = sigTS.Add(3 * time.Hour) // exactly anchor + (HorizonBars+1)*interval
+	sum, err = lb.Run(context.Background())
+	if err != nil {
+		t.Fatalf("ready Run() = %v", err)
+	}
+	if sum != (Summary{Labeled: 1}) {
+		t.Fatalf("ready summary = %+v, want {Labeled:1}", sum)
+	}
+	if src.calls != 1 {
+		t.Fatalf("candle source calls = %d, want 1 after the window closes", src.calls)
+	}
+}
+
+// TestNoFitCandlesWarnSkipped: the source answers but every candle closed at
+// or before the anchor. Nothing is labeled, the signal stays retryable, and
+// the reason is logged with the signal id.
+func TestNoFitCandlesWarnSkipped(t *testing.T) {
+	jr := &memJournal{}
+	var logBuf strings.Builder
+	deps := testDeps()
+	deps.Logger = slog.New(slog.NewTextHandler(&logBuf, nil))
+	req := entryReq("sig-nofit", domain.SideBuy)
+	seedRequestAt(t, jr, req, "dec-1", sigTS.Add(time.Hour))
+	bars := []domain.Candle{
+		candle("BTCUSDT", "1h", sigTS, sigTS.Add(time.Hour), "100", "110", "90", "105", "1000"),
+	}
+	cfg := testConfig()
+	cfg.HorizonBars = 1
+	lb, err := New(jr, &stubSource{candles: bars}, deps, cfg)
+	if err != nil {
+		t.Fatalf("New() = %v", err)
+	}
+	sum, err := lb.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run() = %v", err)
+	}
+	if sum != (Summary{Skipped: 1}) {
+		t.Fatalf("summary = %+v, want {Skipped:1}", sum)
+	}
+	if n := jr.count(); n != 1 {
+		t.Fatalf("events = %d, want 1 (no label appended)", n)
+	}
+	out := logBuf.String()
+	if !strings.Contains(out, "outcome: no usable candle") || !strings.Contains(out, "sig-nofit") {
+		t.Fatalf("warning misses the signal or the event name: %q", out)
+	}
+	if !strings.Contains(out, "reason=") {
+		t.Fatalf("warning misses the reason: %q", out)
+	}
+
+	// Nothing fits yet is not a failure: the next pass must query again and
+	// stay retryable.
+	sum, err = lb.Run(context.Background())
+	if err != nil {
+		t.Fatalf("second Run() = %v", err)
+	}
+	if sum != (Summary{Skipped: 1}) {
+		t.Fatalf("second summary = %+v, want {Skipped:1}", sum)
+	}
+	if n := jr.count(); n != 1 {
+		t.Fatalf("events = %d, want 1 after the second pass", n)
+	}
+}
+
+// TestRetryBackoffSchedule: consecutive failures back off by 1, 2, 4, ... label
+// intervals, capped at one hour, and a signal that is not due never touches
+// the candle source.
+func TestRetryBackoffSchedule(t *testing.T) {
+	jr := &memJournal{}
+	base := sigTS.Add(2 * time.Minute) // 1m timeframe: window closes at 06:02
+	now := base
+	deps := testDeps()
+	deps.Clock = func() time.Time { return now }
+	src := &stubSource{err: errors.New("provider down")}
+	req := entryReq("sig-retry", domain.SideBuy)
+	req.Timeframe = "1m"
+	seedRequest(t, jr, req, "dec-1")
+	cfg := testConfig()
+	cfg.HorizonBars = 1
+	lb, err := New(jr, src, deps, cfg)
+	if err != nil {
+		t.Fatalf("New() = %v", err)
+	}
+	steps := []struct {
+		at        time.Duration
+		wantCalls int
+		want      Summary
+	}{
+		{0, 1, Summary{Failed: 1}},                  // fail 1, next +1m
+		{30 * time.Second, 1, Summary{Skipped: 1}},  // not due
+		{1 * time.Minute, 2, Summary{Failed: 1}},    // fail 2, next +2m
+		{3 * time.Minute, 3, Summary{Failed: 1}},    // fail 3, next +4m
+		{7 * time.Minute, 4, Summary{Failed: 1}},    // fail 4, next +8m
+		{15 * time.Minute, 5, Summary{Failed: 1}},   // fail 5, next +16m
+		{31 * time.Minute, 6, Summary{Failed: 1}},   // fail 6, next +32m
+		{63 * time.Minute, 7, Summary{Failed: 1}},   // fail 7, next +60m (cap)
+		{120 * time.Minute, 7, Summary{Skipped: 1}}, // still inside the cap
+		{123 * time.Minute, 8, Summary{Failed: 1}},  // due again
+	}
+	for _, st := range steps {
+		now = base.Add(st.at)
+		sum, err := lb.Run(context.Background())
+		if err != nil {
+			t.Fatalf("Run() at +%v = %v", st.at, err)
+		}
+		if sum != st.want {
+			t.Fatalf("summary at +%v = %+v, want %+v", st.at, sum, st.want)
+		}
+		if src.calls != st.wantCalls {
+			t.Fatalf("source calls at +%v = %d, want %d", st.at, src.calls, st.wantCalls)
+		}
+	}
+}
+
+// TestTimeoutRecordsUnlabelableOnce: a signal with no outcome by anchor +
+// (HorizonBars+1) intervals + 7 days is recorded once and never queried again.
+func TestTimeoutRecordsUnlabelableOnce(t *testing.T) {
+	jr := &memJournal{}
+	now := sigTS.Add(2 * time.Hour)
+	deps := testDeps()
+	deps.Clock = func() time.Time { return now }
+	src := &stubSource{} // empty answer: the window never completes
+	seedRequest(t, jr, entryReq("sig-timeout", domain.SideBuy), "dec-1")
+	cfg := testConfig()
+	cfg.HorizonBars = 1
+	lb, err := New(jr, src, deps, cfg)
+	if err != nil {
+		t.Fatalf("New() = %v", err)
+	}
+	deadline := sigTS.Add(2 * time.Hour).Add(7 * 24 * time.Hour)
+
+	now = deadline.Add(-time.Second)
+	if sum, err := lb.Run(context.Background()); err != nil {
+		t.Fatalf("Run() before the deadline = %v", err)
+	} else if sum != (Summary{Skipped: 1}) {
+		t.Fatalf("summary before the deadline = %+v, want {Skipped:1}", sum)
+	}
+	if src.calls != 1 {
+		t.Fatalf("source calls = %d, want 1 before the deadline", src.calls)
+	}
+	if n := jr.count(); n != 1 {
+		t.Fatalf("events = %d, want 1 before the deadline", n)
+	}
+
+	now = deadline
+	if sum, err := lb.Run(context.Background()); err != nil {
+		t.Fatalf("Run() at the deadline = %v", err)
+	} else if sum != (Summary{}) {
+		t.Fatalf("summary at the deadline = %+v, want zero", sum)
+	}
+	if src.calls != 1 {
+		t.Fatalf("source calls = %d, want no call at the deadline", src.calls)
+	}
+	evs, err := jr.Query(context.Background(), 0, domain.EventOutcomeUnlabelable)
+	if err != nil {
+		t.Fatalf("query unlabelable: %v", err)
+	}
+	if len(evs) != 1 {
+		t.Fatalf("unlabelable events = %d, want 1", len(evs))
+	}
+	var got domain.OutcomeUnlabelable
+	if err := json.Unmarshal(evs[0].Payload, &got); err != nil {
+		t.Fatalf("decode unlabelable: %v", err)
+	}
+	if got.SignalID != "sig-timeout" || got.DecisionID != "dec-1" || got.Reason != "timeout" {
+		t.Fatalf("unlabelable payload = %+v, want sig-timeout/dec-1/timeout", got)
+	}
+
+	now = deadline.Add(48 * time.Hour)
+	if sum, err := lb.Run(context.Background()); err != nil {
+		t.Fatalf("Run() after the deadline = %v", err)
+	} else if sum != (Summary{}) {
+		t.Fatalf("summary after the deadline = %+v, want zero", sum)
+	}
+	if src.calls != 1 {
+		t.Fatalf("source calls = %d, want the timed-out signal never queried again", src.calls)
+	}
+	evs, err = jr.Query(context.Background(), 0, domain.EventOutcomeUnlabelable)
+	if err != nil {
+		t.Fatalf("query unlabelable: %v", err)
+	}
+	if len(evs) != 1 {
+		t.Fatalf("unlabelable events = %d, want exactly 1", len(evs))
 	}
 }
