@@ -1,11 +1,15 @@
 package trend
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"math"
 	"reflect"
+	"sort"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -20,9 +24,10 @@ var (
 
 // fakeProvider serves canned candles keyed by requested symbol.
 type fakeProvider struct {
-	bySymbol map[string][]domain.Candle
-	err      error
-	calls    []domain.CandleRequest
+	bySymbol    map[string][]domain.Candle
+	err         error
+	errBySymbol map[string]error
+	calls       []domain.CandleRequest
 }
 
 func (f *fakeProvider) Descriptor() ports.Descriptor {
@@ -31,6 +36,9 @@ func (f *fakeProvider) Descriptor() ports.Descriptor {
 
 func (f *fakeProvider) Candles(_ context.Context, req domain.CandleRequest) ([]domain.Candle, error) {
 	f.calls = append(f.calls, req)
+	if err := f.errBySymbol[req.Symbol]; err != nil {
+		return nil, err
+	}
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -53,6 +61,28 @@ func makeBars(symbol, interval string, closes ...string) []domain.Candle {
 			High:      domain.MustParseDecimal(c),
 			Low:       domain.MustParseDecimal(c),
 			Close:     domain.MustParseDecimal(c),
+			Volume:    domain.MustParseDecimal("1"),
+		}
+	}
+	return bars
+}
+
+// makeSeries builds hourly candles from float closes whose last bar closes
+// one hour before testNow, so every bar is closed at the scan time.
+func makeSeries(symbol, interval string, closes []float64) []domain.Candle {
+	open := testNow.Add(-time.Duration(len(closes)+1) * time.Hour)
+	bars := make([]domain.Candle, len(closes))
+	for i, c := range closes {
+		s := strconv.FormatFloat(c, 'f', -1, 64)
+		bars[i] = domain.Candle{
+			Symbol:    symbol,
+			Interval:  interval,
+			OpenTime:  open.Add(time.Duration(i) * time.Hour),
+			CloseTime: open.Add(time.Duration(i+1) * time.Hour),
+			Open:      domain.MustParseDecimal(s),
+			High:      domain.MustParseDecimal(s),
+			Low:       domain.MustParseDecimal(s),
+			Close:     domain.MustParseDecimal(s),
 			Volume:    domain.MustParseDecimal("1"),
 		}
 	}
@@ -82,6 +112,15 @@ func approx(t *testing.T, name string, got, want float64) {
 func signalID(symbol, timeframe, side string, closeTime time.Time) string {
 	return "trend:" + symbol + ":" + timeframe + ":" +
 		strconv.FormatInt(closeTime.Unix(), 10) + ":" + side
+}
+
+func signalIDs(reqs []domain.GateRequest) []string {
+	out := make([]string, len(reqs))
+	for i, req := range reqs {
+		out[i] = req.SignalID
+	}
+	sort.Strings(out)
+	return out
 }
 
 func TestScanBuyCross(t *testing.T) {
@@ -127,8 +166,22 @@ func TestScanBuyCross(t *testing.T) {
 	if len(provider.calls) != 1 {
 		t.Fatalf("provider calls = %d, want 1", len(provider.calls))
 	}
-	if provider.calls[0] != (domain.CandleRequest{Symbol: "BTCUSDT", Interval: "1h", Limit: 6}) {
+	// Limit is max(4*Slow, Slow+2) = max(12, 5) = 12.
+	if provider.calls[0] != (domain.CandleRequest{Symbol: "BTCUSDT", Interval: "1h", Limit: 12}) {
 		t.Fatalf("candle request = %+v", provider.calls[0])
+	}
+}
+
+func TestScanRequestedLimitTracksSlow(t *testing.T) {
+	provider := &fakeProvider{bySymbol: map[string][]domain.Candle{
+		"BTCUSDT": makeBars("BTCUSDT", "1h", "10", "9", "8", "7", "20"),
+	}}
+	cfg := Config{Symbols: []string{"BTCUSDT"}, Timeframe: "1h", Fast: 2, Slow: 20, Sides: []string{"buy"}}
+	if _, err := newGenerator(t, cfg, provider).Scan(context.Background()); err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if len(provider.calls) != 1 || provider.calls[0].Limit != 80 {
+		t.Fatalf("candle request = %+v, want limit 80", provider.calls)
 	}
 }
 
@@ -175,9 +228,12 @@ func TestScanIgnoresUnclosedBar(t *testing.T) {
 	if len(got) != 1 || got[0].Side != domain.SideBuy {
 		t.Fatalf("signals = %+v, want one buy", got)
 	}
+	if !got[0].TS.Equal(barBase.Add(5 * time.Hour)) {
+		t.Fatalf("ts = %v, want the last closed bar", got[0].TS)
+	}
 }
 
-func TestScanRepeatIsDeterministic(t *testing.T) {
+func TestScanRepeatNoDuplicate(t *testing.T) {
 	provider := &fakeProvider{bySymbol: map[string][]domain.Candle{
 		"BTCUSDT": makeBars("BTCUSDT", "1h", "10", "9", "8", "7", "20"),
 		"ETHUSDT": makeBars("ETHUSDT", "1h", "10", "11", "12", "13", "1"),
@@ -189,15 +245,68 @@ func TestScanRepeatIsDeterministic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first scan: %v", err)
 	}
+	if len(first) != 2 || first[0].Instrument.Symbol != "BTCUSDT" || first[1].Instrument.Symbol != "ETHUSDT" {
+		t.Fatalf("signals = %+v, want BTCUSDT then ETHUSDT", first)
+	}
 	second, err := g.Scan(context.Background())
 	if err != nil {
 		t.Fatalf("second scan: %v", err)
 	}
-	if !reflect.DeepEqual(first, second) {
-		t.Fatalf("scans differ:\nfirst  = %+v\nsecond = %+v", first, second)
+	if len(second) != 0 {
+		t.Fatalf("second scan signals = %+v, want none", second)
 	}
-	if len(first) != 2 || first[0].Instrument.Symbol != "BTCUSDT" || first[1].Instrument.Symbol != "ETHUSDT" {
-		t.Fatalf("signals = %+v, want BTCUSDT then ETHUSDT", first)
+}
+
+func TestScanMultipleNewBars(t *testing.T) {
+	// fast=2, slow=3. Crosses land on bars 6 (sell), 7 (buy) and 8 (sell).
+	all := makeBars("BTCUSDT", "1h", "10", "10", "10", "10", "100", "100", "1", "100", "1")
+	provider := &fakeProvider{bySymbol: map[string][]domain.Candle{"BTCUSDT": all[:6]}}
+	cfg := Config{Symbols: []string{"BTCUSDT"}, Timeframe: "1h", Fast: 2, Slow: 3, Sides: []string{"buy", "sell"}}
+	g := newGenerator(t, cfg, provider)
+
+	// First scan: bar 4 crosses but it is history, so only the last closed
+	// bar (5) is evaluated and it does not cross.
+	first, err := g.Scan(context.Background())
+	if err != nil {
+		t.Fatalf("first scan: %v", err)
+	}
+	if len(first) != 0 {
+		t.Fatalf("first scan signals = %+v, want none", first)
+	}
+
+	// Three new closed bars, each with a cross.
+	provider.bySymbol["BTCUSDT"] = all
+	second, err := g.Scan(context.Background())
+	if err != nil {
+		t.Fatalf("second scan: %v", err)
+	}
+	want := []domain.GateRequest{
+		{SignalID: signalID("BTCUSDT", "1h", "sell", barBase.Add(7*time.Hour))},
+		{SignalID: signalID("BTCUSDT", "1h", "buy", barBase.Add(8*time.Hour))},
+		{SignalID: signalID("BTCUSDT", "1h", "sell", barBase.Add(9*time.Hour))},
+	}
+	if len(second) != len(want) {
+		t.Fatalf("second scan signals = %+v, want %d", second, len(want))
+	}
+	for i, req := range second {
+		if req.SignalID != want[i].SignalID {
+			t.Fatalf("signal %d = %q, want %q", i, req.SignalID, want[i].SignalID)
+		}
+		if !req.TS.Equal(barBase.Add(time.Duration(i+7) * time.Hour)) {
+			t.Fatalf("signal %d ts = %v", i, req.TS)
+		}
+	}
+	if second[0].Price.String() != "1" || second[1].Price.String() != "100" || second[2].Price.String() != "1" {
+		t.Fatalf("prices = %s/%s/%s", second[0].Price, second[1].Price, second[2].Price)
+	}
+
+	// A third scan without new bars emits nothing.
+	third, err := g.Scan(context.Background())
+	if err != nil {
+		t.Fatalf("third scan: %v", err)
+	}
+	if len(third) != 0 {
+		t.Fatalf("third scan signals = %+v, want none", third)
 	}
 }
 
@@ -261,20 +370,179 @@ func TestScanInsufficientBars(t *testing.T) {
 		"BTCUSDT": makeBars("BTCUSDT", "1h", "10", "9", "8", "7"),
 	}}
 	cfg := Config{Symbols: []string{"BTCUSDT"}, Timeframe: "1h", Fast: 2, Slow: 3, Sides: []string{"buy", "sell"}}
-	got, err := newGenerator(t, cfg, provider).Scan(context.Background())
+	g := newGenerator(t, cfg, provider)
+	got, err := g.Scan(context.Background())
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
 	if len(got) != 0 {
 		t.Fatalf("signals = %+v, want none", got)
 	}
+	// An insufficient history leaves no baseline behind: a later scan with
+	// enough bars still behaves like a first scan.
+	provider.bySymbol["BTCUSDT"] = makeBars("BTCUSDT", "1h", "10", "9", "8", "7", "20")
+	got, err = g.Scan(context.Background())
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if len(got) != 1 || got[0].Side != domain.SideBuy {
+		t.Fatalf("signals = %+v, want one buy", got)
+	}
 }
 
-func TestScanProviderError(t *testing.T) {
+func TestScanOneBadSymbol(t *testing.T) {
+	var logs bytes.Buffer
+	deps := testDeps()
+	deps.Logger = slog.New(slog.NewTextHandler(&logs, nil))
+	provider := &fakeProvider{
+		bySymbol: map[string][]domain.Candle{
+			"ETHUSDT": makeBars("ETHUSDT", "1h", "10", "11", "12", "13", "1"),
+		},
+		errBySymbol: map[string]error{"BTCUSDT": errors.New("venue unavailable")},
+	}
+	cfg := Config{Symbols: []string{"BTCUSDT", "ETHUSDT"}, Timeframe: "1h", Fast: 2, Slow: 3, Sides: []string{"buy", "sell"}}
+	g, err := New(cfg, provider, deps)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	got, err := g.Scan(context.Background())
+	if err != nil {
+		t.Fatalf("Scan: want nil error, got %v", err)
+	}
+	if len(got) != 1 || got[0].Instrument.Symbol != "ETHUSDT" || got[0].Side != domain.SideSell {
+		t.Fatalf("signals = %+v, want one ETHUSDT sell", got)
+	}
+	if !strings.Contains(logs.String(), "BTCUSDT") {
+		t.Fatalf("log = %q, want the failing symbol", logs.String())
+	}
+}
+
+func TestScanAllSymbolsFail(t *testing.T) {
+	var logs bytes.Buffer
+	deps := testDeps()
+	deps.Logger = slog.New(slog.NewTextHandler(&logs, nil))
 	provider := &fakeProvider{err: errors.New("boom")}
-	cfg := Config{Symbols: []string{"BTCUSDT"}, Timeframe: "1h", Fast: 2, Slow: 3, Sides: []string{"buy"}}
-	if _, err := newGenerator(t, cfg, provider).Scan(context.Background()); err == nil {
-		t.Fatal("Scan: want provider error, got nil")
+	cfg := Config{Symbols: []string{"BTCUSDT", "ETHUSDT"}, Timeframe: "1h", Fast: 2, Slow: 3, Sides: []string{"buy"}}
+	g, err := New(cfg, provider, deps)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	got, err := g.Scan(context.Background())
+	if err != nil {
+		t.Fatalf("Scan: want nil error, got %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("signals = %+v, want none", got)
+	}
+	if !strings.Contains(logs.String(), "BTCUSDT") || !strings.Contains(logs.String(), "ETHUSDT") {
+		t.Fatalf("log = %q, want both failing symbols", logs.String())
+	}
+}
+
+func TestScanVenue(t *testing.T) {
+	bars := makeBars("BTCUSDT", "1h", "10", "9", "8", "7", "20")
+	base := Config{Symbols: []string{"BTCUSDT"}, Timeframe: "1h", Fast: 2, Slow: 3, Sides: []string{"buy"}}
+
+	defaulted := base
+	got, err := newGenerator(t, defaulted, &fakeProvider{bySymbol: map[string][]domain.Candle{"BTCUSDT": bars}}).Scan(context.Background())
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if len(got) != 1 || got[0].Instrument.Venue != "binance" {
+		t.Fatalf("signals = %+v, want venue binance", got)
+	}
+
+	custom := base
+	custom.Venue = "bybit"
+	got, err = newGenerator(t, custom, &fakeProvider{bySymbol: map[string][]domain.Candle{"BTCUSDT": bars}}).Scan(context.Background())
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if len(got) != 1 || got[0].Instrument.Venue != "bybit" {
+		t.Fatalf("signals = %+v, want venue bybit", got)
+	}
+}
+
+// TestScanWindowStability slides the start of a 500-bar window and requires
+// the same signal set from a fresh generator, whose first scan evaluates only
+// the last closed bar.
+func TestScanWindowStability(t *testing.T) {
+	closes := make([]float64, 500)
+	for i := 0; i < 460; i++ {
+		closes[i] = 100 + 20*math.Sin(float64(i)/9)
+	}
+	// A steady ramp leaves the fast EMA above the slow EMA; the final drop
+	// then produces exactly one sell cross on the last closed bar.
+	for i := 460; i < 499; i++ {
+		closes[i] = 100 + float64(i-460)*0.5
+	}
+	closes[499] = 50
+
+	cfg := Config{Symbols: []string{"BTCUSDT"}, Timeframe: "1h", Fast: 5, Slow: 12, Sides: []string{"buy", "sell"}}
+	var base []string
+	for offset := 0; offset <= 10; offset++ {
+		provider := &fakeProvider{bySymbol: map[string][]domain.Candle{
+			"BTCUSDT": makeSeries("BTCUSDT", "1h", closes[offset:]),
+		}}
+		got, err := newGenerator(t, cfg, provider).Scan(context.Background())
+		if err != nil {
+			t.Fatalf("offset %d: Scan: %v", offset, err)
+		}
+		ids := signalIDs(got)
+		if offset == 0 {
+			base = ids
+			if len(base) != 1 {
+				t.Fatalf("base signals = %v, want one sell cross", base)
+			}
+			continue
+		}
+		if !reflect.DeepEqual(ids, base) {
+			t.Fatalf("offset %d signals = %v, want %v", offset, ids, base)
+		}
+	}
+}
+
+func TestParseInterval(t *testing.T) {
+	tests := []struct {
+		raw  string
+		want time.Duration
+	}{
+		{"15m", 15 * time.Minute},
+		{"1h", time.Hour},
+		{"4H", 4 * time.Hour},
+		{"1d", 24 * time.Hour},
+		{"1w", 7 * 24 * time.Hour},
+	}
+	for _, tt := range tests {
+		got, err := parseInterval(tt.raw)
+		if err != nil {
+			t.Fatalf("parseInterval(%q): %v", tt.raw, err)
+		}
+		if got != tt.want {
+			t.Fatalf("parseInterval(%q) = %v, want %v", tt.raw, got, tt.want)
+		}
+	}
+	for _, raw := range []string{"", "h", "0m", "-1h", "1x", "1", "1.5h", "m15"} {
+		if _, err := parseInterval(raw); err == nil {
+			t.Fatalf("parseInterval(%q): want error, got nil", raw)
+		}
+	}
+}
+
+func TestNewLabelInterval(t *testing.T) {
+	valid := Config{Symbols: []string{"BTCUSDT"}, Timeframe: "1h", Fast: 2, Slow: 3, Sides: []string{"buy"}}
+	for _, cfg := range []Config{
+		{Timeframe: "1h", LabelIntervalSec: 1800},
+		{Timeframe: "1d", LabelIntervalSec: 43200},
+		{Timeframe: "1w", LabelIntervalSec: 86400},
+	} {
+		cfg.Symbols = valid.Symbols
+		cfg.Fast = valid.Fast
+		cfg.Slow = valid.Slow
+		cfg.Sides = valid.Sides
+		if _, err := New(cfg, &fakeProvider{}, testDeps()); err != nil {
+			t.Fatalf("New(%+v): %v", cfg, err)
+		}
 	}
 }
 
@@ -294,6 +562,10 @@ func TestNewValidation(t *testing.T) {
 		{"fast equals slow", Config{Symbols: []string{"BTCUSDT"}, Timeframe: "1h", Fast: 3, Slow: 3, Sides: []string{"buy"}}, &fakeProvider{}, domain.CodeInvalidRequest},
 		{"no sides", Config{Symbols: []string{"BTCUSDT"}, Timeframe: "1h", Fast: 2, Slow: 3}, &fakeProvider{}, domain.CodeInvalidRequest},
 		{"bad side", Config{Symbols: []string{"BTCUSDT"}, Timeframe: "1h", Fast: 2, Slow: 3, Sides: []string{"hold"}}, &fakeProvider{}, domain.CodeInvalidRequest},
+		{"negative label interval", Config{Symbols: []string{"BTCUSDT"}, Timeframe: "1h", Fast: 2, Slow: 3, Sides: []string{"buy"}, LabelIntervalSec: -1}, &fakeProvider{}, domain.CodeInvalidRequest},
+		{"label interval too long", Config{Symbols: []string{"BTCUSDT"}, Timeframe: "1h", Fast: 2, Slow: 3, Sides: []string{"buy"}, LabelIntervalSec: 3600}, &fakeProvider{}, domain.CodeInvalidRequest},
+		{"label interval equal to half", Config{Symbols: []string{"BTCUSDT"}, Timeframe: "1h", Fast: 2, Slow: 3, Sides: []string{"buy"}, LabelIntervalSec: 1801}, &fakeProvider{}, domain.CodeInvalidRequest},
+		{"unparseable timeframe with label", Config{Symbols: []string{"BTCUSDT"}, Timeframe: "1x", Fast: 2, Slow: 3, Sides: []string{"buy"}, LabelIntervalSec: 60}, &fakeProvider{}, domain.CodeInvalidRequest},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
