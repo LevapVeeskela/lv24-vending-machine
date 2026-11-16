@@ -202,6 +202,125 @@ func CandleConformance(t *testing.T, newProvider CandleFactory) {
 		if !de.Retryable {
 			t.Fatal("Retryable = false, want true")
 		}
+		if got := domain.RetryAfterOf(err); got != 5*time.Second {
+			t.Fatalf("RetryAfter = %v, want 5s", got)
+		}
+	})
+
+	t.Run("retry_after_date", func(t *testing.T) {
+		now := time.Date(2024, time.January, 1, 0, 0, 0, 0, time.UTC)
+		retryAt := now.Add(30 * time.Second).UTC().Format(http.TimeFormat)
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			candleCheckParams(t, r, "BTCUSDT", "1m")
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Retry-After", retryAt)
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"code":-1003,"msg":"Too much request weight used."}`))
+		}))
+		defer srv.Close()
+		p := newProvider(t, srv.URL, ports.Deps{Clock: func() time.Time { return now }})
+		_, err := p.Candles(t.Context(), domain.CandleRequest{Symbol: "BTCUSDT", Interval: "1m", Limit: 5})
+		if err == nil {
+			t.Fatal("Candles = nil error, want rate_limit")
+		}
+		if domain.CodeOf(err) != domain.CodeRateLimit {
+			t.Fatalf("code = %q, want %q", domain.CodeOf(err), domain.CodeRateLimit)
+		}
+		if got := domain.RetryAfterOf(err); got != 30*time.Second {
+			t.Fatalf("RetryAfter = %v, want 30s", got)
+		}
+	})
+
+	t.Run("ip_ban", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			candleCheckParams(t, r, "BTCUSDT", "1m")
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Retry-After", "5")
+			w.WriteHeader(http.StatusTeapot)
+			_, _ = w.Write([]byte(`{"code":-1004,"msg":"IP banned."}`))
+		}))
+		defer srv.Close()
+		p := newProvider(t, srv.URL, ports.Deps{})
+		_, err := p.Candles(t.Context(), domain.CandleRequest{Symbol: "BTCUSDT", Interval: "1m", Limit: 5})
+		if err == nil {
+			t.Fatal("Candles = nil error, want rate_limit")
+		}
+		if domain.CodeOf(err) != domain.CodeRateLimit {
+			t.Fatalf("code = %q, want %q", domain.CodeOf(err), domain.CodeRateLimit)
+		}
+		var de *domain.Error
+		if !errors.As(err, &de) {
+			t.Fatalf("error type = %T, want *domain.Error", err)
+		}
+		if de.Retryable {
+			t.Fatal("Retryable = true, want false (IP ban is never retried)")
+		}
+		if got := domain.RetryAfterOf(err); got != 5*time.Second {
+			t.Fatalf("RetryAfter = %v, want 5s", got)
+		}
+	})
+
+	t.Run("region_unavailable", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			candleCheckParams(t, r, "BTCUSDT", "1m")
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Retry-After", "7")
+			w.WriteHeader(451)
+			_, _ = w.Write([]byte(`{"code":0,"msg":"Service unavailable from a restricted location."}`))
+		}))
+		defer srv.Close()
+		p := newProvider(t, srv.URL, ports.Deps{})
+		_, err := p.Candles(t.Context(), domain.CandleRequest{Symbol: "BTCUSDT", Interval: "1m", Limit: 5})
+		if err == nil {
+			t.Fatal("Candles = nil error, want region_unavailable")
+		}
+		if domain.CodeOf(err) != domain.CodeRegionUnavailable {
+			t.Fatalf("code = %q, want %q", domain.CodeOf(err), domain.CodeRegionUnavailable)
+		}
+		var de *domain.Error
+		if !errors.As(err, &de) {
+			t.Fatalf("error type = %T, want *domain.Error", err)
+		}
+		if de.Retryable {
+			t.Fatal("Retryable = true, want false")
+		}
+		if got := domain.RetryAfterOf(err); got != 7*time.Second {
+			t.Fatalf("RetryAfter = %v, want 7s", got)
+		}
+	})
+
+	t.Run("unclosed", func(t *testing.T) {
+		now := candleBase.Add(3 * time.Minute)
+		deps := ports.Deps{Clock: func() time.Time { return now }}
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			candleCheckParams(t, r, "BTCUSDT", "1m")
+			candleWritePage(t, w, [][]any{
+				candleRow(candleOpenMs(0), "1.00", "1.10", "0.90", "1.05", "10.0", candleOpenMs(0)+59999),
+				candleRow(candleOpenMs(1), "2.00", "2.10", "1.90", "2.05", "20.0", candleOpenMs(1)+59999),
+				candleRow(candleOpenMs(2), "3.00", "3.10", "2.90", "3.05", "30.0", candleOpenMs(2)+59999),
+				// Unclosed bar: CloseTime (open+59999) is at/after now.
+				candleRow(candleOpenMs(3), "4.00", "4.10", "3.90", "4.05", "40.0", candleOpenMs(3)+59999),
+			})
+		}))
+		defer srv.Close()
+		p := newProvider(t, srv.URL, deps)
+		got, err := p.Candles(t.Context(), domain.CandleRequest{Symbol: "BTCUSDT", Interval: "1m", Limit: 3})
+		if err != nil {
+			t.Fatalf("Candles: %v", err)
+		}
+		if len(got) != 3 {
+			t.Fatalf("len = %d, want 3 closed bars", len(got))
+		}
+		for i, want := range []int64{candleOpenMs(0), candleOpenMs(1), candleOpenMs(2)} {
+			if ms := got[i].OpenTime.UnixMilli(); ms != want {
+				t.Fatalf("candles[%d].OpenTime = %d, want %d", i, ms, want)
+			}
+		}
+		for _, c := range got {
+			if !c.CloseTime.Before(now) {
+				t.Fatalf("unclosed candle returned: open %v close %v (now %v)", c.OpenTime, c.CloseTime, now)
+			}
+		}
 	})
 
 	t.Run("to_filter", func(t *testing.T) {

@@ -46,6 +46,7 @@ type Config struct {
 type Provider struct {
 	baseURL string
 	client  *http.Client
+	now     func() time.Time
 }
 
 // New builds a Provider. The deps HTTP client is cloned with redirects
@@ -67,7 +68,11 @@ func New(cfg Config, deps ports.Deps) (*Provider, error) {
 		return http.ErrUseLastResponse
 	}
 	clone.Timeout = 30 * time.Second
-	return &Provider{baseURL: base, client: &clone}, nil
+	clock := deps.Clock
+	if clock == nil {
+		clock = time.Now
+	}
+	return &Provider{baseURL: base, client: &clone, now: clock}, nil
 }
 
 // Descriptor advertises the provider identity and capabilities.
@@ -93,8 +98,9 @@ func (p *Provider) Descriptor() ports.Descriptor {
 //
 // It paginates with startTime set to one millisecond past the latest candle
 // seen so far, then sorts ascending by OpenTime, drops duplicates by
-// OpenTime (keeping the first occurrence), drops candles past req.To and
-// truncates to the requested limit. No retries are performed.
+// OpenTime (keeping the first occurrence), drops unclosed candles
+// (CloseTime >= now), drops candles past req.To and truncates to the
+// requested limit. No retries are performed.
 func (p *Provider) Candles(ctx context.Context, req domain.CandleRequest) ([]domain.Candle, error) {
 	if strings.TrimSpace(req.Symbol) == "" || strings.TrimSpace(req.Interval) == "" {
 		return nil, domain.NewError(domain.CodeInvalidRequest, "marketdata-binance: symbol and interval are required")
@@ -116,10 +122,14 @@ func (p *Provider) Candles(ctx context.Context, req domain.CandleRequest) ([]dom
 	var all []domain.Candle
 	var prevMax int64
 	hasPrev := false
+	now := p.nowUTC()
 	for iter := 0; iter < maxIterations && len(all) < target; iter++ {
-		per := target - len(all)
+		per := target - len(all) + 1
 		if per > maxPerRequest {
 			per = maxPerRequest
+		}
+		if per < 1 {
+			per = 1
 		}
 		page, err := p.fetchPage(ctx, req.Symbol, req.Interval, per, startMs, endMs)
 		if err != nil {
@@ -134,7 +144,12 @@ func (p *Provider) Candles(ctx context.Context, req domain.CandleRequest) ([]dom
 				maxMs = ms
 			}
 		}
-		all = append(all, page...)
+		for _, c := range page {
+			if !c.CloseTime.Before(now) {
+				continue
+			}
+			all = append(all, c)
+		}
 		if hasPrev && maxMs <= prevMax {
 			break
 		}
@@ -149,6 +164,9 @@ func (p *Provider) Candles(ctx context.Context, req domain.CandleRequest) ([]dom
 	res := make([]domain.Candle, 0, len(all))
 	for _, c := range all {
 		if n := len(res); n > 0 && c.OpenTime.Equal(res[n-1].OpenTime) {
+			continue
+		}
+		if !c.CloseTime.Before(now) {
 			continue
 		}
 		if !req.To.IsZero() && c.OpenTime.After(req.To) {
@@ -195,24 +213,40 @@ func (p *Provider) fetchPage(ctx context.Context, symbol, interval string, limit
 		return nil, domain.WrapError(domain.CodeUnavailable, "marketdata-binance: transport error", err)
 	}
 	defer resp.Body.Close()
+	now := p.nowUTC()
 	switch {
 	case resp.StatusCode == http.StatusOK:
 		// Parse below.
-	case resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusTeapot:
-		msg := "marketdata-binance: rate limited"
-		if ra := strings.TrimSpace(resp.Header.Get("Retry-After")); ra != "" {
-			if secs, aerr := strconv.Atoi(ra); aerr == nil {
-				msg = fmt.Sprintf("marketdata-binance: rate limited (retry after %ds)", secs)
-			}
-		}
+	case resp.StatusCode == http.StatusTooManyRequests:
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-		rateErr := domain.NewError(domain.CodeRateLimit, msg)
+		rateErr := domain.NewError(domain.CodeRateLimit, "marketdata-binance: rate limited")
 		rateErr.Retryable = true
+		if ra := parseRetryAfter(resp.Header.Get("Retry-After"), now); ra > 0 {
+			rateErr.RetryAfter = ra
+			rateErr.Message = fmt.Sprintf("marketdata-binance: rate limited (retry after %s)", ra)
+		}
 		return nil, rateErr
+	case resp.StatusCode == http.StatusTeapot:
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		banErr := domain.NewError(domain.CodeRateLimit, "marketdata-binance: IP banned (418)")
+		banErr.Retryable = false
+		if ra := parseRetryAfter(resp.Header.Get("Retry-After"), now); ra > 0 {
+			banErr.RetryAfter = ra
+			banErr.Message = fmt.Sprintf("marketdata-binance: IP banned (418, retry after %s)", ra)
+		}
+		return nil, banErr
+	case resp.StatusCode == 451:
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		regionErr := domain.NewError(domain.CodeRegionUnavailable, "marketdata-binance: not available in region (451)")
+		regionErr.Retryable = false
+		if ra := parseRetryAfter(resp.Header.Get("Retry-After"), now); ra > 0 {
+			regionErr.RetryAfter = ra
+		}
+		return nil, regionErr
 	case resp.StatusCode == http.StatusBadRequest:
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 		return nil, domain.NewError(domain.CodeInvalidRequest, "marketdata-binance: bad request")
-	case resp.StatusCode == 451 || (resp.StatusCode >= 500 && resp.StatusCode <= 599):
+	case resp.StatusCode >= 500 && resp.StatusCode <= 599:
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 		unavail := domain.NewError(domain.CodeUnavailable, fmt.Sprintf("marketdata-binance: upstream status %d", resp.StatusCode))
 		unavail.Retryable = true
@@ -226,6 +260,39 @@ func (p *Provider) fetchPage(ctx context.Context, symbol, interval string, limit
 		return nil, domain.WrapError(domain.CodeInvalidOutput, "marketdata-binance: read response", err)
 	}
 	return parseKlinesPage(body, symbol, interval)
+}
+
+// nowUTC returns the current time in UTC via the injected clock.
+func (p *Provider) nowUTC() time.Time {
+	if p.now != nil {
+		return p.now().UTC()
+	}
+	return time.Now().UTC()
+}
+
+// parseRetryAfter decodes a Retry-After header value (delta seconds or HTTP
+// date) into a non-negative delay computed against now.
+func parseRetryAfter(v string, now time.Time) time.Duration {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0
+	}
+	if secs, err := strconv.Atoi(v); err == nil {
+		if secs < 0 {
+			return 0
+		}
+		return time.Duration(secs) * time.Second
+	}
+	for _, layout := range []string{http.TimeFormat, time.RFC1123, time.RFC1123Z} {
+		if t, err := time.Parse(layout, v); err == nil {
+			d := t.Sub(now)
+			if d < 0 {
+				return 0
+			}
+			return d
+		}
+	}
+	return 0
 }
 
 // parseKlinesPage decodes one klines response body.
