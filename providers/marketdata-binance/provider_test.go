@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -161,5 +162,82 @@ func TestCandlesBadRequest(t *testing.T) {
 	}
 	if !strings.Contains(de.Message, "unknown symbol or interval") {
 		t.Errorf("message = %q, want it to mention unknown symbol or interval", de.Message)
+	}
+}
+
+// TestCandlesStopsAfterShortPage: a page with fewer candles than requested is
+// the end of the data; the provider must not ask for another page.
+func TestCandlesStopsAfterShortPage(t *testing.T) {
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		writeKlinesPage(t, w, [][]any{
+			klinesRow(klinesBase, "1.00", "1.10", "0.90", "1.05", "10.0"),
+			klinesRow(klinesBase.Add(time.Minute), "2.00", "2.10", "1.90", "2.05", "20.0"),
+			klinesRow(klinesBase.Add(2*time.Minute), "3.00", "3.10", "2.90", "3.05", "30.0"),
+		})
+	}))
+	defer srv.Close()
+	p, err := marketdatabinance.New(marketdatabinance.Config{BaseURL: srv.URL}, ports.Deps{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	got, err := p.Candles(t.Context(), domain.CandleRequest{Symbol: "BTCUSDT", Interval: "1m", Limit: 4})
+	if err != nil {
+		t.Fatalf("Candles: %v", err)
+	}
+	if requests != 1 {
+		t.Fatalf("requests = %d, want exactly 1 HTTP request", requests)
+	}
+	if len(got) != 3 {
+		t.Fatalf("len = %d, want the 3 returned candles", len(got))
+	}
+	if !got[0].OpenTime.Equal(klinesBase) || !got[2].OpenTime.Equal(klinesBase.Add(2*time.Minute)) {
+		t.Fatalf("candles = %v..%v, want the returned page", got[0].OpenTime, got[2].OpenTime)
+	}
+}
+
+// TestCandlesPaginatesWhenPageIsFull: a limit above the per-request cap keeps
+// the existing multi-page scan while the page stays full.
+func TestCandlesPaginatesWhenPageIsFull(t *testing.T) {
+	const target = 1005
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		limit, err := strconv.Atoi(r.URL.Query().Get("limit"))
+		if err != nil || limit <= 0 {
+			t.Errorf("limit = %q, want a positive integer", r.URL.Query().Get("limit"))
+			return
+		}
+		first := 0
+		if r.URL.Query().Get("startTime") != "" {
+			first = 1000
+		}
+		rows := make([][]any, 0, limit)
+		for i := 0; i < limit && first+i < target; i++ {
+			open := klinesBase.Add(time.Duration(first+i) * time.Minute)
+			rows = append(rows, klinesRow(open, "1.00", "1.10", "0.90", "1.05", "10.0"))
+		}
+		writeKlinesPage(t, w, rows)
+	}))
+	defer srv.Close()
+	p, err := marketdatabinance.New(marketdatabinance.Config{BaseURL: srv.URL}, ports.Deps{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	got, err := p.Candles(t.Context(), domain.CandleRequest{Symbol: "BTCUSDT", Interval: "1m", Limit: target})
+	if err != nil {
+		t.Fatalf("Candles: %v", err)
+	}
+	if requests != 2 {
+		t.Fatalf("requests = %d, want 2 (full page, then the short last page)", requests)
+	}
+	if len(got) != target {
+		t.Fatalf("len = %d, want %d", len(got), target)
+	}
+	for i, want := 0, klinesBase; i < target; i, want = i+1, want.Add(time.Minute) {
+		if !got[i].OpenTime.Equal(want) {
+			t.Fatalf("candles[%d].OpenTime = %v, want %v", i, got[i].OpenTime, want)
+		}
 	}
 }

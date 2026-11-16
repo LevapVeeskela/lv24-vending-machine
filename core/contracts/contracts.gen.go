@@ -1565,6 +1565,10 @@ type Report struct {
 	// PolicyHash corresponds to the JSON schema field "policyHash".
 	PolicyHash *string `json:"policyHash,omitempty,omitzero"`
 
+	// Entry signals recorded as unlabelable because the candle source rejected the
+	// request as invalid.
+	SourceRejected *int `json:"sourceRejected,omitempty,omitzero"`
+
 	// Sufficient corresponds to the JSON schema field "sufficient".
 	Sufficient bool `json:"sufficient"`
 
@@ -1841,6 +1845,9 @@ func (j *Report) UnmarshalJSON(value []byte) error {
 		if matched, _ := regexp.MatchString(`^[0-9a-f]{64}$`, string(*plain.PolicyHash)); !matched {
 			return fmt.Errorf("field %s pattern match: must match %s", "PolicyHash", `^[0-9a-f]{64}$`)
 		}
+	}
+	if plain.SourceRejected != nil && 0 > *plain.SourceRejected {
+		return fmt.Errorf("field %s: must be >= %v", "sourceRejected", 0)
 	}
 	*j = Report(plain)
 	return nil

@@ -10,7 +10,11 @@
 // before the anchor is shifted to the next bar and flagged in the outcome;
 // without a spare bar the signal waits for a later cycle. A signal that still
 // has no honest window after its deadline gets one final labeling attempt and
-// is then recorded as outcome.unlabelable.
+// is then recorded as outcome.unlabelable. A candle source that rejects the
+// request as invalid is retried for at most 24 hours after the window closes
+// and then recorded as outcome.unlabelable with reason "source_rejected"; any
+// other source error is retried for at most 24 hours past the labeling
+// deadline and then recorded with reason "timeout".
 package outcome
 
 import (
@@ -100,12 +104,24 @@ const retryCap = time.Hour
 // entered honestly, even on a long timeframe.
 const maxEntryLag = 30 * time.Second
 
+// sourceRetryGrace bounds how long a candle-source error keeps a signal
+// retryable after the labeling window closes (invalid_request) or after the
+// labeling deadline passes (any other source error). At the bound the signal
+// is recorded as unlabelable without another source call.
+const sourceRetryGrace = 24 * time.Hour
+
 // retryState tracks the exponential backoff of one failing signal.
 type retryState struct {
 	// attempts is the number of consecutive failures.
 	attempts int
 	// next is the earliest time the signal may be retried.
 	next time.Time
+	// terminalAt is when a signal whose last failure was a candle-source
+	// error must be recorded as unlabelable without another source call.
+	// Zero for every other failure.
+	terminalAt time.Time
+	// reason is the outcome.unlabelable reason used at terminalAt.
+	reason string
 }
 
 // Labeler labels gate entry signals with forward candle returns.
@@ -237,6 +253,17 @@ func (l *Labeler) Run(ctx context.Context) (Summary, error) {
 			// Recorded as unlabelable on an earlier run: never queried again.
 			continue
 		}
+		// A source error has a hard stop: once the grace period is over the
+		// signal is recorded without calling the source, even if the
+		// exponential backoff would schedule a later retry.
+		if reason, ok := l.terminalReason(req.SignalID, now); ok {
+			if err := l.appendUnlabelable(ctx, req, ev.DecisionID, now, reason); err != nil {
+				return Summary{}, err
+			}
+			finished[req.SignalID] = true
+			l.resetRetry(req.SignalID)
+			continue
+		}
 		if !l.due(req.SignalID, now) {
 			// Backing off after a failure: skip without touching the source.
 			out.Skipped++
@@ -275,9 +302,24 @@ func (l *Labeler) due(signalID string, now time.Time) bool {
 	return !ok || !now.Before(st.next)
 }
 
+// terminalReason reports the reason a signal whose last failure was a candle
+// source error must be recorded as unlabelable now, if its grace period is
+// over.
+func (l *Labeler) terminalReason(signalID string, now time.Time) (string, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	st, ok := l.retry[signalID]
+	if !ok || st.terminalAt.IsZero() || now.Before(st.terminalAt) {
+		return "", false
+	}
+	return st.reason, true
+}
+
 // recordFailure schedules the next retry of a failed signal: one label
 // interval after the first failure, doubling per consecutive failure, capped
-// at one hour. An unknown interval falls back to the cap.
+// at one hour. An unknown interval falls back to the cap. Any previous
+// source-error deadline is cleared: only a candle source error may make a
+// signal permanently unlabelable.
 func (l *Labeler) recordFailure(signalID string, interval time.Duration, now time.Time) {
 	if interval <= 0 {
 		interval = retryCap
@@ -297,6 +339,21 @@ func (l *Labeler) recordFailure(signalID string, interval time.Duration, now tim
 		delay = retryCap
 	}
 	st.next = now.Add(delay)
+	st.terminalAt = time.Time{}
+	st.reason = ""
+	l.retry[signalID] = st
+}
+
+// recordSourceFailure schedules the next retry of a candle-source error and
+// remembers the hard stop after which the signal must be recorded as
+// unlabelable without another source call.
+func (l *Labeler) recordSourceFailure(signalID string, interval time.Duration, now, terminalAt time.Time, reason string) {
+	l.recordFailure(signalID, interval, now)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	st := l.retry[signalID]
+	st.terminalAt = terminalAt
+	st.reason = reason
 	l.retry[signalID] = st
 }
 
@@ -389,7 +446,7 @@ func (l *Labeler) labelOne(ctx context.Context, ev domain.Event, req domain.Gate
 		Limit:    l.cfg.HorizonBars + 2,
 	})
 	if err != nil {
-		return l.fail(req, interval, fmt.Errorf("outcome: candles for signal %q: %w", req.SignalID, err))
+		return l.sourceError(ctx, ev.DecisionID, req, interval, windowEnd, now, err)
 	}
 	bars := selectBars(candles, req, anchor, now)
 	if len(bars) == 0 {
@@ -460,12 +517,36 @@ func (l *Labeler) labelOne(ctx context.Context, ev domain.Event, req domain.Gate
 	return resultLabeled, nil
 }
 
+// sourceError handles a candle-source failure. A rejected request is retried
+// only until windowEnd + 24h and then recorded as source_rejected; any other
+// error is retried until the labeling deadline + 24h and then recorded as a
+// timeout. Before those bounds the signal keeps its exponential backoff.
+func (l *Labeler) sourceError(ctx context.Context, decisionID string, req domain.GateRequest, interval time.Duration, windowEnd, now time.Time, err error) (labelResult, error) {
+	reason := "timeout"
+	terminalAt := windowEnd.Add(unlabelableTimeout + sourceRetryGrace)
+	if domain.CodeOf(err) == domain.CodeInvalidRequest {
+		reason = "source_rejected"
+		terminalAt = windowEnd.Add(sourceRetryGrace)
+	}
+	if !now.Before(terminalAt) {
+		if aerr := l.appendUnlabelable(ctx, req, decisionID, now, reason); aerr != nil {
+			return resultFailed, aerr
+		}
+		l.resetRetry(req.SignalID)
+		return resultTimedOut, nil
+	}
+	l.recordSourceFailure(req.SignalID, interval, now, terminalAt, reason)
+	l.warnOnce(req.SignalID, req.Instrument.Symbol, "outcome: label failed", err.Error())
+	return resultFailed, nil
+}
+
 // timedOut records the one outcome.unlabelable event of a signal whose last
 // labeling attempt produced no honest forward window.
 func (l *Labeler) timedOut(ctx context.Context, req domain.GateRequest, decisionID string, now time.Time) (labelResult, error) {
 	if err := l.appendUnlabelable(ctx, req, decisionID, now, "timeout"); err != nil {
 		return resultFailed, err
 	}
+	l.resetRetry(req.SignalID)
 	return resultTimedOut, nil
 }
 

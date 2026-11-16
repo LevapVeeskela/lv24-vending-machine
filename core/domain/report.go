@@ -102,7 +102,10 @@ type Report struct {
 	AwaitingLabeling int `json:"awaitingLabeling,omitempty"`
 	// NoOutcomeByDeadline is the number of entry signals recorded as
 	// unlabelable when their labeling deadline passed.
-	NoOutcomeByDeadline  int                `json:"noOutcomeByDeadline,omitempty"`
+	NoOutcomeByDeadline int `json:"noOutcomeByDeadline,omitempty"`
+	// SourceRejected is the number of entry signals recorded as unlabelable
+	// because the candle source rejected the request as invalid.
+	SourceRejected       int                `json:"sourceRejected,omitempty"`
 	Sufficient           bool               `json:"sufficient"`
 	VerdictCounts        map[string]int     `json:"verdictCounts"`
 	DecisionCostUSD      Decimal            `json:"decisionCostUsd"`

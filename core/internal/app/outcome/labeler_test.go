@@ -1626,3 +1626,129 @@ func TestNoUsableCandlesBackoff(t *testing.T) {
 		t.Fatalf("labeled events = %d, want none", len(evs))
 	}
 }
+
+// unlabelableEvents decodes every outcome.unlabelable payload.
+func unlabelableEvents(t *testing.T, jr *memJournal) []domain.OutcomeUnlabelable {
+	t.Helper()
+	evs, err := jr.Query(context.Background(), 0, domain.EventOutcomeUnlabelable)
+	if err != nil {
+		t.Fatalf("query unlabelable: %v", err)
+	}
+	out := make([]domain.OutcomeUnlabelable, 0, len(evs))
+	for _, ev := range evs {
+		var u domain.OutcomeUnlabelable
+		if err := json.Unmarshal(ev.Payload, &u); err != nil {
+			t.Fatalf("decode unlabelable: %v", err)
+		}
+		out = append(out, u)
+	}
+	return out
+}
+
+// TestSourceRejectedAfterRetryGrace: an invalid_request source error keeps the
+// signal retryable for 24 hours after the window closes, then appends one
+// source_rejected record and never calls the source again.
+func TestSourceRejectedAfterRetryGrace(t *testing.T) {
+	jr := &memJournal{}
+	windowEnd := sigTS.Add(2 * time.Hour)
+	now := windowEnd
+	deps := testDeps()
+	deps.Clock = func() time.Time { return now }
+	src := &stubSource{err: domain.NewError(domain.CodeInvalidRequest, "unknown symbol")}
+	cfg := testConfig()
+	cfg.HorizonBars = 1
+	seedRequest(t, jr, entryReq("sig-rejected", domain.SideBuy), "dec-1")
+	lb, err := New(jr, src, deps, cfg)
+	if err != nil {
+		t.Fatalf("New() = %v", err)
+	}
+
+	run := func(want Summary, wantCalls int) {
+		t.Helper()
+		sum, rerr := lb.Run(context.Background())
+		if rerr != nil {
+			t.Fatalf("Run() at %v = %v", now, rerr)
+		}
+		if sum != want {
+			t.Fatalf("summary at %v = %+v, want %+v", now, sum, want)
+		}
+		if src.calls != wantCalls {
+			t.Fatalf("source calls at %v = %d, want %d", now, src.calls, wantCalls)
+		}
+	}
+
+	run(Summary{Failed: 1}, 1)
+	now = windowEnd.Add(time.Hour)
+	run(Summary{Failed: 1}, 2)
+	now = windowEnd.Add(23 * time.Hour)
+	run(Summary{Failed: 1}, 3)
+	if got := unlabelableEvents(t, jr); len(got) != 0 {
+		t.Fatalf("unlabelable before the grace = %+v, want none", got)
+	}
+
+	// The hard stop is reached while the backoff would still wait: no source
+	// call, exactly one event.
+	now = windowEnd.Add(24 * time.Hour)
+	run(Summary{}, 3)
+	got := unlabelableEvents(t, jr)
+	if len(got) != 1 || got[0].SignalID != "sig-rejected" || got[0].DecisionID != "dec-1" ||
+		got[0].Reason != "source_rejected" {
+		t.Fatalf("unlabelable = %+v, want sig-rejected/dec-1/source_rejected", got)
+	}
+
+	now = windowEnd.Add(72 * time.Hour)
+	run(Summary{}, 3)
+	if got := unlabelableEvents(t, jr); len(got) != 1 {
+		t.Fatalf("unlabelable after the stop = %+v, want exactly 1", got)
+	}
+}
+
+// TestSourceUnavailableTimeoutAfterDeadline: any non-invalid source error is
+// retried for at most 24 hours past the seven-day deadline, then recorded as
+// a timeout without another source call.
+func TestSourceUnavailableTimeoutAfterDeadline(t *testing.T) {
+	jr := &memJournal{}
+	deadline := sigTS.Add(2 * time.Hour).Add(7 * 24 * time.Hour)
+	now := deadline
+	deps := testDeps()
+	deps.Clock = func() time.Time { return now }
+	src := &stubSource{err: domain.NewError(domain.CodeUnavailable, "provider down")}
+	cfg := testConfig()
+	cfg.HorizonBars = 1
+	seedRequest(t, jr, entryReq("sig-down", domain.SideBuy), "dec-1")
+	lb, err := New(jr, src, deps, cfg)
+	if err != nil {
+		t.Fatalf("New() = %v", err)
+	}
+
+	run := func(want Summary, wantCalls int) {
+		t.Helper()
+		sum, rerr := lb.Run(context.Background())
+		if rerr != nil {
+			t.Fatalf("Run() at %v = %v", now, rerr)
+		}
+		if sum != want {
+			t.Fatalf("summary at %v = %+v, want %+v", now, sum, want)
+		}
+		if src.calls != wantCalls {
+			t.Fatalf("source calls at %v = %d, want %d", now, src.calls, wantCalls)
+		}
+	}
+
+	run(Summary{Failed: 1}, 1)
+	now = deadline.Add(time.Hour)
+	run(Summary{Failed: 1}, 2)
+
+	now = deadline.Add(24 * time.Hour)
+	run(Summary{}, 2)
+	got := unlabelableEvents(t, jr)
+	if len(got) != 1 || got[0].SignalID != "sig-down" || got[0].Reason != "timeout" {
+		t.Fatalf("unlabelable = %+v, want sig-down/timeout", got)
+	}
+
+	now = deadline.Add(48 * time.Hour)
+	run(Summary{}, 2)
+	if got := unlabelableEvents(t, jr); len(got) != 1 {
+		t.Fatalf("unlabelable after the stop = %+v, want exactly 1", got)
+	}
+}

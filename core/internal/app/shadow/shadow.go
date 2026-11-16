@@ -97,6 +97,11 @@ const trendScanDelay = 2 * time.Second
 // journal-derived alert series.
 const alertInterval = time.Hour
 
+// faultAlertMaxAge is how old the latest provider_auth/provider_misconfigured
+// verdict may be for its operator alert to be sent. An older verdict describes
+// a fault that has already gone quiet, so it must not page anyone.
+const faultAlertMaxAge = 24 * time.Hour
+
 // retryCap bounds the exponential retry delay of an undelivered notification.
 const retryCap = time.Hour
 
@@ -144,8 +149,10 @@ type journalNotifications struct {
 	streak    int
 	streakSeq int64
 	// faults maps provider_auth/provider_misconfigured to the seq of the
-	// latest verdict with that code.
-	faults map[string]int64
+	// latest verdict with that code; faultAt maps the same code to the time
+	// of that verdict so a stale fault is not announced.
+	faults  map[string]int64
+	faultAt map[string]time.Time
 	// delivered maps a notification key to its last successful delivery.
 	delivered map[string]deliveredAlert
 }
@@ -226,6 +233,18 @@ func New(jr ports.Journal, labeler Labeler, signals SignalSource, evaluator Eval
 				r.lastSeq = st.LastSeq
 			}
 		}
+	}
+	// Restore the last labeling time from the journal: lastLabelAt is an
+	// in-memory snapshot field, and a restart must not make an old label look
+	// like it never happened. A journal read failure is not fatal here; the
+	// next cycle records it in the status like every other phase error.
+	if err := jr.Walk(context.Background(), 0, domain.EventOutcomeLabeled, func(ev domain.Event) error {
+		if at := ev.TS.UTC(); at.After(r.lastLabelAt) {
+			r.lastLabelAt = at
+		}
+		return nil
+	}); err != nil && deps.Logger != nil {
+		deps.Logger.Warn("shadow: cannot restore last label time", "err", sanitizeErr(err))
 	}
 	return r, nil
 }
@@ -461,6 +480,11 @@ func (r *Runner) notify(ctx context.Context) error {
 		if seq == 0 {
 			continue
 		}
+		// A fault verdict older than a day has already gone quiet; paging the
+		// operator about it after a restart would be noise, not information.
+		if !faultFresh(now, state.faultAt[code]) {
+			continue
+		}
 		if !alertNeeded(now, state.delivered[notifyKey(notifyProviderConfig, code)], seq) {
 			continue
 		}
@@ -504,6 +528,20 @@ func (r *Runner) notify(ctx context.Context) error {
 
 	sendErr := r.notifier.Send(ctx, ports.Notification{Kind: first.kind, Text: first.text})
 	if sendErr != nil {
+		if domain.CodeOf(sendErr) == domain.CodeRateLimit {
+			// The channel's own one-message-per-interval limiter never
+			// touched the network: this is not a delivery failure, so it
+			// writes no notify.sent, keeps the failure counter and only
+			// defers the next attempt to the remaining delay.
+			retryAfter := domain.RetryAfterOf(sendErr)
+			r.deferSend(key, now, retryAfter)
+			if r.deps.Logger != nil {
+				r.deps.Logger.Debug("shadow: notification rate limited",
+					"kind", first.kind,
+					"retryAfter", retryAfter)
+			}
+			return notifyErr
+		}
 		notifyErr = sendErr
 		if firstFailure := r.recordSendFailure(key, now); firstFailure {
 			if _, appendErr := r.appendNotifySent(ctx, first, false); appendErr != nil {
@@ -563,6 +601,31 @@ func (r *Runner) resetSendFailure(key string) {
 	delete(r.retry, key)
 }
 
+// deferSend postpones the next attempt of a notification series after the
+// channel's local rate limiter rejected it. It deliberately leaves the
+// failure counter alone: no message was attempted, so this is not a delivery
+// failure. A zero or negative delay means the next label cycle.
+func (r *Runner) deferSend(key string, now time.Time, delay time.Duration) {
+	if delay <= 0 {
+		delay = r.cfg.LabelInterval
+		if delay <= 0 {
+			delay = defaultInterval
+		}
+	}
+	st := r.retry[key]
+	st.next = now.Add(delay)
+	r.retry[key] = st
+}
+
+// faultFresh reports whether the latest verdict with the fault code is recent
+// enough to alert on. A missing timestamp is treated as stale.
+func faultFresh(now, at time.Time) bool {
+	if at.IsZero() {
+		return false
+	}
+	return now.Sub(at) <= faultAlertMaxAge
+}
+
 // journalState derives the notification schedule inputs from the whole journal:
 // the trailing provider-unavailable streak, the first gate.request timestamp,
 // the timestamp of the latest successful weekly notification, the latest
@@ -571,6 +634,7 @@ func (r *Runner) resetSendFailure(key string) {
 func (r *Runner) journalState(ctx context.Context) (journalNotifications, error) {
 	st := journalNotifications{
 		faults:    make(map[string]int64),
+		faultAt:   make(map[string]time.Time),
 		delivered: make(map[string]deliveredAlert),
 	}
 	err := r.jr.Walk(ctx, 0, "", func(ev domain.Event) error {
@@ -595,6 +659,7 @@ func (r *Runner) journalState(ctx context.Context) (journalNotifications, error)
 				st.streak = 0
 				if ev.Seq > st.faults[v.Code] {
 					st.faults[v.Code] = ev.Seq
+					st.faultAt[v.Code] = ev.TS.UTC()
 				}
 			default:
 				st.streak = 0

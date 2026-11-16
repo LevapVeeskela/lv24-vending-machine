@@ -23,6 +23,11 @@
       "type": "integer",
       "minimum": 0
     },
+    "sourceRejected": {
+      "description": "Entry signals recorded as unlabelable because the candle source rejected the request as invalid.",
+      "type": "integer",
+      "minimum": 0
+    },
     "sufficient": { "type": "boolean" },
     "verdictCounts": {
       "type": "object",
