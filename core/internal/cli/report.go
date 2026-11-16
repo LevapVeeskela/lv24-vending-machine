@@ -11,10 +11,6 @@ import (
 	"github.com/LevapVeeskela/lv24-vending-machine/core/ports"
 )
 
-// reportNeedLabeled mirrors the report default (Config{} means MinLabeled
-// 100) for the human "insufficient data" line.
-const reportNeedLabeled = 100
-
 func (r *runner) cmdGateReport(args []string) int {
 	g, rest, gerr := splitGlobals(args)
 	if gerr != nil {
@@ -82,7 +78,7 @@ func printReportHuman(w io.Writer, rep domain.Report) {
 	fmt.Fprintf(w, "decision cost: %s USD\n", rep.DecisionCostUSD.String())
 	fmt.Fprintf(w, "latency p50/p95: %dms/%dms\n", rep.LatencyP50MS, rep.LatencyP95MS)
 	if !rep.Sufficient || rep.Comparisons == nil {
-		fmt.Fprintf(w, "insufficient data: %d labeled, need %d\n", rep.LabeledCount, reportNeedLabeled)
+		fmt.Fprintf(w, "insufficient data: %d labeled, need %d\n", rep.LabeledCount, report.DefaultMinLabeled)
 		return
 	}
 	c := rep.Comparisons

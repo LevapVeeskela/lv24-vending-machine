@@ -19,9 +19,9 @@ import (
 	"github.com/LevapVeeskela/lv24-vending-machine/core/ports"
 )
 
-// defaultMinLabeled is the labeled-outcome threshold applied when
+// DefaultMinLabeled is the labeled-outcome threshold applied when
 // Config.MinLabeled is not positive.
-const defaultMinLabeled = 100
+const DefaultMinLabeled = 100
 
 // riskQuestion and passKey locate the calibration probability inside a
 // decision response: answers["risk_check"].probabilities["pass"].
@@ -51,7 +51,7 @@ func New(jr ports.Journal, deps ports.Deps, cfg Config) (*Builder, error) {
 	}
 	min := cfg.MinLabeled
 	if min <= 0 {
-		min = defaultMinLabeled
+		min = DefaultMinLabeled
 	}
 	return &Builder{jr: jr, deps: deps, min: min}, nil
 }
@@ -89,19 +89,18 @@ type modelAcc struct {
 
 // Build walks the journal once and computes the report. An empty journal
 // yields a zero report without an error.
+//
+// Decision cost is summed over all unique recorded decisions (one entry
+// per decisionId, last decision.response wins); unkeyed responses cannot
+// be attributed and are ignored. By-model cost is summed over the labeled
+// decisions of that model only. Latency percentiles use the measured
+// Usage.LatencyMS; vendor latency is stored in decision.response but not
+// aggregated here.
 func (b *Builder) Build(ctx context.Context) (domain.Report, error) {
-	counts := map[string]int{
-		string(domain.VerdictAllow):   0,
-		string(domain.VerdictReject):  0,
-		string(domain.VerdictAbstain): 0,
-		string(domain.VerdictSkip):    0,
-	}
 	verdicts := map[string]string{}
 	decisions := map[string]decisionInfo{}
 	signalToDecision := map[string]string{}
 	var outcomes []domain.Outcome
-	var latencies []int64
-	costTotal := domain.Decimal{}
 
 	if err := b.jr.Walk(ctx, 0, "", func(ev domain.Event) error {
 		switch ev.Kind {
@@ -120,6 +119,9 @@ func (b *Builder) Build(ctx context.Context) (domain.Report, error) {
 			if err := json.Unmarshal(ev.Payload, &resp); err != nil {
 				return nil
 			}
+			if ev.DecisionID == "" {
+				return nil
+			}
 			info := decisionInfo{
 				model:   resp.Model,
 				cost:    resp.Usage.CostUSD,
@@ -132,11 +134,8 @@ func (b *Builder) Build(ctx context.Context) (domain.Report, error) {
 					info.hasP = true
 				}
 			}
-			latencies = append(latencies, resp.Usage.LatencyMS)
-			costTotal = costTotal.Add(resp.Usage.CostUSD)
-			if ev.DecisionID != "" {
-				decisions[ev.DecisionID] = info
-			}
+			// Last response per decisionId wins; replays do not double count.
+			decisions[ev.DecisionID] = info
 		case domain.EventGateVerdict:
 			var v domain.GateVerdict
 			if err := json.Unmarshal(ev.Payload, &v); err != nil {
@@ -149,8 +148,8 @@ func (b *Builder) Build(ctx context.Context) (domain.Report, error) {
 			if id == "" {
 				return nil
 			}
+			// Last verdict per decisionId wins; replays do not double count.
 			verdicts[id] = string(v.Verdict)
-			counts[string(v.Verdict)]++
 		case domain.EventOutcomeLabeled:
 			var o domain.Outcome
 			if err := json.Unmarshal(ev.Payload, &o); err != nil {
@@ -165,8 +164,27 @@ func (b *Builder) Build(ctx context.Context) (domain.Report, error) {
 		return domain.Report{}, fmt.Errorf("report: walk journal: %w", err)
 	}
 
+	// Verdict counts tally unique decisions, not verdict events.
+	counts := map[string]int{
+		string(domain.VerdictAllow):   0,
+		string(domain.VerdictReject):  0,
+		string(domain.VerdictAbstain): 0,
+		string(domain.VerdictSkip):    0,
+	}
+	for _, v := range verdicts {
+		counts[v]++
+	}
+
+	// Cost and latency aggregate unique decisions only.
+	var latencies []int64
+	costTotal := domain.Decimal{}
+	for _, info := range decisions {
+		latencies = append(latencies, info.latency)
+		costTotal = costTotal.Add(info.cost)
+	}
+
 	var labeled []labeledOutcome
-	for _, o := range outcomes {
+	for _, o := range dedupOutcomes(outcomes) {
 		did := o.DecisionID
 		if did == "" {
 			did = signalToDecision[o.SignalID]
@@ -192,6 +210,31 @@ func (b *Builder) Build(ctx context.Context) (domain.Report, error) {
 	rep.Sufficient = true
 	rep.Comparisons = b.compare(labeled, decisions)
 	return rep, nil
+}
+
+// outcomeKey identifies an outcome for deduplication: signalId when
+// present, otherwise the decisionId.
+func outcomeKey(o domain.Outcome) string {
+	if o.SignalID != "" {
+		return "sig:" + o.SignalID
+	}
+	return "dec:" + o.DecisionID
+}
+
+// dedupOutcomes keeps the last outcome.labeled event per signalId,
+// preserving first-to-last order of the surviving events.
+func dedupOutcomes(outcomes []domain.Outcome) []domain.Outcome {
+	lastIdx := make(map[string]int, len(outcomes))
+	for i, o := range outcomes {
+		lastIdx[outcomeKey(o)] = i
+	}
+	uniq := make([]domain.Outcome, 0, len(lastIdx))
+	for i, o := range outcomes {
+		if lastIdx[outcomeKey(o)] == i {
+			uniq = append(uniq, o)
+		}
+	}
+	return uniq
 }
 
 // compare derives shadow-mode comparison statistics. Money uses Decimal

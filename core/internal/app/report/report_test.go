@@ -436,3 +436,80 @@ func TestNewNilJournal(t *testing.T) {
 		t.Fatalf("New(nil journal) = nil error, want an error")
 	}
 }
+
+func TestBuildDuplicateEvents(t *testing.T) {
+	jr := seedFour(t)
+	ctx := context.Background()
+	// Exact duplicate verdict and response events for dec-1 (replays):
+	// unique-decision tallies must leave counts, cost and latency unchanged.
+	dup := []domain.Event{
+		{Kind: domain.EventGateVerdict, DecisionID: "dec-1", Payload: verdictPayload(t, domain.VerdictAllow)},
+		{Kind: domain.EventDecisionResponse, DecisionID: "dec-1", Payload: responsePayload(t, "alpha", "0.010", 100, func() *float64 { v := 0.75; return &v }())},
+	}
+	for _, ev := range dup {
+		if _, err := jr.Append(ctx, ev); err != nil {
+			t.Fatalf("append duplicate: %v", err)
+		}
+	}
+	b, err := New(jr, testDeps(), Config{MinLabeled: 3})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	rep, err := b.Build(ctx)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if rep.LabeledCount != 4 {
+		t.Fatalf("LabeledCount = %d, want 4", rep.LabeledCount)
+	}
+	if rep.VerdictCounts["ALLOW"] != 2 || rep.VerdictCounts["REJECT"] != 2 {
+		t.Fatalf("VerdictCounts = %v, want ALLOW=2 REJECT=2", rep.VerdictCounts)
+	}
+	if got := rep.DecisionCostUSD.String(); got != "0.100" {
+		t.Fatalf("DecisionCostUSD = %q, want 0.100", got)
+	}
+	if rep.LatencyP50MS != 200 || rep.LatencyP95MS != 400 {
+		t.Fatalf("latency p50/p95 = %d/%d, want 200/400", rep.LatencyP50MS, rep.LatencyP95MS)
+	}
+	if !rep.Sufficient || rep.Comparisons == nil {
+		t.Fatalf("Sufficient/Comparisons = %v/%v, want true/populated", rep.Sufficient, rep.Comparisons != nil)
+	}
+	if got := rep.Comparisons.AllEntriesReturn.String(); got != "0.02" {
+		t.Fatalf("AllEntriesReturn = %q, want 0.02", got)
+	}
+}
+
+func TestBuildDuplicateOutcome(t *testing.T) {
+	jr := seedFour(t)
+	ctx := context.Background()
+	// Exact duplicate of the sig-2 outcome: last-per-signalId dedup keeps
+	// LabeledCount and all sums unchanged.
+	dup := domain.Event{
+		Kind:       domain.EventOutcomeLabeled,
+		DecisionID: "dec-2",
+		Payload:    outcomePayload(t, "sig-2", "dec-2", "-0.02"),
+	}
+	if _, err := jr.Append(ctx, dup); err != nil {
+		t.Fatalf("append duplicate outcome: %v", err)
+	}
+	b, err := New(jr, testDeps(), Config{MinLabeled: 3})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	rep, err := b.Build(ctx)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if rep.LabeledCount != 4 {
+		t.Fatalf("LabeledCount = %d, want 4", rep.LabeledCount)
+	}
+	if rep.Comparisons == nil {
+		t.Fatalf("Comparisons is nil, want populated")
+	}
+	if got := rep.Comparisons.AllEntriesReturn.String(); got != "0.02" {
+		t.Fatalf("AllEntriesReturn = %q, want 0.02", got)
+	}
+	if got := rep.Comparisons.AllowReturn.String(); got != "0.03" {
+		t.Fatalf("AllowReturn = %q, want 0.03", got)
+	}
+}
