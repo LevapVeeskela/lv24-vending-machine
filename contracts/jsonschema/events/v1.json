@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lv24.io/contracts/jsonschema/events/v1.json",
+  "title": "Event",
+  "description": "Journal event envelope per 06-risk-execution.md section 11.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["seq", "eventId", "kind", "ts", "schemaVersion", "payload", "codeVersion", "prevHash", "hash"],
+  "properties": {
+    "seq": { "type": "integer", "minimum": 0 },
+    "eventId": { "type": "string", "minLength": 1 },
+    "kind": { "type": "string", "minLength": 1 },
+    "ts": {
+      "description": "See common $defs/Timestamp. Inlined so the generated Go field is time.Time.",
+      "type": "string",
+      "format": "date-time"
+    },
+    "schemaVersion": { "type": "integer", "minimum": 1 },
+    "payload": { "type": "object" },
+    "codeVersion": { "type": "string", "minLength": 1 },
+    "prevHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "runId": { "type": "string" },
+    "decisionId": { "type": "string" },
+    "policyHash": { "type": "string" },
+    "snapshotHash": { "type": "string" }
+  }
+}

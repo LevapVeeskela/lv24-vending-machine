@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lv24.io/contracts/jsonschema/decision/v1.json",
+  "title": "DecisionRequest",
+  "description": "Request to an advisory decision vendor (LLM).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["model", "questions"],
+  "properties": {
+    "model": { "type": "string", "minLength": 1 },
+    "state": {
+      "description": "Arbitrary numeric/categorical market features. The only object allowing additional properties.",
+      "type": "object",
+      "additionalProperties": true
+    },
+    "questions": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/Question" }
+    }
+  },
+  "$defs": {
+    "Question": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "type": { "enum": ["choice", "noul", "score"] },
+        "instructions": { "type": "string" },
+        "criteria": { "type": "string" },
+        "options": {
+          "description": "Required for type=choice: ordered option list, order is significant.",
+          "type": "array",
+          "minItems": 2,
+          "items": { "$ref": "#/$defs/Option" }
+        }
+      }
+    },
+    "Option": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "description"],
+      "properties": {
+        "key": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" }
+      }
+    },
+    "DecisionResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["answers", "model", "requestedModel"],
+      "properties": {
+        "answers": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": { "$ref": "#/$defs/Answer" }
+        },
+        "model": {
+          "description": "Actual model from the vendor response.",
+          "type": "string",
+          "minLength": 1
+        },
+        "requestedModel": {
+          "description": "Model that was requested.",
+          "type": "string",
+          "minLength": 1
+        },
+        "usage": { "$ref": "#/$defs/Usage" },
+        "requestId": { "type": "string" }
+      }
+    },
+    "Answer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": { "enum": ["choice", "noul", "score"] },
+        "choice": { "type": "string" },
+        "noul": { "type": "number", "minimum": 0, "maximum": 1 },
+        "score": { "type": "number" },
+        "legend": { "type": "array", "items": { "type": "string" } },
+        "probabilities": {
+          "type": "object",
+          "additionalProperties": { "type": "number", "minimum": 0, "maximum": 1 }
+        },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "Usage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["inputTokens", "outputTokens"],
+      "properties": {
+        "inputTokens": { "type": "integer", "minimum": 0 },
+        "outputTokens": { "type": "integer", "minimum": 0 },
+        "costUsd": { "$ref": "../common/v1.json#/$defs/Decimal" }
+      }
+    }
+  }
+}

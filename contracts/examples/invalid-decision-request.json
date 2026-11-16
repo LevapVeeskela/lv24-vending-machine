@@ -1,0 +1,12 @@
+{
+  "questions": [
+    {
+      "id": "direction",
+      "type": "choice",
+      "options": [
+        { "key": "long", "description": "Open or hold a long position" },
+        { "key": "flat", "description": "Stay out of the market" }
+      ]
+    }
+  ]
+}

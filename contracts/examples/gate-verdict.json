@@ -1,0 +1,13 @@
+{
+  "verdict": "ALLOW",
+  "code": "OK",
+  "reasons": ["within daily loss limit"],
+  "checks": [
+    { "name": "loss-limit", "passed": true, "detail": "used 0.2R of 2R" },
+    { "name": "kill-switch", "passed": true }
+  ],
+  "decisionId": "dec-001",
+  "model": "dre-x-1",
+  "policyHash": "policy-v3",
+  "decidedAt": "2026-11-16T06:00:01Z"
+}

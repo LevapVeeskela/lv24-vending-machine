@@ -1,0 +1,11 @@
+{
+  "seq": 1,
+  "eventId": "not-an-event",
+  "kind": "run.started",
+  "ts": "2026-11-16T06:00:00Z",
+  "schemaVersion": 1,
+  "payload": {},
+  "codeVersion": "v0.0.0-m0",
+  "prevHash": "0000000000000000000000000000000000000000000000000000000000000000",
+  "hash": "zzz-not-hex"
+}

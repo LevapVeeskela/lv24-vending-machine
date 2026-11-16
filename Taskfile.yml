@@ -4,9 +4,8 @@ version: '3'
 tasks:
   gen:
     desc: Generate Go types from JSON Schema (runs from tools/ with relative paths)
-    # TODO P2: replace --help with real go-jsonschema arguments writing to ../core/contracts/contracts.gen.go
     cmds:
-      - cd tools && go tool go-jsonschema --help
+      - cd tools && go tool go-jsonschema --tags json --capitalization ID --capitalization USD -p contracts -t -o ../core/contracts/contracts.gen.go ../contracts/jsonschema/common/v1.json ../contracts/jsonschema/decision/v1.json ../contracts/jsonschema/gate/v1.json ../contracts/jsonschema/events/v1.json
 
   gen:check:
     desc: Fail if generated contracts drift from committed files

@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lv24.io/contracts/jsonschema/common/v1.json",
+  "title": "InstrumentRef",
+  "description": "Reference to a trading instrument on a venue.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["venue", "symbol"],
+  "properties": {
+    "venue": { "type": "string", "minLength": 1 },
+    "symbol": { "type": "string", "minLength": 1 }
+  },
+  "$defs": {
+    "Decimal": {
+      "description": "Exact decimal amount as string. Never float64.",
+      "type": "string",
+      "pattern": "^-?[0-9]+(\\.[0-9]+)?$"
+    },
+    "Timestamp": {
+      "description": "RFC3339 date-time string.",
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

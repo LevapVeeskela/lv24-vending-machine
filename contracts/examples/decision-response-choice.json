@@ -1,0 +1,14 @@
+{
+  "answers": {
+    "direction": {
+      "type": "choice",
+      "choice": "long",
+      "probabilities": { "long": 0.6, "flat": 0.3, "short": 0.1 },
+      "confidence": 0.6
+    }
+  },
+  "model": "dre-x-1",
+  "requestedModel": "dre-x-1",
+  "usage": { "inputTokens": 120, "outputTokens": 40, "costUsd": "0.0012" },
+  "requestId": "req-001"
+}
