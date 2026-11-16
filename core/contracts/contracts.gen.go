@@ -1155,8 +1155,16 @@ type Outcome struct {
 	// DecisionID corresponds to the JSON schema field "decisionId".
 	DecisionID *string `json:"decisionId,omitempty,omitzero"`
 
+	// Delay between the signal timestamp and the actual entry bar open, in
+	// milliseconds.
+	EntryLagMs *int `json:"entryLagMs,omitempty,omitzero"`
+
 	// EntryPrice corresponds to the JSON schema field "entryPrice".
 	EntryPrice Decimal `json:"entryPrice"`
+
+	// True when the entry bar was moved forward because the configured entry bar was
+	// not usable.
+	EntryShifted *bool `json:"entryShifted,omitempty,omitzero"`
 
 	// See common $defs/Timestamp. Inlined so the generated Go field is time.Time.
 	EntryTs time.Time `json:"entryTs"`
@@ -1239,6 +1247,48 @@ func (j *OutcomeSide) UnmarshalJSON(value []byte) error {
 	return nil
 }
 
+// Payload of outcome.unlabelable: a signal that produced no Outcome.
+type OutcomeUnlabelable struct {
+	// Empty when the signal never reached a decision.
+	DecisionID string `json:"decisionId"`
+
+	// Reason corresponds to the JSON schema field "reason".
+	Reason string `json:"reason"`
+
+	// SignalID corresponds to the JSON schema field "signalId".
+	SignalID string `json:"signalId"`
+}
+
+// UnmarshalJSON implements json.Unmarshaler.
+func (j *OutcomeUnlabelable) UnmarshalJSON(value []byte) error {
+	var raw map[string]interface{}
+	if err := json.Unmarshal(value, &raw); err != nil {
+		return err
+	}
+	if _, ok := raw["decisionId"]; raw != nil && !ok {
+		return fmt.Errorf("field decisionId in OutcomeUnlabelable: required")
+	}
+	if _, ok := raw["reason"]; raw != nil && !ok {
+		return fmt.Errorf("field reason in OutcomeUnlabelable: required")
+	}
+	if _, ok := raw["signalId"]; raw != nil && !ok {
+		return fmt.Errorf("field signalId in OutcomeUnlabelable: required")
+	}
+	type Plain OutcomeUnlabelable
+	var plain Plain
+	if err := json.Unmarshal(value, &plain); err != nil {
+		return err
+	}
+	if utf8.RuneCountInString(string(plain.Reason)) < 1 {
+		return fmt.Errorf("field %s length: must be >= %d", "reason", 1)
+	}
+	if utf8.RuneCountInString(string(plain.SignalID)) < 1 {
+		return fmt.Errorf("field %s length: must be >= %d", "signalId", 1)
+	}
+	*j = OutcomeUnlabelable(plain)
+	return nil
+}
+
 // UnmarshalJSON implements json.Unmarshaler.
 func (j *Outcome) UnmarshalJSON(value []byte) error {
 	var raw map[string]interface{}
@@ -1300,6 +1350,9 @@ func (j *Outcome) UnmarshalJSON(value []byte) error {
 	}
 	if matched, _ := regexp.MatchString(`^[0-9a-f]{64}$`, string(plain.CandlesHash)); !matched {
 		return fmt.Errorf("field %s pattern match: must match %s", "CandlesHash", `^[0-9a-f]{64}$`)
+	}
+	if plain.EntryLagMs != nil && 0 > *plain.EntryLagMs {
+		return fmt.Errorf("field %s: must be >= %v", "entryLagMs", 0)
 	}
 	if 0 > plain.FeeBps {
 		return fmt.Errorf("field %s: must be >= %v", "feeBps", 0)
@@ -1484,6 +1537,10 @@ type Report struct {
 	// LatencyP95Ms corresponds to the JSON schema field "latencyP95Ms".
 	LatencyP95Ms int `json:"latencyP95Ms"`
 
+	// Number of labeled outcomes produced with a different horizon/fee pair than the
+	// report assumptions.
+	OtherLabelParams *int `json:"otherLabelParams,omitempty,omitzero"`
+
 	// OtherPolicyDecisions corresponds to the JSON schema field
 	// "otherPolicyDecisions".
 	OtherPolicyDecisions *int `json:"otherPolicyDecisions,omitempty,omitzero"`
@@ -1499,6 +1556,15 @@ type Report struct {
 }
 
 type ReportAssumptions struct {
+	// Median entry lag as a fraction of one bar.
+	EntryLagMedian *float64 `json:"entryLagMedian,omitempty,omitzero"`
+
+	// 95th percentile entry lag as a fraction of one bar.
+	EntryLagP95 *float64 `json:"entryLagP95,omitempty,omitzero"`
+
+	// Number of labeled outcomes whose entry bar was shifted.
+	EntryShifted *int `json:"entryShifted,omitempty,omitzero"`
+
 	// EqualSize corresponds to the JSON schema field "equalSize".
 	EqualSize bool `json:"equalSize"`
 
@@ -1546,6 +1612,21 @@ func (j *ReportAssumptions) UnmarshalJSON(value []byte) error {
 	var plain Plain
 	if err := json.Unmarshal(value, &plain); err != nil {
 		return err
+	}
+	if plain.EntryLagMedian != nil && 1 < *plain.EntryLagMedian {
+		return fmt.Errorf("field %s: must be <= %v", "entryLagMedian", 1)
+	}
+	if plain.EntryLagMedian != nil && 0 > *plain.EntryLagMedian {
+		return fmt.Errorf("field %s: must be >= %v", "entryLagMedian", 0)
+	}
+	if plain.EntryLagP95 != nil && 1 < *plain.EntryLagP95 {
+		return fmt.Errorf("field %s: must be <= %v", "entryLagP95", 1)
+	}
+	if plain.EntryLagP95 != nil && 0 > *plain.EntryLagP95 {
+		return fmt.Errorf("field %s: must be >= %v", "entryLagP95", 0)
+	}
+	if plain.EntryShifted != nil && 0 > *plain.EntryShifted {
+		return fmt.Errorf("field %s: must be >= %v", "entryShifted", 0)
 	}
 	*j = ReportAssumptions(plain)
 	return nil
@@ -1714,6 +1795,9 @@ func (j *Report) UnmarshalJSON(value []byte) error {
 	}
 	if 0 > plain.LatencyP95Ms {
 		return fmt.Errorf("field %s: must be >= %v", "latencyP95Ms", 0)
+	}
+	if plain.OtherLabelParams != nil && 0 > *plain.OtherLabelParams {
+		return fmt.Errorf("field %s: must be >= %v", "otherLabelParams", 0)
 	}
 	if plain.OtherPolicyDecisions != nil && 0 > *plain.OtherPolicyDecisions {
 		return fmt.Errorf("field %s: must be >= %v", "otherPolicyDecisions", 0)

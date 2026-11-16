@@ -22,6 +22,7 @@ func TestContractExamples(t *testing.T) {
 		"gate-verdict.json":             func() any { return &GateVerdict{} },
 		"gate-verdict-response.json":    func() any { return &GateVerdictResponse{} },
 		"outcome.json":                  func() any { return &Outcome{} },
+		"outcome-unlabelable.json":      func() any { return &OutcomeUnlabelable{} },
 		"report.json":                   func() any { return &Report{} },
 		"event.json":                    func() any { return &Event{} },
 		"arena-decision.json":           func() any { return &ArenaDecision{} },
@@ -39,6 +40,8 @@ func TestContractExamples(t *testing.T) {
 		"invalid-model-changed.json": func() any { return &DecisionModelChanged{} },
 		// invalid-outcome.json: "side" outside buy|sell enum.
 		"invalid-outcome.json": func() any { return &Outcome{} },
+		// invalid-outcome-unlabelable.json: empty "reason" violates minLength 1.
+		"invalid-outcome-unlabelable.json": func() any { return &OutcomeUnlabelable{} },
 		// invalid-report.json: "brier" above maximum 1.
 		"invalid-report.json": func() any { return &Report{} },
 		// invalid-gate-request.json: "side" outside buy|sell enum.

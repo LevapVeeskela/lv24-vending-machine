@@ -14,7 +14,18 @@ const (
 	EventDecisionModelChanged = "decision.model_changed"
 	EventArenaDecision        = "arena.decision"
 	EventNotifySent           = "notify.sent"
+	// EventOutcomeUnlabelable records a signal that could not be labeled.
+	EventOutcomeUnlabelable = "outcome.unlabelable"
 )
+
+// OutcomeUnlabelable is the payload of EventOutcomeUnlabelable: the reason a
+// signal produced no Outcome. DecisionID may be empty when the signal never
+// reached a decision.
+type OutcomeUnlabelable struct {
+	SignalID   string `json:"signalId"`
+	DecisionID string `json:"decisionId"`
+	Reason     string `json:"reason"`
+}
 
 // EventSchemaVersion is the current journal payload schema version.
 const EventSchemaVersion = 1

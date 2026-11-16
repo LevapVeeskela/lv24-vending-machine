@@ -80,6 +80,20 @@
         "channel": { "type": "string", "minLength": 1 },
         "ok": { "type": "boolean" }
       }
+    },
+    "OutcomeUnlabelable": {
+      "description": "Payload of outcome.unlabelable: a signal that produced no Outcome.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["signalId", "decisionId", "reason"],
+      "properties": {
+        "signalId": { "type": "string", "minLength": 1 },
+        "decisionId": {
+          "description": "Empty when the signal never reached a decision.",
+          "type": "string"
+        },
+        "reason": { "type": "string", "minLength": 1 }
+      }
     }
   }
 }

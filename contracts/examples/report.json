@@ -6,6 +6,18 @@
   "decisionCostUsd": "0.0003024",
   "latencyP50Ms": 11,
   "latencyP95Ms": 38,
+  "otherLabelParams": 2,
+  "assumptions": {
+    "horizonBars": 12,
+    "feeBpsRoundTrip": 20,
+    "priceSource": "marketdata-binance",
+    "equalSize": true,
+    "noSlippage": true,
+    "noFunding": true,
+    "entryLagMedian": 0.02,
+    "entryLagP95": 0.25,
+    "entryShifted": 1
+  },
   "comparisons": {
     "allEntriesReturn": "0.012400",
     "allowReturn": "0.018200",

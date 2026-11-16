@@ -71,6 +71,7 @@ type SignalsConfig struct {
 // TrendConfig tunes the built-in trend signal source.
 type TrendConfig struct {
 	Enabled   bool     `json:"enabled"`
+	Venue     string   `json:"venue"`
 	Symbols   []string `json:"symbols"`
 	Timeframe string   `json:"timeframe"`
 	Fast      int      `json:"fast"`
@@ -149,7 +150,8 @@ func Default() Config {
 		Signals: SignalsConfig{
 			Trend: TrendConfig{
 				Enabled:   false,
-				Symbols:   nil,
+				Venue:     "binance",
+				Symbols:   []string{},
 				Timeframe: "1h",
 				Fast:      12,
 				Slow:      26,
@@ -249,6 +251,9 @@ func (c Config) Validate() error {
 		}
 	}
 	if tr := c.Signals.Trend; tr.Enabled {
+		if strings.TrimSpace(tr.Venue) == "" {
+			return invalid("signals.trend.venue must not be empty")
+		}
 		if len(tr.Symbols) == 0 {
 			return invalid("signals.trend.symbols must not be empty")
 		}

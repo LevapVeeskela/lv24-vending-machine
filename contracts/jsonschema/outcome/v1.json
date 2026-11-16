@@ -62,6 +62,15 @@
     "priceSource": {
       "description": "Candle provider id used for labeling.",
       "type": "string"
+    },
+    "entryLagMs": {
+      "description": "Delay between the signal timestamp and the actual entry bar open, in milliseconds.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "entryShifted": {
+      "description": "True when the entry bar was moved forward because the configured entry bar was not usable.",
+      "type": "boolean"
     }
   }
 }

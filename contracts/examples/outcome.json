@@ -15,5 +15,7 @@
   "mfe": "0.009100",
   "mae": "-0.002300",
   "candlesHash": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
-  "labeledAt": "2026-11-16T12:05:00Z"
+  "labeledAt": "2026-11-16T12:05:00Z",
+  "entryLagMs": 120000,
+  "entryShifted": false
 }

@@ -2,6 +2,7 @@ package config
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"testing"
 )
@@ -59,6 +60,11 @@ func TestValidateBad(t *testing.T) {
 		{"trendSymbols", func(c *Config) {
 			c.Signals.Trend.Enabled = true
 			c.Signals.Trend.Symbols = nil
+		}},
+		{"trendVenue", func(c *Config) {
+			c.Signals.Trend.Enabled = true
+			c.Signals.Trend.Venue = " "
+			c.Signals.Trend.Symbols = []string{"BTCUSDT"}
 		}},
 		{"trendSymbolEmpty", func(c *Config) {
 			c.Signals.Trend.Enabled = true
@@ -305,6 +311,12 @@ func TestSectionDefaults(t *testing.T) {
 	if tr.Enabled {
 		t.Fatalf("Signals.Trend.Enabled = true, want false")
 	}
+	if tr.Venue != "binance" {
+		t.Fatalf("Signals.Trend.Venue = %q, want binance", tr.Venue)
+	}
+	if tr.Symbols == nil || len(tr.Symbols) != 0 {
+		t.Fatalf("Signals.Trend.Symbols = %#v, want non-nil empty", tr.Symbols)
+	}
 	if tr.Timeframe != "1h" || tr.Fast != 12 || tr.Slow != 26 {
 		t.Fatalf("Trend defaults = %+v, want 1h/12/26", tr)
 	}
@@ -313,6 +325,37 @@ func TestSectionDefaults(t *testing.T) {
 	}
 	if c.Arena.Enabled {
 		t.Fatalf("Arena.Enabled = true, want false")
+	}
+}
+
+func TestTrendSymbolsMarshalEmpty(t *testing.T) {
+	raw, err := json.Marshal(Default())
+	if err != nil {
+		t.Fatalf("Marshal() = %v", err)
+	}
+	var doc struct {
+		Signals struct {
+			Trend struct {
+				Venue   string          `json:"venue"`
+				Symbols json.RawMessage `json:"symbols"`
+			} `json:"trend"`
+		} `json:"signals"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("Unmarshal() = %v", err)
+	}
+	if got := string(doc.Signals.Trend.Symbols); got != "[]" {
+		t.Fatalf("signals.trend.symbols = %s, want []", got)
+	}
+	if got := doc.Signals.Trend.Venue; got != "binance" {
+		t.Fatalf("signals.trend.venue = %q, want binance", got)
+	}
+	v, err := Default().Get("signals.trend.venue")
+	if err != nil {
+		t.Fatalf("Get(signals.trend.venue) = %v", err)
+	}
+	if s, ok := v.(string); !ok || s != "binance" {
+		t.Fatalf("Get(signals.trend.venue) = %v (%T)", v, v)
 	}
 }
 

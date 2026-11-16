@@ -176,26 +176,28 @@ func TestParityEvent(t *testing.T) {
 
 func TestParityOutcome(t *testing.T) {
 	d := domain.Outcome{
-		SignalID:    "sig-001",
-		DecisionID:  parityULID,
-		Instrument:  domain.Instrument{Venue: "binance", Symbol: "BTCUSDT"},
-		Side:        domain.SideBuy,
-		Timeframe:   "1h",
-		EntryTS:     parityTS,
-		EntryPrice:  domain.MustParseDecimal("97500.50"),
-		ExitTS:      parityTS.Add(6 * time.Hour),
-		ExitPrice:   domain.MustParseDecimal("98200.75"),
-		HorizonBars: 6,
-		FeeBps:      5,
-		GrossReturn: domain.MustParseDecimal("0.007184"),
-		NetReturn:   domain.MustParseDecimal("0.006684"),
-		MFE:         domain.MustParseDecimal("0.009100"),
-		MAE:         domain.MustParseDecimal("-0.002300"),
-		CandlesHash: parityHash,
-		LabeledAt:   parityTS.Add(6*time.Hour + 5*time.Minute),
-		ReceivedAt:  parityTS,
-		Backfill:    true,
-		PriceSource: "marketdata-binance",
+		SignalID:     "sig-001",
+		DecisionID:   parityULID,
+		Instrument:   domain.Instrument{Venue: "binance", Symbol: "BTCUSDT"},
+		Side:         domain.SideBuy,
+		Timeframe:    "1h",
+		EntryTS:      parityTS,
+		EntryPrice:   domain.MustParseDecimal("97500.50"),
+		ExitTS:       parityTS.Add(6 * time.Hour),
+		ExitPrice:    domain.MustParseDecimal("98200.75"),
+		HorizonBars:  6,
+		FeeBps:       5,
+		GrossReturn:  domain.MustParseDecimal("0.007184"),
+		NetReturn:    domain.MustParseDecimal("0.006684"),
+		MFE:          domain.MustParseDecimal("0.009100"),
+		MAE:          domain.MustParseDecimal("-0.002300"),
+		CandlesHash:  parityHash,
+		LabeledAt:    parityTS.Add(6*time.Hour + 5*time.Minute),
+		ReceivedAt:   parityTS,
+		Backfill:     true,
+		PriceSource:  "marketdata-binance",
+		EntryLagMS:   120000,
+		EntryShifted: true,
 	}
 	var c Outcome
 	if err := json.Unmarshal(mustWire(t, d), &c); err != nil {
@@ -222,6 +224,12 @@ func TestParityOutcome(t *testing.T) {
 	if c.PriceSource == nil || *c.PriceSource != "marketdata-binance" {
 		t.Fatalf("priceSource lost on the wire: %+v", c)
 	}
+	if c.EntryLagMs == nil || *c.EntryLagMs != 120000 {
+		t.Fatalf("entryLagMs lost on the wire: %+v", c)
+	}
+	if c.EntryShifted == nil || !*c.EntryShifted {
+		t.Fatalf("entryShifted lost on the wire: %+v", c)
+	}
 
 	var back domain.Outcome
 	if err := json.Unmarshal(mustWire(t, c), &back); err != nil {
@@ -236,6 +244,9 @@ func TestParityOutcome(t *testing.T) {
 	if !back.ReceivedAt.Equal(parityTS) || !back.Backfill || back.PriceSource != "marketdata-binance" {
 		t.Fatalf("reverse wire fields mismatch: %+v", back)
 	}
+	if back.EntryLagMS != 120000 || !back.EntryShifted {
+		t.Fatalf("reverse entry lag mismatch: %+v", back)
+	}
 }
 
 func TestParityReport(t *testing.T) {
@@ -249,6 +260,7 @@ func TestParityReport(t *testing.T) {
 		LatencyP95MS:         38,
 		PolicyHash:           parityPolicy,
 		OtherPolicyDecisions: 3,
+		OtherLabelParams:     2,
 		BackfillLabeled:      5,
 		BackfillExcluded:     2,
 		Assumptions: &domain.ReportAssumptions{
@@ -258,6 +270,9 @@ func TestParityReport(t *testing.T) {
 			EqualSize:       true,
 			NoSlippage:      true,
 			NoFunding:       true,
+			EntryLagMedian:  0.02,
+			EntryLagP95:     0.25,
+			EntryShifted:    1,
 		},
 		Arena: &domain.ArenaReport{
 			Decisions:      10,
@@ -379,8 +394,20 @@ func TestParityReport(t *testing.T) {
 	if c.BackfillExcluded == nil || *c.BackfillExcluded != 2 {
 		t.Fatalf("backfillExcluded lost on the wire: %+v", c)
 	}
+	if c.OtherLabelParams == nil || *c.OtherLabelParams != 2 {
+		t.Fatalf("otherLabelParams lost on the wire: %+v", c)
+	}
 	if c.Assumptions == nil || c.Assumptions.HorizonBars != 12 || c.Assumptions.FeeBpsRoundTrip != 20 {
 		t.Fatalf("assumptions lost on the wire: %+v", c.Assumptions)
+	}
+	if c.Assumptions.EntryLagMedian == nil || *c.Assumptions.EntryLagMedian != 0.02 {
+		t.Fatalf("entryLagMedian lost on the wire: %+v", c.Assumptions)
+	}
+	if c.Assumptions.EntryLagP95 == nil || *c.Assumptions.EntryLagP95 != 0.25 {
+		t.Fatalf("entryLagP95 lost on the wire: %+v", c.Assumptions)
+	}
+	if c.Assumptions.EntryShifted == nil || *c.Assumptions.EntryShifted != 1 {
+		t.Fatalf("entryShifted lost on the wire: %+v", c.Assumptions)
 	}
 	if c.Assumptions.PriceSource != "marketdata-binance" || !c.Assumptions.EqualSize || !c.Assumptions.NoSlippage || !c.Assumptions.NoFunding {
 		t.Fatalf("assumptions tail lost on the wire: %+v", c.Assumptions)
@@ -410,6 +437,9 @@ func TestParityReport(t *testing.T) {
 	}
 	if back.BackfillLabeled != 5 || back.BackfillExcluded != 2 {
 		t.Fatalf("reverse backfill mismatch: %+v", back)
+	}
+	if back.OtherLabelParams != 2 {
+		t.Fatalf("reverse otherLabelParams mismatch: %+v", back)
 	}
 	if back.Assumptions == nil || *back.Assumptions != *d.Assumptions {
 		t.Fatalf("reverse assumptions mismatch: %+v", back.Assumptions)
@@ -521,5 +551,42 @@ func TestParityNotifySent(t *testing.T) {
 	}
 	if back != c {
 		t.Fatalf("round-trip mismatch: %+v", back)
+	}
+}
+
+func TestParityOutcomeUnlabelable(t *testing.T) {
+	d := domain.OutcomeUnlabelable{
+		SignalID:   "sig-002",
+		DecisionID: parityULID,
+		Reason:     "entry bar has no trades for the signal symbol",
+	}
+	var c OutcomeUnlabelable
+	if err := json.Unmarshal(mustWire(t, d), &c); err != nil {
+		t.Fatalf("domain.OutcomeUnlabelable not wire-compatible: %v", err)
+	}
+	if c.SignalID != d.SignalID || c.DecisionID != parityULID || c.Reason != d.Reason {
+		t.Fatalf("round-trip mismatch: %+v", c)
+	}
+
+	var back domain.OutcomeUnlabelable
+	if err := json.Unmarshal(mustWire(t, c), &back); err != nil {
+		t.Fatalf("contracts.OutcomeUnlabelable not domain-compatible: %v", err)
+	}
+	if back != d {
+		t.Fatalf("reverse mismatch: %+v", back)
+	}
+
+	// decisionId is required on the wire but may be empty.
+	empty := domain.OutcomeUnlabelable{SignalID: "sig-003", Reason: "no decision recorded"}
+	var cEmpty OutcomeUnlabelable
+	if err := json.Unmarshal(mustWire(t, empty), &cEmpty); err != nil {
+		t.Fatalf("empty decisionId must be accepted: %v", err)
+	}
+	if cEmpty.DecisionID != "" || cEmpty.SignalID != "sig-003" {
+		t.Fatalf("empty decisionId mismatch: %+v", cEmpty)
+	}
+
+	if domain.EventOutcomeUnlabelable != "outcome.unlabelable" {
+		t.Fatalf("event kind = %q", domain.EventOutcomeUnlabelable)
 	}
 }

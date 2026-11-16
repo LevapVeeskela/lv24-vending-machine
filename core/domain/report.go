@@ -64,6 +64,12 @@ type ReportAssumptions struct {
 	EqualSize       bool   `json:"equalSize"`
 	NoSlippage      bool   `json:"noSlippage"`
 	NoFunding       bool   `json:"noFunding"`
+	// EntryLagMedian is the median entry lag as a fraction of one bar.
+	EntryLagMedian float64 `json:"entryLagMedian,omitempty"`
+	// EntryLagP95 is the 95th percentile entry lag as a fraction of one bar.
+	EntryLagP95 float64 `json:"entryLagP95,omitempty"`
+	// EntryShifted counts labeled outcomes whose entry bar was shifted.
+	EntryShifted int `json:"entryShifted,omitempty"`
 }
 
 // ArenaModelStats aggregates arena verdicts for one model.
@@ -94,8 +100,11 @@ type Report struct {
 	Comparisons          *ReportComparisons `json:"comparisons,omitempty"`
 	PolicyHash           string             `json:"policyHash,omitempty"`
 	OtherPolicyDecisions int                `json:"otherPolicyDecisions,omitempty"`
-	BackfillLabeled      int                `json:"backfillLabeled,omitempty"`
-	BackfillExcluded     int                `json:"backfillExcluded,omitempty"`
-	Assumptions          *ReportAssumptions `json:"assumptions,omitempty"`
-	Arena                *ArenaReport       `json:"arena,omitempty"`
+	// OtherLabelParams counts labeled outcomes produced with a different
+	// horizon/fee pair than the report assumptions.
+	OtherLabelParams int                `json:"otherLabelParams,omitempty"`
+	BackfillLabeled  int                `json:"backfillLabeled,omitempty"`
+	BackfillExcluded int                `json:"backfillExcluded,omitempty"`
+	Assumptions      *ReportAssumptions `json:"assumptions,omitempty"`
+	Arena            *ArenaReport       `json:"arena,omitempty"`
 }

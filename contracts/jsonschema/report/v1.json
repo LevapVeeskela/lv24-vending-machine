@@ -24,6 +24,11 @@
     "comparisons": { "$ref": "#/$defs/ReportComparisons" },
     "policyHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "otherPolicyDecisions": { "type": "integer", "minimum": 0 },
+    "otherLabelParams": {
+      "description": "Number of labeled outcomes produced with a different horizon/fee pair than the report assumptions.",
+      "type": "integer",
+      "minimum": 0
+    },
     "backfillLabeled": { "type": "integer", "minimum": 0 },
     "backfillExcluded": { "type": "integer", "minimum": 0 },
     "assumptions": { "$ref": "#/$defs/ReportAssumptions" },
@@ -118,7 +123,24 @@
         "priceSource": { "type": "string" },
         "equalSize": { "type": "boolean" },
         "noSlippage": { "type": "boolean" },
-        "noFunding": { "type": "boolean" }
+        "noFunding": { "type": "boolean" },
+        "entryLagMedian": {
+          "description": "Median entry lag as a fraction of one bar.",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "entryLagP95": {
+          "description": "95th percentile entry lag as a fraction of one bar.",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "entryShifted": {
+          "description": "Number of labeled outcomes whose entry bar was shifted.",
+          "type": "integer",
+          "minimum": 0
+        }
       }
     },
     "ArenaModelStats": {
