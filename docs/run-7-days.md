@@ -56,10 +56,10 @@ $env:VENDING_SECRET_CONN_LOCAL_APITOKEN = '<token>'
 
 ## 2. Перезагрузка и остановка
 
-Журнал и конфиг лежат в каталоге данных (`vending.db`, `shadow-status.json`).
-После перезагрузки или `Ctrl+C` достаточно снова задать переменные окружения и
-запустить `vend serve` с теми же `--config` / `--data-dir` (или теми же
-`VENDING_CONFIG_FILE` / `VENDING_DATA_DIR`).
+Журнал лежит в каталоге данных (`vending.db`, `shadow-status.json`), конфиг —
+отдельно (`vend config path`). После перезагрузки или `Ctrl+C` достаточно снова
+задать переменные окружения и запустить `vend serve` с теми же `--config` /
+`--data-dir` (или теми же `VENDING_CONFIG_FILE` / `VENDING_DATA_DIR`).
 
 - журнал продолжается с последнего события, цепочка не начинается заново;
 - `lastLabelAt` восстанавливается из последнего `outcome.labeled` при старте
