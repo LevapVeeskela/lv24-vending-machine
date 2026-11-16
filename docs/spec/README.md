@@ -19,12 +19,19 @@ CLI: `vend` · демон: `vendd` · стек: Go 1.27 · Tauri 2 + React 19 ·
 | 09 | [research](09-research.md) | карта open-source решений и что заимствуем |
 | 10 | [roadmap](10-roadmap.md) | этапы, критерии приёмки, риски |
 
-ADR: [0001 Go](adr/0001-go-core.md) · [0002 contract-first](adr/0002-contract-first.md) ·
-[0003 deterministic core](adr/0003-deterministic-core.md) ·
-[0004 provider registry](adr/0004-provider-registry.md) ·
-[0005 local-first](adr/0005-local-first.md) ·
-[0006 decision models](adr/0006-decision-models.md) ·
-[0007 license & stores](adr/0007-license-and-stores.md)
+ADR: [0001 Go](../adr/0001-go-core.md) · [0002 contract-first](../adr/0002-contract-first.md) ·
+[0003 deterministic core](../adr/0003-deterministic-core.md) ·
+[0004 provider registry](../adr/0004-provider-registry.md) ·
+[0005 local-first](../adr/0005-local-first.md) ·
+[0006 decision models](../adr/0006-decision-models.md) ·
+[0007 license & stores](../adr/0007-license-and-stores.md)
+
+Предложены ревью (proposed): [0008 wedge-first scope](../adr/0008-wedge-first-scope.md) ·
+[0009 BYOK и предмет продажи](../adr/0009-byok-and-what-we-sell.md) ·
+[0010 ограничения decision-моделей](../adr/0010-decision-model-guardrails.md)
+
+Ревью: [вердикт](../review/00-verdict.md) · [находки](../review/01-findings.md) ·
+[фичи](../review/02-features.md) · [план v0.2](../review/03-plan-v2.md)
 
 ## Ключевые решения (кратко)
 
@@ -65,5 +72,9 @@ vend serve            # desktop/web/mobile подключаются к этом�
 ## Статус
 
 - Ресёрч: 13 направлений, клоны и разборы в `ideas/` (вне репозитория; `ideas/INDEX.md`).
-- Спека: draft v0.1 (этот набор документов).
-- Код: не начат. Первый шаг — `contracts/` + скелет `core/` (см. `10-roadmap.md`).
+- Спека: draft v0.1; `00-vision.md` и `10-roadmap.md` — v0.2 по итогам скептического
+  ревью (ветка `review/skeptical-v1`, ждёт решения владельца). Документы 01–09
+  описывают целевую платформу; состав v1 сужен ADR-0008.
+- Известное расхождение: wire-пример в `04-providers.md §10` не совпадает с API
+  вендора — исправляется в M0 (ADR-0010).
+- Код: не начат. Первый шаг — интервью и клин M0 (см. `10-roadmap.md`).
