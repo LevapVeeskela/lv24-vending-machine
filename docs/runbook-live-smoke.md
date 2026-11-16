@@ -234,8 +234,9 @@ vend gate report
 assumptions: horizon=3 bars, fees=20 bps round-trip, price source=marketdata-binance, equal size, no slippage, no funding
 verdicts: ALLOW=<n> REJECT=<n> ABSTAIN=<n> SKIP=<n>
 labeled: <n>
-ожидают разметки: <n>
-без исхода по сроку: 0
+awaiting labeling: <n>
+no outcome by deadline: 0
+source rejected: 0
 policy: <12 hex>
 other policies: 0
 backfill: labeled=0 excluded=0
@@ -249,9 +250,12 @@ insufficient data: <n> labeled, need 100
   сигнал, поэтому `events` в статусе больше суммы вердиктов.
 - `labeled` — число меток, привязанных к решениям выбранной политики;
   `backfill` — поздние сигналы (по умолчанию только считаются, не сравниваются).
-- `ожидают разметки` — entry-сигналы без метки и без `outcome.unlabelable`;
-  `без исхода по сроку` — сигналы, для которых после 7 суток так и не нашлось
-  честного окна и записан `outcome.unlabelable` с причиной `timeout`.
+- `awaiting labeling` — entry-сигналы без метки и без `outcome.unlabelable`;
+  `no outcome by deadline` — сигналы, для которых после 7 суток так и не
+  нашлось честного окна и записан `outcome.unlabelable` с причиной `timeout`;
+  `source rejected` — сигналы, для которых источник отклонил запрос как
+  `invalid_request` (например, пары нет на Binance Spot) и записан
+  `outcome.unlabelable` с причиной `source_rejected`.
 - `decision cost` — сумма `usage.costUsd` уникальных решений;
   `latency p50/p95` — по `usage.latencyMs`.
 - `insufficient data` до 100 меток — **норма**, а не ошибка. Сравнения
@@ -276,12 +280,13 @@ vend gate report --share
 ```
 
 Печатает обезличенную сводку: версию, префикс policy (8 hex), число решений и
-UTC-дней, число меток, число ожидающих разметки и просроченных без исхода,
-счётчики вердиктов, метрики или `insufficient data`, допущения (горизонт,
-round-trip fee, entry lag median/p95 в долях бара и в секундах, entry shifted,
-equal size/no slippage/no funding) и ссылку на GitHub Discussions. В ней нет
-символов, площадок, цен, state, путей, идентификаторов и сумм доходности.
-Файл через `--out <file>` пишется с правами 0600.
+UTC-дней, число меток, число ожидающих разметки, просроченных без исхода и
+отклонённых источником (`awaiting labeling`, `no outcome by deadline`,
+`source rejected`), счётчики вердиктов, метрики или `insufficient data`,
+допущения (горизонт, round-trip fee, entry lag median/p95 в долях бара и в
+секундах, entry shifted, equal size/no slippage/no funding) и ссылку на GitHub
+Discussions. В ней нет символов, площадок, цен, state, путей, идентификаторов
+и сумм доходности. Файл через `--out <file>` пишется с правами 0600.
 
 ## Шаг 5. Что отправить на ревью
 
@@ -304,6 +309,96 @@ vend journal verify > verify.txt 2>&1
 Не отправляйте: конфиг, переменные окружения, `--save-raw` файл, `vending.db`,
 скриншоты с ключами. Если `doctor` или `serve` печатают путь/токен — вырежьте
 его.
+
+## Репетиция без сети (smokestub)
+
+`tools/smokestub` — локальная заглушка трёх провайдеров для репетиции этого
+runbook без ключей и сети. Она отвечает на `POST /v1/systemone` как
+decision-drex, отдаёт синтетические закрытые свечи BTCUSDT на `1m`, `5m`, `1h`
+по `GET /api/v3/klines` и подтверждает `sendMessage` Telegram. Заглушка не
+входит в `tools/release`, слушает только loopback и не должна использоваться
+вне репетиции.
+
+1. Запустите заглушку в отдельном терминале:
+
+   ```bash
+   go run ./tools/smokestub --addr 127.0.0.1:28471
+   ```
+
+   Другие адреса, кроме `127.0.0.1` и `::1`, отклоняются при старте.
+
+2. Вымышленные секреты и конфиг. Значения ниже — rehearsal-only строки, не
+   настоящие ключи:
+
+   ```bash
+   export VENDING_SECRET_CONN_DREX_APIKEY='rehearsal-only'
+   export VENDING_SECRET_CONN_TELEGRAM_BOTTOKEN='rehearsal-only'
+   export VENDING_SECRET_CONN_LOCAL_APITOKEN='rehearsal-only'
+   ```
+
+   Фрагмент конфига (остальные ключи — как создал `init`):
+
+   ```json
+   {
+     "mode": "shadow",
+     "outcome": { "horizonBars": 3, "feeBps": 10, "labelIntervalSec": 30 },
+     "providers": {
+       "decision": {
+         "id": "decision-drex",
+         "model": "drex-max-v1.1",
+         "profile": "drex",
+         "baseUrl": "http://127.0.0.1:28471",
+         "secretRef": "conn/drex/apiKey"
+       },
+       "marketdata": {
+         "id": "marketdata-binance",
+         "baseUrl": "http://127.0.0.1:28471"
+       }
+     },
+     "signals": {
+       "trend": {
+         "enabled": true,
+         "venue": "binance",
+         "symbols": ["BTCUSDT"],
+         "timeframe": "5m",
+         "fast": 12,
+         "slow": 26,
+         "sides": ["buy"]
+       }
+     },
+     "notify": {
+       "telegram": {
+         "enabled": true,
+         "chatId": "1000001",
+         "secretRef": "conn/telegram/botToken",
+         "baseUrl": "http://127.0.0.1:28471"
+       }
+     }
+   }
+   ```
+
+3. Пройдите те же шаги 1–5, что и для живой проверки: `vend config validate`,
+   `vend doctor --live --symbol BTCUSDT`, `vend serve --addr 127.0.0.1:8420`,
+   ручной `POST /v1/gate` с `timeframe: "1m"` и `price: "100000"`, затем через
+   5–6 минут `vend status --json`, `vend gate report`,
+   `vend gate report --share` и `vend journal verify`. Все пробы
+   `doctor --live` должны быть `ok`, а отчёт печатать `source rejected: 0`.
+
+4. Отработайте отказы (необязательно). Переключите HTTP-статусы ролей:
+
+   ```bash
+   curl -s "http://127.0.0.1:28471/ctl?decision=500&telegram=401"
+   ```
+
+   Новый ручной сигнал получит `ABSTAIN` с кодом `provider_unavailable`, а
+   Telegram — ошибку доставки. Верните роли в норму:
+
+   ```bash
+   curl -s "http://127.0.0.1:28471/ctl?decision=200&telegram=200"
+   ```
+
+   Заглушка не пишет в лог токен бота и текст сообщения: только адрес и
+   переключения `/ctl`.
 
 ## Если что-то не так
 
