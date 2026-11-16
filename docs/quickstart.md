@@ -202,9 +202,10 @@ Useful variants:
 
 `--share` prints aggregate counts, model quality metrics, assumptions and the
 entry-lag median/p95 (as a fraction of one bar) with the shifted-entry count
-only: no symbols, venues, prices, state, paths or identifiers. Publish it
-manually. `--share` cannot be combined with `--json`; `--out` requires
-`--share`.
+only: no symbols, venues, prices, state, paths or identifiers. The summary has
+`days` (the acceptance-time window) and `active days` (distinct UTC dates with
+at least one `gate.request`). Publish it manually. `--share` cannot be combined
+with `--json`; `--out` requires `--share`.
 
 ### 9. Status and integrity
 

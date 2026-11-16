@@ -236,6 +236,7 @@ vend gate report
 ```text
 assumptions: horizon=3 bars, fees=20 bps round-trip, price source=marketdata-binance, equal size, no slippage, no funding
 verdicts: ALLOW=<n> REJECT=<n> ABSTAIN=<n> SKIP=<n>
+window: days=<n> active=<n>
 labeled: <n>
 awaiting labeling: <n>
 no outcome by deadline: 0
@@ -251,6 +252,8 @@ insufficient data: <n> labeled, need 100
 - `verdicts` считает уникальные решения по последнему вердикту на `decisionId`;
   `gate.request`/`decision.response`/`gate.verdict` в журнале — по событию на
   сигнал, поэтому `events` в статусе больше суммы вердиктов.
+- `window` — `days` по времени приёма `gate.request` (UTC), а не по `ts` из
+  тела сигнала; `active` — число разных UTC-дат с хотя бы одним запросом.
 - `labeled` — число меток, привязанных к решениям выбранной политики;
   `backfill` — поздние сигналы (по умолчанию только считаются, не сравниваются).
 - `awaiting labeling` — entry-сигналы без метки и без `outcome.unlabelable`;
@@ -282,8 +285,9 @@ insufficient data: <n> labeled, need 100
 vend gate report --share
 ```
 
-Печатает обезличенную сводку: версию, префикс policy (8 hex), число решений и
-UTC-дней, число меток, число ожидающих разметки, просроченных без исхода и
+Печатает обезличенную сводку: версию, префикс policy (8 hex), число решений,
+`days` и `active days` по времени приёма `gate.request` в UTC, число меток,
+число ожидающих разметки, просроченных без исхода и
 отклонённых источником (`awaiting labeling`, `no outcome by deadline`,
 `source rejected`), счётчики вердиктов, метрики или `insufficient data`,
 допущения (горизонт, round-trip fee, entry lag median/p95 в долях бара и в
