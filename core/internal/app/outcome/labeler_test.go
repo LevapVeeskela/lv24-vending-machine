@@ -1001,6 +1001,36 @@ func TestCanonicalSymbolMatch(t *testing.T) {
 	}
 }
 
+// TestFuturesSymbolMatchesSpotCandles: a signal for the perpetual futures
+// pair BTC/USDT:USDT is labeled from the spot BTCUSDT candles, because the
+// core canonicalizes both to the same market.
+func TestFuturesSymbolMatchesSpotCandles(t *testing.T) {
+	jr := &memJournal{}
+	req := entryReq("sig-futures", domain.SideBuy)
+	req.Instrument.Symbol = "BTC/USDT:USDT"
+	seedRequest(t, jr, req, "dec-1")
+	cfg := testConfig()
+	cfg.HorizonBars = 1
+	lb, err := New(jr, &stubSource{candles: twoBars()}, testDeps(), cfg)
+	if err != nil {
+		t.Fatalf("New() = %v", err)
+	}
+	sum, err := lb.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run() = %v", err)
+	}
+	if sum != (Summary{Labeled: 1}) {
+		t.Fatalf("summary = %+v, want {Labeled:1}", sum)
+	}
+	oc := labeledOutcome(t, jr)
+	if oc.EntryPrice.String() != "100" || !oc.EntryTS.Equal(sigTS) {
+		t.Fatalf("entry = %q @ %v, want 100 @ %v", oc.EntryPrice.String(), oc.EntryTS, sigTS)
+	}
+	if oc.Instrument.Symbol != "BTC/USDT:USDT" {
+		t.Fatalf("instrument symbol = %q, want the request form BTC/USDT:USDT", oc.Instrument.Symbol)
+	}
+}
+
 // TestVerdictDecidedAtAnchor: the gate decided 40m after the signal, so the
 // 06:00 bar had already closed and the entry moves to the 07:00 bar.
 func TestVerdictDecidedAtAnchor(t *testing.T) {

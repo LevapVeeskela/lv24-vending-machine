@@ -75,9 +75,10 @@ func klinesOneRow(t *testing.T, w http.ResponseWriter) {
 }
 
 // TestCandlesNormalizesSymbol checks the accepted spellings are queried and
-// echoed back as BTCUSDT, while the interval is left untouched.
+// echoed back as BTCUSDT, while the interval is left untouched. The futures
+// spelling BTC/USDT:USDT resolves to the same spot market.
 func TestCandlesNormalizesSymbol(t *testing.T) {
-	for _, in := range []string{"BTCUSDT", "BTC/USDT", "BTC-USDT", "btcusdt", " btc/usdt "} {
+	for _, in := range []string{"BTCUSDT", "BTC/USDT", "BTC-USDT", "btcusdt", " btc/usdt ", "BTC/USDT:USDT"} {
 		t.Run(in, func(t *testing.T) {
 			var gotSymbol, gotInterval string
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
