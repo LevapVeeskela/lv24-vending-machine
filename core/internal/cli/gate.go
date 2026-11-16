@@ -168,12 +168,10 @@ func (r *runner) cmdGateTest(args []string) int {
 				"raw response unavailable, e.g. idempotent replay",
 				"omit --save-raw on replay or rerun with a new signalId", false, nil)
 		}
-		if werr := os.WriteFile(*saveRaw, res.Response.Raw, 0o600); werr != nil {
+		if werr := writeFileAtomic(*saveRaw, res.Response.Raw, 0o600); werr != nil {
 			return r.fail(jsonOut, exitGeneral, codeGeneral, werr.Error(),
 				"check the output path is writable and retry", false, nil)
 		}
-		// Best effort: an existing file must not keep wide permissions.
-		_ = os.Chmod(*saveRaw, 0o600)
 	}
 
 	if jsonOut {

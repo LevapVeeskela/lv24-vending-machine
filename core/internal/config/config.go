@@ -358,6 +358,10 @@ func Load(path string) (Config, error) {
 }
 
 // Save writes c as indented JSON, creating parent directories.
+//
+// The file is written to a temp file in the same directory and renamed into
+// place, so a concurrent reader never sees a truncated config; the result is
+// always 0600.
 func Save(path string, c Config) error {
 	raw, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
@@ -369,8 +373,48 @@ func Save(path string, c Config) error {
 			return fmt.Errorf("config: mkdir %s: %w", dir, err)
 		}
 	}
-	if err := os.WriteFile(path, raw, 0o600); err != nil {
+	if err := writeFileAtomic(path, raw, 0o600); err != nil {
 		return fmt.Errorf("config: write %s: %w", path, err)
+	}
+	return nil
+}
+
+// writeFileAtomic writes data to path through a temp file in the same
+// directory followed by a rename, so an interrupted save cannot leave a
+// partial config behind.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	if dir == "" {
+		dir = "."
+	}
+	f, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	discard := func() {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+	}
+	if err := f.Chmod(perm); err != nil {
+		discard()
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		discard()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		discard()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
 	}
 	return nil
 }

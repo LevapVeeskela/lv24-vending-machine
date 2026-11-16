@@ -13,6 +13,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -161,7 +162,7 @@ func (r *runner) usage() {
 	fmt.Fprintln(r.stderr, "  version [--json]")
 	fmt.Fprintln(r.stderr, "  init [--config FILE] [--data-dir DIR] [--force] [--json]")
 	fmt.Fprintln(r.stderr, "  config path|get KEY|validate [--config FILE] [--data-dir DIR] [--json]")
-	fmt.Fprintln(r.stderr, "  doctor [--config FILE] [--data-dir DIR] [--json]")
+	fmt.Fprintln(r.stderr, "  doctor [--live] [--symbol SYMBOL] [--save-raw FILE] [--config FILE] [--data-dir DIR] [--json]")
 	fmt.Fprintln(r.stderr, "  gate test --request FILE [--fixture FILE] [--save-raw FILE] [--config FILE] [--data-dir DIR] [--json]")
 	fmt.Fprintln(r.stderr, "  gate report [--json]")
 	fmt.Fprintln(r.stderr, "  journal verify [--config FILE] [--data-dir DIR] [--json]")
@@ -261,6 +262,47 @@ func (r *runner) newFlagSet(name string) *flag.FlagSet {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	fs.SetOutput(r.stderr)
 	return fs
+}
+
+// writeFileAtomic writes data to path through a temp file in the same
+// directory followed by a rename, so readers never observe a partial file
+// and an existing file is replaced with perm (0600 for secrets and raw
+// vendor bodies).
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	if dir == "" {
+		dir = "."
+	}
+	f, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	discard := func() {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+	}
+	if err := f.Chmod(perm); err != nil {
+		discard()
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		discard()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		discard()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 // resolvePaths applies flag > env > OS-default priority.

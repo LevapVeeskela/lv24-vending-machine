@@ -3,7 +3,9 @@ package config
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -174,6 +176,43 @@ func TestSaveLoadRoundtrip(t *testing.T) {
 func TestLoadMissing(t *testing.T) {
 	if _, err := Load(filepath.Join(t.TempDir(), "nope.json")); err == nil {
 		t.Fatalf("Load() = nil, want error")
+	}
+}
+
+func TestSaveAtomic(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "sub")
+	path := filepath.Join(dir, "config.json")
+	if err := Save(path, Default()); err != nil {
+		t.Fatalf("Save() = %v", err)
+	}
+	// A second save must replace the file in place, not add siblings.
+	cfg := Default()
+	cfg.Gate.MinPass = 0.7
+	if err := Save(path, cfg); err != nil {
+		t.Fatalf("Save() overwrite = %v", err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() = %v", err)
+	}
+	if got.Gate.MinPass != 0.7 {
+		t.Fatalf("minPass = %v, want 0.7", got.Gate.MinPass)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir() = %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "config.json" {
+		t.Fatalf("dir entries = %v, want only config.json (no temp leftovers)", entries)
+	}
+	if runtime.GOOS != "windows" {
+		st, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("Stat() = %v", err)
+		}
+		if perm := st.Mode().Perm(); perm != 0o600 {
+			t.Fatalf("config perm = %o, want 600", perm)
+		}
 	}
 }
 

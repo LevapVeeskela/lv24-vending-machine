@@ -435,6 +435,13 @@ func TestGateTestSaveRaw(t *testing.T) {
 	if err := json.Unmarshal(raw, &v); err != nil || len(v.Answers) != 4 {
 		t.Fatalf("saved raw = %q, err=%v", raw, err)
 	}
+	entries, err := os.ReadDir(filepath.Dir(rawPath))
+	if err != nil {
+		t.Fatalf("read raw dir: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "raw.json" {
+		t.Fatalf("raw dir entries = %v, want only raw.json (no temp leftovers)", entries)
+	}
 
 	// Idempotent replay has no response to save.
 	stdout.Reset()

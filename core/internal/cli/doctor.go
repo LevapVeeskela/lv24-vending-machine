@@ -2,36 +2,59 @@ package cli
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/LevapVeeskela/lv24-vending-machine/core/domain"
 	"github.com/LevapVeeskela/lv24-vending-machine/core/internal/config"
 	"github.com/LevapVeeskela/lv24-vending-machine/core/internal/gate"
+	"github.com/LevapVeeskela/lv24-vending-machine/core/internal/registry"
+	"github.com/LevapVeeskela/lv24-vending-machine/core/ports"
 )
 
+// Live probe bounds: one decision call, two candles and one Telegram
+// message, each under its own deadline.
+const (
+	doctorLiveTimeout  = 20 * time.Second
+	doctorLiveInterval = "1h"
+	doctorLiveCandles  = 2
+	doctorSymbol       = "BTCUSDT"
+)
+
+// docCheck is one doctor result. Live marks the opt-in network probes,
+// whose detail is "ok" (plus cost for the decision call) or an error code.
 type docCheck struct {
 	Name   string `json:"name"`
 	OK     bool   `json:"ok"`
 	Detail string `json:"detail"`
+	Live   bool   `json:"live,omitempty"`
 }
+
+const doctorUsage = "run vend doctor [--live] [--symbol SYMBOL] [--save-raw FILE] [--config FILE] [--data-dir DIR]"
 
 func (r *runner) cmdDoctor(args []string) int {
 	g, rest, gerr := splitGlobals(args)
 	if gerr != nil {
-		return r.fail(false, exitUsage, codeUsage, gerr.Error(),
-			"run vend doctor [--config FILE] [--data-dir DIR]", false, nil)
+		return r.fail(false, exitUsage, codeUsage, gerr.Error(), doctorUsage, false, nil)
 	}
 	jsonOut := g.json
 	fs := r.newFlagSet("doctor")
+	live := fs.Bool("live", false, "run opt-in network probes (decision, candles, telegram)")
+	symbol := fs.String("symbol", doctorSymbol, "symbol for the live candles probe")
+	saveRaw := fs.String("save-raw", "", "write the raw decision response to FILE (0600)")
 	if err := fs.Parse(rest); err != nil {
 		return exitUsage
 	}
 	if fs.NArg() > 0 {
 		return r.fail(jsonOut, exitUsage, codeUsage,
-			fmt.Sprintf("unexpected argument %q", fs.Arg(0)),
-			"run vend doctor [--config FILE] [--data-dir DIR]", false, nil)
+			fmt.Sprintf("unexpected argument %q", fs.Arg(0)), doctorUsage, false, nil)
+	}
+	if !*live && (strings.TrimSpace(*saveRaw) != "" || flagWasSet(fs, "symbol")) {
+		return r.fail(jsonOut, exitUsage, codeUsage,
+			"--symbol and --save-raw require --live", doctorUsage, false, nil)
 	}
 	cfgPath, dataDir, err := r.resolvePaths(g.config, g.dataDir)
 	if err != nil {
@@ -44,11 +67,13 @@ func (r *runner) cmdDoctor(args []string) int {
 	}
 
 	cfg, cfgErr := config.Load(cfgPath)
+	cfgValid := false
 	if cfgErr != nil {
 		add("config", false, fmt.Sprintf("cannot load %s: %v", cfgPath, firstLine(cfgErr)))
 	} else if verr := cfg.Validate(); verr != nil {
 		add("config", false, verr.Error())
 	} else {
+		cfgValid = true
 		add("config", true, cfgPath)
 	}
 
@@ -91,11 +116,13 @@ func (r *runner) cmdDoctor(args []string) int {
 		}
 	}
 
+	var reg *registry.Registry
 	if cfgErr != nil {
 		add("providers", false, "config is unavailable")
-	} else if reg, err := r.newRegistry(cfg, nil); err != nil {
+	} else if built, err := r.newRegistry(cfg, nil); err != nil {
 		add("providers", false, err.Error())
 	} else {
+		reg = built
 		var ids []string
 		for _, d := range reg.Descriptors() {
 			ids = append(ids, d.ID)
@@ -123,6 +150,10 @@ func (r *runner) cmdDoctor(args []string) int {
 		add("gate_policy", true, gate.PolicyHash(pol))
 	}
 
+	if *live {
+		checks = append(checks, r.liveChecks(cfg, cfgErr, cfgValid, reg, *symbol, *saveRaw)...)
+	}
+
 	ok := true
 	for _, c := range checks {
 		if !c.OK {
@@ -134,6 +165,10 @@ func (r *runner) cmdDoctor(args []string) int {
 		r.printJSON(map[string]any{"ok": ok, "checks": checks})
 	} else {
 		for _, c := range checks {
+			if c.Live {
+				fmt.Fprintf(r.stdout, "%s: %s\n", c.Name, c.Detail)
+				continue
+			}
 			status := "ok"
 			if !c.OK {
 				status = "FAIL"
@@ -145,6 +180,139 @@ func (r *runner) cmdDoctor(args []string) int {
 		return exitGeneral
 	}
 	return exitOK
+}
+
+// liveChecks runs the opt-in network probes: one decision call with the
+// frozen gate questions, two candles for symbol and, when enabled, one
+// Telegram message. Each check reports only "ok" or a domain error code;
+// tokens, URLs and response bodies are never printed.
+func (r *runner) liveChecks(cfg config.Config, cfgErr error, cfgValid bool,
+	reg *registry.Registry, symbol, saveRaw string,
+) []docCheck {
+	var out []docCheck
+	add := func(name string, ok bool, detail string) {
+		out = append(out, docCheck{Name: name, OK: ok, Detail: detail, Live: true})
+	}
+	if !cfgValid {
+		code := string(domain.CodeInvalidRequest)
+		if cfgErr != nil {
+			code = liveCode(cfgErr)
+		}
+		add("decision", false, code)
+		add("candles", false, code)
+		return out
+	}
+	if reg == nil {
+		code := string(domain.CodeUnavailable)
+		add("decision", false, code)
+		add("candles", false, code)
+		if cfg.Notify.Telegram.Enabled {
+			add("telegram", false, code)
+		}
+		return out
+	}
+	symbol = strings.TrimSpace(symbol)
+	if symbol == "" {
+		symbol = doctorSymbol
+	}
+
+	var raw []byte
+	if dec, err := reg.Decision(cfg.Providers.Decision.ID); err != nil {
+		add("decision", false, string(domain.CodeUnavailable))
+	} else {
+		ctx, cancel := context.WithTimeout(context.Background(), doctorLiveTimeout)
+		resp, derr := dec.Decide(ctx, domain.DecisionRequest{
+			Model:     cfg.Providers.Decision.Model,
+			State:     doctorExampleState(symbol),
+			Questions: gate.Questions(),
+			Timeout:   doctorLiveTimeout,
+		})
+		cancel()
+		if derr != nil {
+			add("decision", false, liveCode(derr))
+		} else {
+			raw = resp.Raw
+			add("decision", true, "ok cost="+resp.Usage.CostUSD.String()+" USD")
+		}
+	}
+	if strings.TrimSpace(saveRaw) != "" {
+		if len(raw) == 0 {
+			add("save_raw", false, string(domain.CodeUnavailable))
+		} else if werr := writeFileAtomic(saveRaw, raw, 0o600); werr != nil {
+			add("save_raw", false, string(domain.CodeUnavailable))
+		} else {
+			add("save_raw", true, "ok")
+		}
+	}
+
+	if cp, err := reg.Candle(cfg.Providers.MarketData.ID); err != nil {
+		add("candles", false, string(domain.CodeUnavailable))
+	} else {
+		ctx, cancel := context.WithTimeout(context.Background(), doctorLiveTimeout)
+		got, cerr := cp.Candles(ctx, domain.CandleRequest{
+			Symbol: symbol, Interval: doctorLiveInterval, Limit: doctorLiveCandles,
+		})
+		cancel()
+		switch {
+		case cerr != nil:
+			add("candles", false, liveCode(cerr))
+		case len(got) < doctorLiveCandles:
+			add("candles", false, string(domain.CodeInvalidOutput))
+		default:
+			add("candles", true, "ok")
+		}
+	}
+
+	if cfg.Notify.Telegram.Enabled {
+		nt, err := reg.Notifier("notify-telegram")
+		if err != nil {
+			add("telegram", false, string(domain.CodeUnavailable))
+		} else {
+			ctx, cancel := context.WithTimeout(context.Background(), doctorLiveTimeout)
+			serr := nt.Send(ctx, ports.Notification{
+				Kind: "doctor", Text: "vend doctor --live: test message",
+			})
+			cancel()
+			if serr != nil {
+				add("telegram", false, liveCode(serr))
+			} else {
+				add("telegram", true, "ok")
+			}
+		}
+	}
+	return out
+}
+
+// doctorExampleState is the fixed synthetic state sent by the live
+// decision probe; it carries no account data and no secrets.
+func doctorExampleState(symbol string) map[string]any {
+	return map[string]any{
+		"source":    "vend doctor --live",
+		"mode":      "probe",
+		"symbol":    symbol,
+		"timeframe": doctorLiveInterval,
+		"side":      "buy",
+		"price":     "100",
+	}
+}
+
+// liveCode maps an error to the short code a live check prints.
+func liveCode(err error) string {
+	if c := domain.CodeOf(err); c != domain.CodeUnknown {
+		return string(c)
+	}
+	return string(domain.CodeUnavailable)
+}
+
+// flagWasSet reports whether name was given explicitly on the command line.
+func flagWasSet(fs *flag.FlagSet, name string) bool {
+	set := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			set = true
+		}
+	})
+	return set
 }
 
 // probeWritable creates and removes a probe file inside dir.
