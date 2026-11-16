@@ -44,6 +44,18 @@ func TestValidateBad(t *testing.T) {
 			c.Notify.Telegram.Enabled = true
 			c.Notify.Telegram.ChatID = "123"
 		}},
+		{"tgBaseURLRemoteHTTP", func(c *Config) {
+			c.Notify.Telegram.Enabled = true
+			c.Notify.Telegram.ChatID = "123"
+			c.Notify.Telegram.SecretRef = "conn/tg/token"
+			c.Notify.Telegram.BaseURL = "http://api.telegram.org"
+		}},
+		{"tgBaseURLHTTPSBadHost", func(c *Config) {
+			c.Notify.Telegram.Enabled = true
+			c.Notify.Telegram.ChatID = "123"
+			c.Notify.Telegram.SecretRef = "conn/tg/token"
+			c.Notify.Telegram.BaseURL = "api.telegram.org"
+		}},
 		{"trendSymbols", func(c *Config) {
 			c.Signals.Trend.Enabled = true
 			c.Signals.Trend.Symbols = nil
@@ -324,6 +336,14 @@ func TestEnabledSectionsValid(t *testing.T) {
 	c.Signals.Trend.Symbols = []string{"BTCUSDT", "ETHUSDT"}
 	if err := c.Validate(); err != nil {
 		t.Fatalf("Validate() multi-symbol = %v", err)
+	}
+	c.Notify.Telegram.BaseURL = "http://127.0.0.1:8081"
+	if err := c.Validate(); err != nil {
+		t.Fatalf("Validate() loopback telegram baseUrl = %v", err)
+	}
+	c.Notify.Telegram.BaseURL = "https://api.telegram.org"
+	if err := c.Validate(); err != nil {
+		t.Fatalf("Validate() https telegram baseUrl = %v", err)
 	}
 }
 

@@ -58,6 +58,9 @@ type TelegramConfig struct {
 	Enabled   bool   `json:"enabled"`
 	ChatID    string `json:"chatId"`
 	SecretRef string `json:"secretRef"`
+	// BaseURL overrides the Bot API endpoint (fixtures, local proxies).
+	// Empty means the provider default.
+	BaseURL string `json:"baseUrl"`
 }
 
 // SignalsConfig holds local signal source settings.
@@ -240,6 +243,9 @@ func (c Config) Validate() error {
 		}
 		if strings.TrimSpace(tg.SecretRef) == "" {
 			return invalid("notify.telegram.secretRef must not be empty")
+		}
+		if strings.TrimSpace(tg.BaseURL) != "" && !isLoopbackHTTPURL(tg.BaseURL) {
+			return invalid("notify.telegram.baseUrl must be an https URL or a loopback http URL (127.0.0.1, ::1)")
 		}
 	}
 	if tr := c.Signals.Trend; tr.Enabled {

@@ -26,7 +26,7 @@ import (
 )
 
 // version is replaced at release time via ldflags (-X main.version=...).
-var version = "0.1.0-m0"
+var version = "0.1.0-m1"
 
 // arenaDecision pins a decision provider under the arena registry id while
 // keeping the wrapped provider's own identity for its outbound calls.
@@ -95,6 +95,7 @@ func newRegistry(cfg config.Config, logger *slog.Logger) (*registry.Registry, er
 		tg, err := notifytelegram.New(notifytelegram.Config{
 			ChatID:    cfg.Notify.Telegram.ChatID,
 			SecretRef: cfg.Notify.Telegram.SecretRef,
+			BaseURL:   cfg.Notify.Telegram.BaseURL,
 		}, ports.Deps{
 			Clock:   time.Now,
 			Logger:  logger,
