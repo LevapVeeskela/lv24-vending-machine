@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 	"time"
 
@@ -179,7 +178,13 @@ func printReportHuman(w io.Writer, rep domain.Report, days int) {
 	fmt.Fprintf(w, "brier: %.6f\n", c.Brier)
 	fmt.Fprintf(w, "base rate: %.6f\n", c.BaseRate)
 	fmt.Fprintf(w, "constant brier: %.6f\n", c.ConstantBrier)
-	fmt.Fprintf(w, "brier skill: %.6f\n", c.BrierSkillScore)
+	// A degenerate base rate makes the constant forecast perfect, so the
+	// skill score is undefined rather than zero.
+	if c.BaseRate <= 0 || c.BaseRate >= 1 {
+		fmt.Fprintf(w, "bss: n/a\n")
+	} else {
+		fmt.Fprintf(w, "bss: %.6f\n", c.BrierSkillScore)
+	}
 	fmt.Fprintf(w, "auc: %.6f\n", c.AUC)
 	fmt.Fprintf(w, "ece: %.6f\n", c.ECE)
 	fmt.Fprintf(w, "calibration pairs: %d\n", c.CalibrationCount)
@@ -224,12 +229,10 @@ func (r *runner) printShare(ctx context.Context, jr ports.Journal, rep domain.Re
 		fmt.Fprint(r.stdout, body)
 		return exitOK
 	}
-	if werr := os.WriteFile(path, []byte(body), 0o600); werr != nil {
+	if werr := writeFileAtomic(path, []byte(body), 0o600); werr != nil {
 		return r.fail(false, exitGeneral, codeGeneral, werr.Error(),
 			"check the output path is writable and retry", false, nil)
 	}
-	// Best effort: an existing file must not keep wide permissions.
-	_ = os.Chmod(path, 0o600)
 	fmt.Fprintf(r.stdout, "written to %s\n", path)
 	return exitOK
 }
@@ -326,9 +329,9 @@ func shareMarkdown(rep domain.Report, ver string, decisions, days int) string {
 	if a := rep.Assumptions; a != nil {
 		fmt.Fprintf(&b, "- horizon: %d bars\n", a.HorizonBars)
 		fmt.Fprintf(&b, "- round-trip fee: %d bps\n", a.FeeBpsRoundTrip)
-		if src := safePriceSource(a.PriceSource); src != "" {
-			fmt.Fprintf(&b, "- price source: %s\n", src)
-		}
+		fmt.Fprintf(&b, "- entry lag median: %.4f bars\n", a.EntryLagMedian)
+		fmt.Fprintf(&b, "- entry lag p95: %.4f bars\n", a.EntryLagP95)
+		fmt.Fprintf(&b, "- entry shifted: %d\n", a.EntryShifted)
 		fmt.Fprintf(&b, "- equal size, no slippage, no funding\n\n")
 	} else {
 		fmt.Fprintf(&b, "- no labeled outcomes yet\n\n")
@@ -353,21 +356,4 @@ func zeroWording(containsZero bool) string {
 		return "contains zero"
 	}
 	return "does not contain zero"
-}
-
-// safePriceSource returns s only when it is a plain provider id or "file".
-// Anything resembling a path, URL or free text is dropped.
-func safePriceSource(s string) string {
-	if s == "" || len(s) > 64 {
-		return ""
-	}
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		ok := (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
-			c == '.' || c == '_' || c == '-'
-		if !ok {
-			return ""
-		}
-	}
-	return s
 }

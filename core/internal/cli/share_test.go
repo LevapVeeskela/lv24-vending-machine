@@ -106,20 +106,22 @@ func seedShareReport(t *testing.T, env Env, dataDir string) {
 				Kind:       domain.EventOutcomeLabeled,
 				DecisionID: dec,
 				Payload: mustJSON(t, domain.Outcome{
-					SignalID:    sig,
-					DecisionID:  dec,
-					Instrument:  domain.Instrument{Venue: "CANARYVENUE", Symbol: "CANARYSYMBOL"},
-					Side:        domain.SideBuy,
-					Timeframe:   "1h",
-					EntryTS:     ts,
-					EntryPrice:  domain.MustParseDecimal("12345.67"),
-					ExitPrice:   domain.MustParseDecimal("12346.67"),
-					NetReturn:   domain.MustParseDecimal(net),
-					GrossReturn: domain.MustParseDecimal(net),
-					LabeledAt:   ts.Add(24 * time.Hour),
-					HorizonBars: 24,
-					FeeBps:      20,
-					PriceSource: `C:\CANARYPATH\candles.csv`,
+					SignalID:     sig,
+					DecisionID:   dec,
+					Instrument:   domain.Instrument{Venue: "CANARYVENUE", Symbol: "CANARYSYMBOL"},
+					Side:         domain.SideBuy,
+					Timeframe:    "1h",
+					EntryTS:      ts,
+					EntryPrice:   domain.MustParseDecimal("12345.67"),
+					ExitPrice:    domain.MustParseDecimal("12346.67"),
+					NetReturn:    domain.MustParseDecimal(net),
+					GrossReturn:  domain.MustParseDecimal(net),
+					LabeledAt:    ts.Add(24 * time.Hour),
+					HorizonBars:  24,
+					FeeBps:       20,
+					PriceSource:  `C:\CANARYPATH\candles.csv`,
+					EntryLagMS:   900000,
+					EntryShifted: i%10 == 0,
 				}),
 			})
 		}
@@ -166,11 +168,17 @@ func TestGateReportShare(t *testing.T) {
 		"zero",
 		"horizon: 24 bars",
 		"round-trip fee: 40 bps",
+		"entry lag median: 0.2500 bars",
+		"entry lag p95: 0.2500 bars",
+		"entry shifted: 10",
 		"https://github.com/LevapVeeskela/lv24-vending-machine/discussions",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("share summary misses %q: %q", want, got)
 		}
+	}
+	if strings.Contains(got, "price source") {
+		t.Fatalf("share summary must not print a price source: %q", got)
 	}
 	assertNoCanaries(t, "share stdout", got)
 	if strings.Contains(got, "written to") {
@@ -215,6 +223,19 @@ func TestGateReportShareOut(t *testing.T) {
 		}
 	}
 	assertNoCanaries(t, "share file", body)
+	if _, err := os.Stat(outPath); err != nil {
+		t.Fatalf("summary file does not exist: %v", err)
+	}
+	// The atomic write must leave no temp file behind.
+	entries, err := os.ReadDir(filepath.Dir(outPath))
+	if err != nil {
+		t.Fatalf("read output dir: %v", err)
+	}
+	for _, e := range entries {
+		if e.Name() != "summary.md" {
+			t.Fatalf("stray file after atomic write: %q", e.Name())
+		}
+	}
 	if runtime.GOOS != "windows" {
 		if info, err := os.Stat(outPath); err == nil && info.Mode().Perm()&0o077 != 0 {
 			t.Fatalf("summary file is group/world readable: %v", info.Mode().Perm())

@@ -22,6 +22,8 @@ type decSpec struct {
 	feeBps                    int
 	horizon                   int
 	priceSource               string
+	entryLagMS                int64
+	entryShifted              bool
 }
 
 func fp(v float64) *float64 { return &v }
@@ -47,21 +49,23 @@ func verdictPolicyPayload(t *testing.T, v domain.Verdict, policy string) json.Ra
 func outcomeOptsPayload(t *testing.T, sig, did, net string, d decSpec) json.RawMessage {
 	t.Helper()
 	return mustPayload(t, domain.Outcome{
-		SignalID:    sig,
-		DecisionID:  did,
-		Instrument:  domain.Instrument{Venue: "test-venue", Symbol: "BTC/USDT"},
-		Side:        domain.SideBuy,
-		Timeframe:   "1h",
-		EntryTS:     d.entry,
-		EntryPrice:  domain.MustParseDecimal("100"),
-		ExitPrice:   domain.MustParseDecimal("101"),
-		HorizonBars: d.horizon,
-		FeeBps:      d.feeBps,
-		NetReturn:   domain.MustParseDecimal(net),
-		GrossReturn: domain.MustParseDecimal(net),
-		LabeledAt:   testClock,
-		Backfill:    d.backfill,
-		PriceSource: d.priceSource,
+		SignalID:     sig,
+		DecisionID:   did,
+		Instrument:   domain.Instrument{Venue: "test-venue", Symbol: "BTC/USDT"},
+		Side:         domain.SideBuy,
+		Timeframe:    "1h",
+		EntryTS:      d.entry,
+		EntryPrice:   domain.MustParseDecimal("100"),
+		ExitPrice:    domain.MustParseDecimal("101"),
+		HorizonBars:  d.horizon,
+		FeeBps:       d.feeBps,
+		NetReturn:    domain.MustParseDecimal(net),
+		GrossReturn:  domain.MustParseDecimal(net),
+		LabeledAt:    testClock,
+		Backfill:     d.backfill,
+		PriceSource:  d.priceSource,
+		EntryLagMS:   d.entryLagMS,
+		EntryShifted: d.entryShifted,
 	})
 }
 
@@ -489,5 +493,154 @@ func TestArenaPolicyFilter(t *testing.T) {
 	if auto.Arena == nil || auto.Arena.Decisions != 1 || len(auto.Arena.Models) != 1 ||
 		auto.Arena.Models[0].Model != "m2" {
 		t.Fatalf("auto arena = %+v, want only m2", auto.Arena)
+	}
+}
+
+// TestArenaAgreementDenominator divides by the considered arena events of
+// the selected policy, not by every recorded event.
+func TestArenaAgreementDenominator(t *testing.T) {
+	now := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	jr := &fakeJournal{}
+	for _, s := range []decSpec{
+		{id: "d1", sig: "d1", model: "primary", cost: "0.001", net: "0.05", p: fp(0.7), verdict: domain.VerdictAllow, policy: "p1", entry: now},
+		{id: "d2", sig: "d2", model: "primary", cost: "0.001", net: "-0.02", p: fp(0.3), verdict: domain.VerdictReject, policy: "p1", entry: now},
+	} {
+		appendSpec(t, jr, s)
+	}
+	mkArena := func(id, model string, v domain.Verdict) {
+		appendEv(t, jr, domain.Event{
+			Kind:       domain.EventArenaDecision,
+			DecisionID: id,
+			Payload: mustPayload(t, arenaPayload{
+				DecisionID: id,
+				Model:      model,
+				Response: domain.DecisionResponse{
+					Model: model,
+					Usage: domain.Usage{CostUSD: domain.MustParseDecimal("0.01"), LatencyMS: 10},
+				},
+				Verdict: domain.GateVerdict{Verdict: v, Code: "arena", Reasons: []string{}, Checks: []domain.Check{}},
+			}),
+		})
+	}
+	mkArena("d1", "m1", domain.VerdictAllow)    // agrees
+	mkArena("d2", "m1", domain.VerdictAllow)    // disagrees
+	mkArena("d1", "m2", domain.VerdictAllow)    // agrees
+	mkArena("d2", "m2", domain.VerdictReject)   // agrees
+	mkArena("ghost", "m1", domain.VerdictAllow) // no verdict: ignored
+	rep := buildReport(t, jr, Config{MinLabeled: 1})
+	a := rep.Arena
+	if a == nil {
+		t.Fatalf("Arena is nil, want populated")
+	}
+	// 3 of the 4 considered events agree; the ghost event must not be a
+	// denominator term (that would give 3/5 = 0.6).
+	almostEqual(t, "agreement", a.AgreementShare, 0.75)
+	if a.AgreementShare < 0 || a.AgreementShare > 1 {
+		t.Fatalf("agreement = %v, want within [0,1]", a.AgreementShare)
+	}
+	if a.Decisions != 2 {
+		t.Fatalf("arena decisions = %d, want 2", a.Decisions)
+	}
+}
+
+// TestLabelPairsLatestWins keeps only the latest (horizon, fee) pair in the
+// comparison and counts the rest in OtherLabelParams.
+func TestLabelPairsLatestWins(t *testing.T) {
+	now := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	jr := &fakeJournal{}
+	for _, s := range []decSpec{
+		{id: "d1", sig: "d1", model: "m", cost: "0.01", net: "0.10", p: fp(0.8), verdict: domain.VerdictAllow, policy: "p1", entry: now, horizon: 12, feeBps: 10},
+		{id: "d2", sig: "d2", model: "m", cost: "0.01", net: "-0.02", p: fp(0.2), verdict: domain.VerdictAllow, policy: "p1", entry: now, horizon: 12, feeBps: 10},
+		{id: "d3", sig: "d3", model: "m", cost: "0.01", net: "0.04", p: fp(0.9), verdict: domain.VerdictAllow, policy: "p1", entry: now, horizon: 24, feeBps: 20},
+		{id: "d4", sig: "d4", model: "m", cost: "0.01", net: "0.02", p: fp(0.6), verdict: domain.VerdictReject, policy: "p1", entry: now, horizon: 24, feeBps: 20},
+	} {
+		appendSpec(t, jr, s)
+	}
+	rep := buildReport(t, jr, Config{MinLabeled: 1})
+	if rep.LabeledCount != 4 {
+		t.Fatalf("LabeledCount = %d, want 4", rep.LabeledCount)
+	}
+	// d4 carries the last outcome.labeled event, so (24, 20) wins.
+	if rep.OtherLabelParams != 2 {
+		t.Fatalf("OtherLabelParams = %d, want 2", rep.OtherLabelParams)
+	}
+	a := rep.Assumptions
+	if a == nil || a.HorizonBars != 24 || a.FeeBpsRoundTrip != 40 {
+		t.Fatalf("Assumptions = %+v, want horizon 24, fees 40", a)
+	}
+	c := rep.Comparisons
+	if c == nil {
+		t.Fatalf("Comparisons is nil")
+	}
+	if got := c.Groups["all"].Count; got != 2 {
+		t.Fatalf("groups[all].Count = %d, want 2 (only the latest pair)", got)
+	}
+	decimalIs(t, "groups all sum", c.Groups["all"].SumNetReturn, "0.06")
+	decimalIs(t, "AllowReturn", c.AllowReturn, "0.04")
+	if c.CalibrationCount != 2 {
+		t.Fatalf("CalibrationCount = %d, want 2", c.CalibrationCount)
+	}
+	if c.Groups["REJECT"].Count != 1 || c.Groups["ALLOW"].Count != 1 {
+		t.Fatalf("groups = %+v, want ALLOW=1 REJECT=1", c.Groups)
+	}
+}
+
+// TestEntryLagAssumptions pins the lag fractions, median, p95 and shifted
+// count of four one-hour outcomes.
+func TestEntryLagAssumptions(t *testing.T) {
+	now := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	jr := &fakeJournal{}
+	lags := []struct {
+		ms      int64
+		shifted bool
+	}{
+		{360000, false},  // 0.10 bar
+		{900000, true},   // 0.25 bar
+		{1800000, false}, // 0.50 bar
+		{2700000, false}, // 0.75 bar
+	}
+	for i, lag := range lags {
+		id := "l" + string(rune('1'+i))
+		appendSpec(t, jr, decSpec{
+			id: id, sig: id, model: "m", cost: "0.01", net: "0.01",
+			p: fp(0.6), verdict: domain.VerdictAllow, policy: "p1", entry: now,
+			horizon: 12, feeBps: 10, entryLagMS: lag.ms, entryShifted: lag.shifted,
+		})
+	}
+	rep := buildReport(t, jr, Config{MinLabeled: 1})
+	a := rep.Assumptions
+	if a == nil {
+		t.Fatalf("Assumptions is nil")
+	}
+	// Median of {0.10,0.25,0.50,0.75} = 0.375; nearest-rank p95 with n=4
+	// is rank ceil(3.8)=4 -> 0.75.
+	almostEqual(t, "EntryLagMedian", a.EntryLagMedian, 0.375)
+	almostEqual(t, "EntryLagP95", a.EntryLagP95, 0.75)
+	if a.EntryShifted != 1 {
+		t.Fatalf("EntryShifted = %d, want 1", a.EntryShifted)
+	}
+}
+
+// TestTimeframeDuration covers the supported bar units and rejects junk.
+func TestTimeframeDuration(t *testing.T) {
+	for _, tc := range []struct {
+		tf   string
+		want time.Duration
+		ok   bool
+	}{
+		{"5m", 5 * time.Minute, true},
+		{"1h", time.Hour, true},
+		{"1d", 24 * time.Hour, true},
+		{"2w", 14 * 24 * time.Hour, true},
+		{"", 0, false},
+		{"h", 0, false},
+		{"0h", 0, false},
+		{"1x", 0, false},
+		{"-1h", 0, false},
+	} {
+		got, ok := timeframeDuration(tc.tf)
+		if ok != tc.ok || got != tc.want {
+			t.Fatalf("timeframeDuration(%q) = %v/%v, want %v/%v", tc.tf, got, ok, tc.want, tc.ok)
+		}
 	}
 }

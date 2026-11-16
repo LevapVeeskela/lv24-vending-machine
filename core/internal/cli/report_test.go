@@ -233,3 +233,39 @@ func TestPrintReportHumanInsufficientDays(t *testing.T) {
 		t.Fatalf("report must not print a CI for 2 days: %q", got)
 	}
 }
+
+// TestPrintReportHumanBSSUndefined prints n/a for a degenerate base rate
+// instead of a misleading zero skill score.
+func TestPrintReportHumanBSSUndefined(t *testing.T) {
+	newRep := func(baseRate, bss float64) domain.Report {
+		return domain.Report{
+			LabeledCount:  10,
+			Sufficient:    true,
+			VerdictCounts: map[string]int{"ALLOW": 5, "REJECT": 5},
+			Comparisons: &domain.ReportComparisons{
+				Groups: map[string]domain.GroupStats{
+					"ALLOW":  {Count: 5, AvgNetReturn: domain.MustParseDecimal("0.04")},
+					"REJECT": {Count: 5, AvgNetReturn: domain.MustParseDecimal("-0.005")},
+				},
+				BaseRate:        baseRate,
+				BrierSkillScore: bss,
+			},
+		}
+	}
+	for _, baseRate := range []float64{0, 1} {
+		var buf strings.Builder
+		printReportHuman(&buf, newRep(baseRate, 0), 0)
+		got := buf.String()
+		if !strings.Contains(got, "bss: n/a") {
+			t.Fatalf("base rate %v misses bss n/a: %q", baseRate, got)
+		}
+		if strings.Contains(got, "bss: 0.000000") {
+			t.Fatalf("base rate %v printed a zero skill score: %q", baseRate, got)
+		}
+	}
+	var buf strings.Builder
+	printReportHuman(&buf, newRep(0.5, 0.25), 0)
+	if !strings.Contains(buf.String(), "bss: 0.250000") {
+		t.Fatalf("defined base rate misses the skill score: %q", buf.String())
+	}
+}

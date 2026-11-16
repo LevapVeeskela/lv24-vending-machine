@@ -17,6 +17,7 @@ import (
 	"math/rand"
 	"sort"
 	"strconv"
+	"time"
 
 	"github.com/LevapVeeskela/lv24-vending-machine/core/domain"
 	"github.com/LevapVeeskela/lv24-vending-machine/core/ports"
@@ -123,10 +124,25 @@ type verdictInfo struct {
 }
 
 // labeledOutcome pairs an outcome with its gate verdict and decision ID.
+// seq is the journal sequence of the surviving outcome.labeled event.
 type labeledOutcome struct {
 	outcome    domain.Outcome
 	verdict    string
 	decisionID string
+	seq        int64
+}
+
+// outcomeEvent is one deduplicated outcome.labeled event with its seq.
+type outcomeEvent struct {
+	outcome domain.Outcome
+	seq     int64
+}
+
+// labelPair is the (horizon, fee) pair of the labeling parameters.
+type labelPair struct {
+	horizon int
+	feeBps  int
+	ok      bool
 }
 
 // calPoint is one calibration pair: predicted pass probability and the
@@ -215,7 +231,7 @@ func (b *Builder) Build(ctx context.Context) (domain.Report, error) {
 	verdicts := map[string]verdictInfo{}
 	decisions := map[string]decisionInfo{}
 	signalToDecision := map[string]string{}
-	var outcomes []domain.Outcome
+	var outcomes []outcomeEvent
 	var arenas []arenaPayload
 
 	if err := b.jr.Walk(ctx, 0, "", func(ev domain.Event) error {
@@ -276,7 +292,7 @@ func (b *Builder) Build(ctx context.Context) (domain.Report, error) {
 			if err := json.Unmarshal(ev.Payload, &o); err != nil {
 				return nil
 			}
-			outcomes = append(outcomes, o)
+			outcomes = append(outcomes, outcomeEvent{outcome: o, seq: ev.Seq})
 		case domain.EventArenaDecision:
 			var a arenaPayload
 			if err := json.Unmarshal(ev.Payload, &a); err != nil {
@@ -329,9 +345,9 @@ func (b *Builder) Build(ctx context.Context) (domain.Report, error) {
 
 	uniq := dedupOutcomes(outcomes)
 	resolved := make(map[string]domain.Outcome, len(uniq))
-	for _, o := range uniq {
-		if did := resolvedDecisionID(o, signalToDecision); did != "" {
-			resolved[did] = o
+	for _, oe := range uniq {
+		if did := resolvedDecisionID(oe.outcome, signalToDecision); did != "" {
+			resolved[did] = oe.outcome
 		}
 	}
 
@@ -339,7 +355,8 @@ func (b *Builder) Build(ctx context.Context) (domain.Report, error) {
 	// backfilled signals counted and (by default) excluded.
 	var labeled []labeledOutcome
 	backfillLabeled, backfillExcluded := 0, 0
-	for _, o := range uniq {
+	for _, oe := range uniq {
+		o := oe.outcome
 		did := resolvedDecisionID(o, signalToDecision)
 		v, ok := verdicts[did]
 		if !ok || v.policyHash != selected {
@@ -352,7 +369,29 @@ func (b *Builder) Build(ctx context.Context) (domain.Report, error) {
 				continue
 			}
 		}
-		labeled = append(labeled, labeledOutcome{outcome: o, verdict: v.verdict, decisionID: did})
+		labeled = append(labeled, labeledOutcome{
+			outcome:    o,
+			verdict:    v.verdict,
+			decisionID: did,
+			seq:        oe.seq,
+		})
+	}
+
+	// Comparisons mix only one labeling parameter set: the latest
+	// (horizon, fee) pair by journal seq. Older pairs stay counted in
+	// OtherLabelParams so a silent change of labeling is visible.
+	pair := latestLabelPair(labeled)
+	compared := labeled
+	otherLabelParams := 0
+	if pair.ok {
+		compared = make([]labeledOutcome, 0, len(labeled))
+		for _, l := range labeled {
+			if l.outcome.HorizonBars == pair.horizon && l.outcome.FeeBps == pair.feeBps {
+				compared = append(compared, l)
+			} else {
+				otherLabelParams++
+			}
+		}
 	}
 
 	rep := domain.Report{
@@ -364,9 +403,10 @@ func (b *Builder) Build(ctx context.Context) (domain.Report, error) {
 		LatencyP95MS:         nearestRank(latencies, 0.95),
 		PolicyHash:           selected,
 		OtherPolicyDecisions: otherPolicy,
+		OtherLabelParams:     otherLabelParams,
 		BackfillLabeled:      backfillLabeled,
 		BackfillExcluded:     backfillExcluded,
-		Assumptions:          assumptions(labeled),
+		Assumptions:          assumptions(labeled, compared, pair),
 		Arena:                arenaReport(arenas, resolved, verdicts, selected, b.includeBackfill),
 	}
 	// An explicitly requested policy that no verdict used has no
@@ -374,11 +414,11 @@ func (b *Builder) Build(ctx context.Context) (domain.Report, error) {
 	if !policyUsesSelected {
 		return rep, nil
 	}
-	if len(labeled) < b.min {
+	if len(compared) < b.min {
 		return rep, nil
 	}
 	rep.Sufficient = true
-	rep.Comparisons = b.compare(labeled, decisions)
+	rep.Comparisons = b.compare(compared, decisions)
 	return rep, nil
 }
 
@@ -430,18 +470,33 @@ func outcomeKey(o domain.Outcome) string {
 
 // dedupOutcomes keeps the last outcome.labeled event per signalId,
 // preserving first-to-last order of the surviving events.
-func dedupOutcomes(outcomes []domain.Outcome) []domain.Outcome {
+func dedupOutcomes(outcomes []outcomeEvent) []outcomeEvent {
 	lastIdx := make(map[string]int, len(outcomes))
-	for i, o := range outcomes {
-		lastIdx[outcomeKey(o)] = i
+	for i, oe := range outcomes {
+		lastIdx[outcomeKey(oe.outcome)] = i
 	}
-	uniq := make([]domain.Outcome, 0, len(lastIdx))
-	for i, o := range outcomes {
-		if lastIdx[outcomeKey(o)] == i {
-			uniq = append(uniq, o)
+	uniq := make([]outcomeEvent, 0, len(lastIdx))
+	for i, oe := range outcomes {
+		if lastIdx[outcomeKey(oe.outcome)] == i {
+			uniq = append(uniq, oe)
 		}
 	}
 	return uniq
+}
+
+// latestLabelPair returns the (horizon, fee) pair of the highest-seq
+// included labeled outcome, so a labeling-parameter change starts a new
+// comparison set instead of mixing both.
+func latestLabelPair(labeled []labeledOutcome) labelPair {
+	pair := labelPair{}
+	bestSeq := int64(-1)
+	for _, l := range labeled {
+		if l.seq > bestSeq {
+			bestSeq = l.seq
+			pair = labelPair{horizon: l.outcome.HorizonBars, feeBps: l.outcome.FeeBps, ok: true}
+		}
+	}
+	return pair
 }
 
 // compare derives shadow-mode comparison statistics. Money uses Decimal
@@ -713,15 +768,16 @@ func averageErr(sum domain.Decimal, count int) (domain.Decimal, error) {
 	return sum.QuoRound(n, avgScale)
 }
 
-// assumptions records the labeling model of the included outcomes. It is
-// nil when nothing is included.
-func assumptions(labeled []labeledOutcome) *domain.ReportAssumptions {
+// assumptions records the labeling model of the included outcomes. The
+// horizon/fee pair and price source come from the compared pair, while the
+// entry-lag statistics cover every included labeled outcome. It is nil when
+// nothing is included.
+func assumptions(labeled, compared []labeledOutcome, pair labelPair) *domain.ReportAssumptions {
 	if len(labeled) == 0 {
 		return nil
 	}
-	first := labeled[0].outcome
 	sources := map[string]struct{}{}
-	for _, l := range labeled {
+	for _, l := range compared {
 		if l.outcome.PriceSource != "" {
 			sources[l.outcome.PriceSource] = struct{}{}
 		}
@@ -736,14 +792,117 @@ func assumptions(labeled []labeledOutcome) *domain.ReportAssumptions {
 	default:
 		priceSource = "mixed"
 	}
+	median, p95, shifted := entryLagStats(labeled)
 	return &domain.ReportAssumptions{
-		HorizonBars:     first.HorizonBars,
-		FeeBpsRoundTrip: 2 * first.FeeBps,
+		HorizonBars:     pair.horizon,
+		FeeBpsRoundTrip: 2 * pair.feeBps,
 		PriceSource:     priceSource,
 		EqualSize:       true,
 		NoSlippage:      true,
 		NoFunding:       true,
+		EntryLagMedian:  median,
+		EntryLagP95:     p95,
+		EntryShifted:    shifted,
 	}
+}
+
+// entryLagStats returns the median and nearest-rank p95 entry lag as a
+// fraction of one bar, plus the count of shifted entries. Outcomes with an
+// unparseable timeframe or without a lag stay out of the fractions but
+// still count as shifted. Fractions are clamped to [0, 1] because the
+// contract bounds them.
+func entryLagStats(labeled []labeledOutcome) (median, p95 float64, shifted int) {
+	fracs := make([]float64, 0, len(labeled))
+	for _, l := range labeled {
+		if l.outcome.EntryShifted {
+			shifted++
+		}
+		interval, ok := timeframeDuration(l.outcome.Timeframe)
+		if !ok || l.outcome.EntryLagMS < 0 {
+			continue
+		}
+		frac := float64(l.outcome.EntryLagMS) / float64(interval/time.Millisecond)
+		if math.IsNaN(frac) || math.IsInf(frac, 0) {
+			continue
+		}
+		if frac < 0 {
+			frac = 0
+		}
+		if frac > 1 {
+			frac = 1
+		}
+		fracs = append(fracs, frac)
+	}
+	if len(fracs) == 0 {
+		return 0, 0, shifted
+	}
+	sort.Float64s(fracs)
+	return medianFloat(fracs), nearestRankFloat(fracs, 0.95), shifted
+}
+
+// medianFloat returns the middle value of a sorted slice, averaging the two
+// middle values for an even length. Empty input yields 0.
+func medianFloat(sorted []float64) float64 {
+	n := len(sorted)
+	if n == 0 {
+		return 0
+	}
+	if n%2 == 1 {
+		return sorted[n/2]
+	}
+	return (sorted[n/2-1] + sorted[n/2]) / 2
+}
+
+// nearestRankFloat returns the nearest-rank percentile of a sorted slice:
+// rank = ceil(p*n), 1-indexed. Empty input yields 0.
+func nearestRankFloat(sorted []float64, p float64) float64 {
+	n := len(sorted)
+	if n == 0 {
+		return 0
+	}
+	rank := int(math.Ceil(p * float64(n)))
+	if rank < 1 {
+		rank = 1
+	}
+	if rank > n {
+		rank = n
+	}
+	return sorted[rank-1]
+}
+
+// timeframeDuration parses a bar length of integer magnitude plus unit m/h/d/w.
+// It mirrors the labeler's accepted timeframes so the report can express an
+// entry lag as a fraction of one bar without importing the labeling slice.
+func timeframeDuration(tf string) (time.Duration, bool) {
+	i := 0
+	for i < len(tf) && tf[i] >= '0' && tf[i] <= '9' {
+		i++
+	}
+	if i == 0 || i >= len(tf) {
+		return 0, false
+	}
+	n, err := strconv.Atoi(tf[:i])
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	var unit time.Duration
+	switch tf[i:] {
+	case "m":
+		unit = time.Minute
+	case "h":
+		unit = time.Hour
+	case "d":
+		unit = 24 * time.Hour
+	case "w":
+		unit = 7 * 24 * time.Hour
+	default:
+		return 0, false
+	}
+	d := time.Duration(n) * unit
+	if d <= 0 {
+		return 0, false
+	}
+	return d, true
 }
 
 // arenaReport aggregates arena.decision events of the selected policy. It
@@ -757,7 +916,7 @@ func arenaReport(events []arenaPayload, outcomes map[string]domain.Outcome, verd
 	events = dedupArena(events)
 	accs := map[string]*arenaAcc{}
 	decisionIDs := map[string]struct{}{}
-	agreed := 0
+	agreed, considered := 0, 0
 	for _, e := range events {
 		pv, ok := verdicts[e.DecisionID]
 		if !ok || pv.policyHash != selected {
@@ -767,6 +926,7 @@ func arenaReport(events []arenaPayload, outcomes map[string]domain.Outcome, verd
 		if hasOutcome && o.Backfill && !includeBackfill {
 			continue
 		}
+		considered++
 		decisionIDs[e.DecisionID] = struct{}{}
 		if pv.verdict == string(e.Verdict.Verdict) {
 			agreed++
@@ -802,8 +962,11 @@ func arenaReport(events []arenaPayload, outcomes map[string]domain.Outcome, verd
 		Decisions: len(decisionIDs),
 		Models:    make([]domain.ArenaModelStats, 0, len(models)),
 	}
-	if len(events) > 0 {
-		rep.AgreementShare = float64(agreed) / float64(len(events))
+	// The denominator is the number of considered arena events (selected
+	// policy, non-excluded backfill), so ignored events cannot deflate the
+	// share below 0 or inflate it above 1.
+	if considered > 0 {
+		rep.AgreementShare = float64(agreed) / float64(considered)
 	}
 	for _, name := range models {
 		acc := accs[name]
