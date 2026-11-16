@@ -34,6 +34,9 @@ ADR: [0001 Go](../adr/0001-go-core.md) · [0002 contract-first](../adr/0002-cont
 Ревью: [вердикт](../review/00-verdict.md) · [находки](../review/01-findings.md) ·
 [фичи](../review/02-features.md) · [план v0.2](../review/03-plan-v2.md)
 
+Операционные документы: [установка](../install.md) / [install.ru](../install.ru.md) ·
+[живая проверка](../runbook-live-smoke.md) · [чек-лист выпуска](../release-checklist.md)
+
 ## Ключевые решения (кратко)
 
 1. **Ядро на Go**, CLI + локальный демон, один контракт для трёх клиентов.
@@ -49,11 +52,14 @@ ADR: [0001 Go](../adr/0001-go-core.md) · [0002 contract-first](../adr/0002-cont
 
 ## Быстрый старт: рабочий (M1) и целевой UX
 
-Рабочий (M1 часть 2) — [quickstart](../quickstart.md) / [quickstart.ru](../quickstart.ru.md):
-сборка `vend`, `init`, офлайн `gate test --fixture`, `journal verify`,
-shadow-сервер с `VENDING_SECRET_CONN_LOCAL_APITOKEN` и `curl` POST, фоновая
-разметка исходов, `vend status`, `gate report [--share]`, локальная сборка
-релиза.
+Рабочий (релиз-кандидат `0.1.0-m1`, не опубликован) — [quickstart](../quickstart.md) /
+[quickstart.ru](../quickstart.ru.md): установка
+([install](../install.md) / [install.ru](../install.ru.md)), сборка `vend`,
+`init`, офлайн `gate test --fixture`, `journal verify`, shadow-сервер с
+`VENDING_SECRET_CONN_LOCAL_APITOKEN` и `curl` POST, фоновая разметка исходов,
+`vend status`, `gate report [--share]`, живые пробы `doctor --live`, локальная
+сборка релиза. Живая проверка владельцем — [runbook](../runbook-live-smoke.md);
+выпуск — [release checklist](../release-checklist.md).
 
 Целевой UX (не реализовано):
 
@@ -89,7 +95,12 @@ vend serve            # desktop/web/mobile подключаются к этом�
   `vend status`), trend-сигналы, Telegram-уведомления, арена моделей
   (gateflow + агрегация в отчёте), `--policy`/`--include-backfill`, bootstrap
   CI/BSS/AUC, `--share`, локальный релизный инструмент.
-- НЕ сделано: адаптер TradingView webhook (рецепт — цель), desktop/web/mobile,
+- RC `0.1.0-m1` (2026-11-16, **не опубликован**): `vend doctor --live`
+  (decision/candles/telegram), канонические символы, `entryLagMs`/
+  `entryShifted`, `outcome.unlabelable`, группировка отчёта по
+  `(horizonBars, feeBps)`, обновлённый `--share`, install/runbook/release
+  checklist.
+- НЕ сделано: публикация релиза, адаптер TradingView webhook, desktop/web/mobile,
   paper/live, команды Telegram (двусторонний бот).
 - Ресёрч: 13 направлений, клоны и разборы в `ideas/` (вне репозитория; `ideas/INDEX.md`).
 - Спека: draft v0.1; `00-vision.md` и `10-roadmap.md` — v0.2 по итогам скептического

@@ -111,7 +111,8 @@ class VendShadowGate(IStrategy):
             # Уникальный id на каждую попытку входа: повтор с тем же id и
             # другим телом гейт отклонит.
             "signalId": f"freqtrade-{uuid.uuid4().hex}",
-            # pair передаётся как есть, вместе со слэшем: "BTC/USDT".
+            # pair передаётся как есть; ядро канонизирует BTC/USDT, BTC-USDT,
+            # BTCUSDT и BTCUSDT:USDT в BTCUSDT.
             "instrument": {"venue": "freqtrade", "symbol": pair},
             "side": "buy" if side == "long" else "sell",
             "intentKind": "entry",
@@ -135,6 +136,29 @@ class VendShadowGate(IStrategy):
 
 `state` — произвольные конечные числа (индикаторы) для контекста решения.
 Пустой объект допустим, `null` — нет.
+
+### Символы
+
+Ядро сравнивает инструменты в канонической форме: trim, верхний регистр,
+удаление разделителей `-`, `_`, `/` и отбрасывание фьючерсного суффикса после
+первого `:`. Поэтому все варианты ниже — один и тот же рынок `BTCUSDT`:
+
+```text
+BTC/USDT      → BTCUSDT
+BTC-USDT      → BTCUSDT
+BTCUSDT       → BTCUSDT
+BTCUSDT:USDT  → BTCUSDT
+```
+
+Ничего не нормализуйте в стратегии: передавайте `pair` как есть, включая
+двоеточие у фьючерсов. Пример фьючерсного инструмента CCXT:
+
+```python
+"instrument": {"venue": "binancefutures", "symbol": "BTC/USDT:USDT"},
+```
+
+`venue` — просто метка площадки в запросе; канонизация касается только
+`symbol`.
 
 ## 4. Запуск и проверка
 

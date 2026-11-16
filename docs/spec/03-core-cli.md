@@ -1,9 +1,13 @@
 # 03. Ядро и CLI
 
-Статус: M0 (wedge core) готов; M1 часть 1 готова 2026-11-16 (локальный shadow-гейт,
-разметка исходов, отчёт только по журналу); M1 часть 2 готова 2026-11-16
-(shadow-раннер, trend-сигналы, Telegram, арена моделей, `--share`, policy-фильтр,
-локальный релизный инструмент). Зависит от: `01-architecture.md`, `02-monorepo.md`.
+Статус: релиз-кандидат `0.1.0-m1` (2026-11-16), **не опубликован**. M0 (wedge
+core) готов; M1 часть 1 готова 2026-11-16 (локальный shadow-гейт, разметка
+исходов, отчёт только по журналу); M1 часть 2 готова 2026-11-16 (shadow-раннер,
+trend-сигналы, Telegram, арена моделей, `--share`, policy-фильтр, локальный
+релизный инструмент). RC добавляет `doctor --live`, канонические символы,
+`entryLagMs`/`entryShifted`, `outcome.unlabelable`, группировку отчёта по
+(horizon, fee), обновлённый `--share` и операционную документацию. Зависит от:
+`01-architecture.md`, `02-monorepo.md`.
 
 > Реализовано в M0/M1 — см. §2.0. Подразделы §2.1–§2.10 описывают целевую
 > платформу; из них реализованы только отмеченные `journal head/verify` и `serve`,
@@ -42,11 +46,16 @@ Application Support` на macOS): `vending.db` и `shadow-status.json` в M1; `r
 
 ### 2.0 Реализовано в M0/M1 (shadow-гейт)
 
+Установка (бинарник или сборка) — [install](../install.md) /
+[install.ru](../install.ru.md); живая проверка на 30–40 минут —
+[runbook-live-smoke](../runbook-live-smoke.md); выпуск предрелиза —
+[release-checklist](../release-checklist.md).
+
 ```bash
 vend version [--json]
 vend init [--config FILE] [--data-dir DIR] [--force] [--json]
 vend config path|get KEY|validate [--config FILE] [--data-dir DIR] [--json]
-vend doctor [--config FILE] [--data-dir DIR] [--json]
+vend doctor [--live] [--symbol SYMBOL] [--save-raw FILE] [--config FILE] [--data-dir DIR] [--json]
 vend gate test --request FILE [--fixture FILE] [--save-raw FILE] [--config FILE] [--data-dir DIR] [--json]
 vend gate report [--policy HASH] [--include-backfill] [--share [--out FILE]] [--json] [--config FILE] [--data-dir DIR]
 vend serve [--addr 127.0.0.1:8420] [--config FILE] [--data-dir DIR]
@@ -81,7 +90,7 @@ vend journal verify [--json] [--data-dir DIR]
   },
   "signals": {
     "trend": {
-      "enabled": false, "symbols": ["BTCUSDT"], "timeframe": "1h",
+      "enabled": false, "venue": "binance", "symbols": ["BTCUSDT"], "timeframe": "1h",
       "fast": 12, "slow": 26, "sides": ["buy"]
     }
   },
@@ -98,7 +107,8 @@ vend journal verify [--json] [--data-dir DIR]
 `providers.decision.model` — конкретный id без `*-latest`; `profile` — `drex`
 или `jev`; `providers.marketdata.baseUrl` — http(s); `notify.telegram` при
 `enabled` требует `chatId` и `secretRef`; `signals.trend` при `enabled` требует
-непустые `symbols`, `timeframe`, `0 < fast < slow`, `sides` из `buy|sell`;
+непустой `venue`, непустые `symbols`, `timeframe`, `0 < fast < slow`, `sides` из
+`buy|sell`;
 `arena` при `enabled` требует `profile` `drex|jev`, конкретный `model` (без
 `*-latest`/`*-preview`), `secretRef`, `pricePerBillion > 0` и `baseUrl` —
 https либо loopback http (`127.0.0.1`, `::1`).
@@ -136,7 +146,11 @@ API (локальный, loopback):
   вердикт с тем же `decisionId` без обращения к провайдеру; повтор с **другим**
   телом — HTTP 409 `conflict` (ничего не пишется, нужен новый `signalId`).
   Ошибка провайдера всё равно записывает ABSTAIN; HTTP для вычисленного
-  вердикта — 200.
+  вердикта — 200. Код причины ошибки провайдера: `provider_auth`
+  (`auth`/`payment_required`), `provider_misconfigured` (`invalid_request`),
+  `provider_unavailable` (`unavailable`/`timeout`/неизвестное),
+  `invalid_output` (`invalid_output`). Для auth/misconfigured причина
+  обобщена: текст провайдера с токеном или телом запроса в журнал не попадает.
 
 События журнала на один сигнал: `gate.request` → `decision.response` (когда провайдер
 ответил) → опционально `decision.model_changed` → `gate.verdict`; все связаны одним
@@ -144,43 +158,78 @@ API (локальный, loopback):
 запрошенном id отличается от предыдущей (ADR-0010).
 
 `gate test --fixture` проигрывает записанный ответ decision offline;
-`--save-raw` пишет сырое тело вендора (0600) и завершается ошибкой при идемпотентном
-повторе (сырого тела нет). С `--json` печатается только объект вердикта.
+`--save-raw` пишет сырое тело вендора атомарно (0600) и завершается ошибкой при
+идемпотентном повторе (сырого тела нет). С `--json` печатается только объект
+вердикта.
+
+`doctor` без сети проверяет конфиг, каталог данных (запись), БД, целостность
+журнала, реестр провайдеров, наличие секрета (без значения) и policy hash.
+`--live` добавляет три опциональные сетевые пробы с дедлайном 20 с: `decision`
+(один вызов с фиксированным синтетическим state, печатает
+`ok cost=<decimal> USD`), `candles` (две закрытые свечи `1h` по `--symbol`,
+по умолчанию `BTCUSDT`) и `telegram` (одно тестовое сообщение, только если
+`notify.telegram.enabled`). Проба печатает `ok` или короткий код: `auth`,
+`payment_required`, `rate_limit`, `invalid_request`, `invalid_output`,
+`unavailable`, `timeout`, `ip_banned`, `region_unavailable` (`unknown`
+печатается как `unavailable`). Токены, URL и тела не печатаются. `--symbol` и
+`--save-raw` требуют `--live`; `--save-raw FILE` пишет сырой ответ decision
+атомарно (0600). `--json` отдаёт `{"ok":bool,"checks":[{name,ok,detail,live?}]}`;
+любая FAIL-проба даёт код возврата 1.
 
 `outcomes label`: для каждого entry-запроса (`intentKind: entry`) без метки —
-первый бар с OpenTime ≥ ts сигнала, закрывшийся после приёма (не-backfill); ровно
-N подряд идущих баров (таймфрейм m/h/d/w); вход = open
-первого бара, выход = close бара N; gross со знаком side; net = gross − 2·feeBps/10000;
-MFE/MAE; `receivedAt` = время приёма сигнала; сигнал, пришедший позже чем через
-один таймфрейм (`receivedAt − ts > timeframe`), помечается `backfill` и может
-войти в бар, уже закрывшийся к моменту приёма; candlesHash = 64 hex
+первый бар с OpenTime ≥ ts сигнала, закрывшийся после вердикта гейта (при
+отсутствии вердикта — после приёма); ровно N подряд идущих баров (таймфрейм
+m/h/d/w); вход = open первого бара, выход = close бара N; gross со знаком side;
+net = gross − 2·feeBps/10000; MFE/MAE; `receivedAt` = время приёма сигнала.
+Символы сравниваются канонически (`domain.CanonicalSymbol`): trim, верхний
+регистр, удаление `/`, `-`, `_` и фьючерсного суффикса после первого `:`;
+`BTC/USDT`, `BTC-USDT`, `BTCUSDT` и `BTCUSDT:USDT` — один рынок `BTCUSDT`.
+Если входной бар открылся раньше момента доступности сигнала более чем на 10 %
+бара, вход сдвигается на следующий бар (`entryShifted`) при наличии запасного
+бара; `entryLagMs` — задержка от open входного бара до этого момента (0, если
+бар открылся позже). Сигнал, пришедший позже чем через один таймфрейм
+(`receivedAt − ts > timeframe`), помечается `backfill`; candlesHash = 64 hex
 SHA-256 использованных баров (Decimals нормализованы к 12 знакам); `--candles
 FILE` — offline JSON-массив объектов свечей, без него — настроенный
-marketdata-провайдер; повтор не дублирует метки.
+marketdata-провайдер; повтор не дублирует метки. Сигналы без честного
+форвард-окна (пропуск или сдвиг баров) не размечаются и считаются в
+`unlabelable`; контракт определяет для них событие
+`outcome.unlabelable {signalId, decisionId, reason}`. `vend outcomes label`
+печатает labeled/skipped/already/failed/unlabelable.
 
 `gate report`: только журнал, без сети. Всегда: счётчики вердиктов, число
 размеченных, policy hash (и число решений других политик), backfill
 `labeled/excluded`, суммарная стоимость решений, latency p50/p95 (по
-usage.latencyMs), блок арены при наличии `arena.decision`. Меньше 100
-размеченных — `insufficient data`, сравнений НЕТ. При ≥ 100: суммы и средние net
+usage.latencyMs), блок арены при наличии `arena.decision`. Сравнения смешивают
+только последнюю по seq пару `(horizonBars, feeBps)`; метки с другой парой
+считаются в `otherLabelParams` (JSON), а не подмешиваются. Допущения отчёта:
+горизонт, round-trip fee, price source, equal size/no slippage/no funding,
+`entryLagMedian`/`entryLagP95` (доля одного бара) и `entryShifted` (число
+сдвинутых входов). Меньше 100 размеченных — `insufficient data`, сравнений НЕТ.
+При ≥ 100: суммы и средние net
 по группам all/ALLOW/REJECT/ABSTAIN, bootstrap-разница ALLOW−REJECT (95 % CI,
 2000 прогонов, seed 42; интервал считается только при ≥ 5 различных UTC-днях
 входа, иначе печатается точечная средняя и `insufficient days`), Brier, base
 rate, constant Brier, Brier skill score,
 AUC, ECE, 10-бакетная кривая надёжности, разбивка по моделям (от 30 меток на
-модель). Флаги: `--policy <64-hex>` — метки и сравнения только для выбранной
-политики (счётчики вердиктов остаются по всему журналу, число решений других
-политик печатается отдельно);
+модель). `bss: n/a`, если base rate 0 или 1: константный прогноз идеален,
+skill score не определён. Флаги: `--policy <64-hex>` — метки и сравнения только
+для выбранной политики (счётчики вердиктов остаются по всему журналу, число
+решений других политик печатается отдельно);
 `--include-backfill` — включить поздние метки в сравнение (по умолчанию они
-только считаются). `--share` печатает обезличенную markdown-сводку (агрегаты,
-метрики, допущения; без символов/цен/путей/идентификаторов), `--out FILE`
-пишет её с правами 0600; `--share` несовместим с `--json`, `--out` требует
-`--share`. Деньги — только Decimal (строки); float — только вероятности/метрики.
+только считаются). `--share` печатает обезличенную markdown-сводку: версию,
+префикс policy (8 hex), число решений и UTC-дней, число меток, счётчики
+вердиктов, метрики или `insufficient data`, допущения с entry lag median/p95 и
+entry shifted, ссылку на GitHub Discussions; без символов/площадок/цен/state/
+путей/идентификаторов и сумм доходности. `--out FILE` пишет её с правами 0600;
+`--share` несовместим с `--json`, `--out` требует `--share`. Деньги — только
+Decimal (строки); float — только вероятности/метрики.
 
 `vend status`: снимок `shadow-status.json` (версия, policyHash, последняя
-ошибка цикла, updatedAt) плюс пересчёт событий и меток по журналу. Без
-запущенного раннера `policy: none`, `last label: never`. `--json` отдаёт те же
-поля машинно.
+ошибка цикла, updatedAt, lastSeq) плюс пересчёт событий и меток по журналу.
+Без запущенного раннера `policy: none`, `last label: never`. `--json` отдаёт
+поля `version`, `policyHash`, `events`, `labeled`, `lastLabelAt`,
+`lastCycleError`, `updatedAt`, `lastSeq`.
 
 Хэши журнала: все `hash`, `prevHash`, `policyHash`, `candlesHash` — 64 строчных hex БЕЗ
 префикса `sha256:`. Правило цепочки:
@@ -202,19 +251,29 @@ AUC, ECE, 10-бакетная кривая надёжности, разбивк�
 до закрытия журнала.
 
 `signals.trend` (при `enabled`): локальный источник без своего I/O; читает
-закрытые свечи настроенного marketdata, считает EMA fast/slow и выдаёт вход
-только на пересечении на последнем закрытом баре; `signalId` детерминирован
-(`trend:<symbol>:<timeframe>:<closeTimeUnix>:<side>`), поэтому повторный скан
-идемпотентен. Не более одного сигнала на символ за скан.
+закрытые свечи настроенного marketdata, считает EMA fast/slow и выдаёт вход на
+пересечении. Символы канонизируются (`domain.CanonicalSymbol`) и
+дедуплицируются; `venue` — непустой id площадки, проверяется валидацией.
+Первый скан символа оценивает только последний закрытый бар (история нужна
+лишь для прогрева EMA); повторный — только бары, закрывшиеся после
+предыдущего скана, поэтому уже оценённые бары не переигрываются, а пересечения
+на пропущенных барах не теряются. `signalId` детерминирован
+(`trend:<symbol>:<timeframe>:<closeTimeUnix>:<side>`), поэтому повторная
+оценка того же бара идемпотентна.
 
 ### 2.0.2 Уведомления и арена
 
 `notify.telegram` (при `enabled`) шлёт через Bot API: смену фактической модели
 (`decision.model_changed`), 3 подряд ABSTAIN с кодом `provider_unavailable`
 (не чаще одного сообщения в час) и недельную сводку counts (`decisions`,
-`labeled`, `ALLOW/REJECT/ABSTAIN`) не чаще раза в 7 суток. Каждое отправленное
-уведомление пишется событием `notify.sent {kind,channel,ok}`. Провайдер держит
-локальный лимит: одно сообщение в минуту. Токен бота берётся по `secretRef`
+`labeled`, `ALLOW/REJECT/ABSTAIN`), когда первый `gate.request` старше 7 суток
+и с последней успешной сводки прошло 7 суток. Серия ABSTAIN и расписание
+выводятся из журнала, поэтому рестарт не повторяет уже отправленную сводку.
+За цикл отправляется не более одного уведомления; недоставленное остаётся в
+очереди и повторяется на следующем цикле. Каждая попытка отправки пишется
+событием `notify.sent {kind,channel,ok}` (`ok=false` при ошибке). Провайдер
+держит локальный лимит: одно сообщение в минуту. Токен бота берётся по
+`secretRef`
 (`VENDING_SECRET_*`), `chatId` (`<chat-id>`: числовой id или
 `@channelusername`) секретом не является. Тексты — только агрегаты,
 без символов, цен, путей и идентификаторов.
@@ -231,9 +290,12 @@ AUC, ECE, 10-бакетная кривая надёжности, разбивк�
 
 `go run ./tools/release` из корня репозитория собирает `vend` под
 windows/amd64, linux/amd64+arm64, darwin/amd64+arm64 в `dist/` и пишет
-`dist/SHA256SUMS`. Сборка локальная и воспроизводимая: `CGO_ENABLED=0`,
-`-trimpath`, без VCS-штампа, версия `0.1.0-m1`; ничего не публикуется и не
-загружается. Неполный набор артефактов манифест не создаёт.
+`dist/SHA256SUMS`. Артефакты: `vend_windows_amd64.exe`, `vend_linux_amd64`,
+`vend_linux_arm64`, `vend_darwin_amd64`, `vend_darwin_arm64`; манифест —
+строки `<sha256>  <filename>`. Сборка локальная и воспроизводимая:
+`CGO_ENABLED=0`, `-trimpath`, без VCS-штампа, версия `0.1.0-m1`; ничего не
+публикуется и не загружается, бинарники не подписаны. Неполный набор
+артефактов манифест не создаёт.
 
 ### 2.0.4 Целевая платформа (не реализовано)
 

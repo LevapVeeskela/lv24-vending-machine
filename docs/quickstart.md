@@ -7,12 +7,19 @@ Two paths to a working shadow gate:
 - **Path B (offline, no key):** replay a recorded decision response through the
   same flow and verify the journal. No network, no credentials.
 
-Everything below runs from the repository root and needs only Go (see `go.work`).
-There are no paid services and no CI calls.
+Everything below runs from the repository root. There are no paid services and
+no CI calls.
+
+## 0. Install
+
+Get `vend` first: a prebuilt binary from the release page or a source build — see
+[install](install.md). The release is **not published** in this repository
+state, so the source build is the working path today. The commands below use
+`./vend` from the repository root (use `vend` if it is on `PATH`).
 
 ## Path A — 15 minutes with a decision key
 
-### 1. Build and initialize
+### 1. Build (source path) and initialize
 
 ```bash
 go build -o vend ./core/cmd/vend
@@ -20,9 +27,10 @@ go build -o vend ./core/cmd/vend
 ./vend version
 ```
 
-`init` writes the JSON config, creates the SQLite journal and prints both paths.
-On Windows the artifact is the literal file `vend` (no extension), so run
-`.\vend`; build with `-o vend.exe` if you prefer.
+If you installed the binary in step 0, skip the `go build` line. `init` writes
+the JSON config, creates the SQLite journal and prints both paths. On Windows
+the artifact is the literal file `vend` (no extension), so run `.\vend`; build
+with `-o vend.exe` if you prefer.
 
 ### 2. Point the config at your provider
 
@@ -153,10 +161,14 @@ answered) → optional `decision.model_changed` → `gate.verdict`, all under on
 
 The runner labels every entry request (`intentKind: entry`) that has no outcome
 yet. A label takes
-the first bar opening at or after the signal time and closing after receipt,
-exactly `outcome.horizonBars` consecutive bars, entry at the first open, exit at
+the first bar opening at or after the signal time and closing after the gate
+verdict (the receipt time when the journal has no verdict), exactly
+`outcome.horizonBars` consecutive bars, entry at the first open, exit at
 the last close, net of `2 × outcome.feeBps` (default `feeBps: 10` per side, 20
-round-trip). Raw provider candles come from `providers.marketdata`, so this
+round-trip). If that first bar opened more than 10% of one bar before the
+signal became actionable, the entry moves to the next bar and the outcome
+records `entryShifted`; `entryLagMs` is the delay from the entry-bar open to
+that moment. Raw provider candles come from `providers.marketdata`, so this
 step needs network access to the exchange.
 
 Signals that arrive later than one timeframe (`receivedAt − ts > timeframe`)
@@ -186,9 +198,11 @@ Useful variants:
 ./vend gate report --share --out summary.md  # same, written with mode 0600
 ```
 
-`--share` prints aggregate counts, model quality metrics and assumptions only:
-no symbols, venues, prices, state, paths or identifiers. Publish it manually.
-`--share` cannot be combined with `--json`; `--out` requires `--share`.
+`--share` prints aggregate counts, model quality metrics, assumptions and the
+entry-lag median/p95 (as a fraction of one bar) with the shifted-entry count
+only: no symbols, venues, prices, state, paths or identifiers. Publish it
+manually. `--share` cannot be combined with `--json`; `--out` requires
+`--share`.
 
 ### 9. Status and integrity
 
@@ -203,7 +217,8 @@ chain; a broken chain is an error with the sequence number.
 
 ## Path B — offline, no key
 
-The same gate flow, driven by a recorded decision response:
+The same gate flow, driven by a recorded decision response. If `vend` is
+already installed, skip the build line:
 
 ```bash
 go build -o vend ./core/cmd/vend
@@ -236,8 +251,10 @@ candles offline:
 
 The file is a JSON array of candles (`symbol`, `interval`, `openTime`,
 `closeTime`, `open`, `high`, `low`, `close`, `volume`; decimals as strings).
-The labeler filters by symbol and interval and needs `horizonBars` consecutive
-bars. Without `--candles` it uses the configured market data provider.
+The labeler filters by canonical symbol and interval and needs `horizonBars`
+consecutive bars. Without `--candles` it uses the configured market data
+provider. Signals whose forward window has a missing or shifted bar stay
+unlabeled and are counted as `unlabelable`.
 
 ## `signalId` and idempotency
 

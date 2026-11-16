@@ -4,14 +4,17 @@
 ИИ-агентами.** Крипто-биржи и брокеры, LLM и decision-модели (Drex/Jev),
 локальный терминал, веб и мобильный пульт.
 
-> Статус: **M1 часть 2 (2026-11-16)** — shadow-раннер (фоновая разметка,
-> `vend status`), trend-сигналы, Telegram-уведомления, арена моделей,
-> `--share`, policy-фильтр и метрики отчёта, локальный релизный инструмент.
-> M1 часть 1 — локальный HTTP-гейт, разметка исходов, отчёт только по журналу;
-> M0 — ядро, провайдеры, журнал.
-> **НЕ сделано:** адаптер TradingView webhook, desktop/web/mobile, paper/live,
-> команды Telegram (двусторонний бот). Тесты — офлайн; живые вызовы — только
-> ключом владельца.
+> Статус: **релиз-кандидат 0.1.0-m1 (2026-11-16), не опубликован** —
+> shadow-гейт с фоновой разметкой, trend-сигналы, Telegram-уведомления, арена
+> моделей, `--share`, policy-фильтр, живые пробы `doctor --live`, канонические
+> символы и локальная сборка релиза. Бинарники не подписаны; релиз собирается
+> `go run ./tools/release` и никуда не загружается.
+> Установка — [install](docs/install.md) / [install.ru](docs/install.ru.md);
+> живая проверка на 30–40 минут — [runbook](docs/runbook-live-smoke.md);
+> выпуск — [release checklist](docs/release-checklist.md).
+> **НЕ сделано:** публикация релиза, адаптер TradingView webhook,
+> desktop/web/mobile, paper/live, команды Telegram (двусторонний бот).
+> Тесты — офлайн; живые вызовы — только ключом владельца.
 
 ## Идея
 
@@ -45,7 +48,10 @@
 
 ## Документация
 
+- [Установка (EN)](docs/install.md) · [Установка (RU)](docs/install.ru.md)
 - [Быстрый старт (EN)](docs/quickstart.md) · [Быстрый старт (RU)](docs/quickstart.ru.md)
+- [Живая проверка shadow-гейта](docs/runbook-live-smoke.md)
+- [Чек-лист выпуска](docs/release-checklist.md)
 - [Спецификация](docs/spec/README.md)
 - [Ядро и CLI](docs/spec/03-core-cli.md)
 - [Архитектура](docs/spec/01-architecture.md)
@@ -56,9 +62,10 @@
 - [Изменения](CHANGELOG.md)
 - [ADR](docs/adr/)
 
-## Рабочий quickstart (M1)
+## Рабочий quickstart (RC)
 
-Офлайн, без ключа:
+Установите `vend` ([install](docs/install.md) / [install.ru](docs/install.ru.md))
+или соберите из корня репозитория. Офлайн, без ключа:
 
 ```bash
 go build -o vend ./core/cmd/vend
@@ -71,7 +78,9 @@ vend gate report
 
 Путь за 15 минут с ключом decision-провайдера, фоновой разметкой, `vend status`
 и `gate report --share` — в [quickstart](docs/quickstart.md) /
-[quickstart.ru](docs/quickstart.ru.md).
+[quickstart.ru](docs/quickstart.ru.md). Живые пробы (один вызов decision, две
+свечи, тестовое сообщение Telegram при включении) — `vend doctor --live`;
+`--save-raw <file>` пишет сырой ответ провайдера с правами 0600.
 
 Тесты офлайн; живые вызовы провайдеров — только ключом владельца.
 
