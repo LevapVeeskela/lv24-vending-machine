@@ -193,6 +193,9 @@ func TestParityOutcome(t *testing.T) {
 		MAE:         domain.MustParseDecimal("-0.002300"),
 		CandlesHash: parityHash,
 		LabeledAt:   parityTS.Add(6*time.Hour + 5*time.Minute),
+		ReceivedAt:  parityTS,
+		Backfill:    true,
+		PriceSource: "marketdata-binance",
 	}
 	var c Outcome
 	if err := json.Unmarshal(mustWire(t, d), &c); err != nil {
@@ -210,6 +213,15 @@ func TestParityOutcome(t *testing.T) {
 	if c.DecisionID == nil || *c.DecisionID != parityULID {
 		t.Fatalf("decisionId lost on the wire: %+v", c)
 	}
+	if c.ReceivedAt == nil || !c.ReceivedAt.Equal(parityTS) {
+		t.Fatalf("receivedAt lost on the wire: %+v", c)
+	}
+	if c.Backfill == nil || !*c.Backfill {
+		t.Fatalf("backfill lost on the wire: %+v", c)
+	}
+	if c.PriceSource == nil || *c.PriceSource != "marketdata-binance" {
+		t.Fatalf("priceSource lost on the wire: %+v", c)
+	}
 
 	var back domain.Outcome
 	if err := json.Unmarshal(mustWire(t, c), &back); err != nil {
@@ -221,23 +233,71 @@ func TestParityOutcome(t *testing.T) {
 	if back.EntryPrice.String() != "97500.50" || back.NetReturn.String() != "0.006684" {
 		t.Fatalf("reverse money mismatch: %+v", back)
 	}
+	if !back.ReceivedAt.Equal(parityTS) || !back.Backfill || back.PriceSource != "marketdata-binance" {
+		t.Fatalf("reverse wire fields mismatch: %+v", back)
+	}
 }
 
 func TestParityReport(t *testing.T) {
 	d := domain.Report{
-		GeneratedAt:     parityTS,
-		LabeledCount:    42,
-		Sufficient:      true,
-		VerdictCounts:   map[string]int{"ALLOW": 25, "REJECT": 15, "ABSTAIN": 2},
-		DecisionCostUSD: domain.MustParseDecimal("0.0003024"),
-		LatencyP50MS:    11,
-		LatencyP95MS:    38,
+		GeneratedAt:          parityTS,
+		LabeledCount:         42,
+		Sufficient:           true,
+		VerdictCounts:        map[string]int{"ALLOW": 25, "REJECT": 15, "ABSTAIN": 2},
+		DecisionCostUSD:      domain.MustParseDecimal("0.0003024"),
+		LatencyP50MS:         11,
+		LatencyP95MS:         38,
+		PolicyHash:           parityPolicy,
+		OtherPolicyDecisions: 3,
+		BackfillLabeled:      5,
+		BackfillExcluded:     2,
+		Assumptions: &domain.ReportAssumptions{
+			HorizonBars:     12,
+			FeeBpsRoundTrip: 20,
+			PriceSource:     "marketdata-binance",
+			EqualSize:       true,
+			NoSlippage:      true,
+			NoFunding:       true,
+		},
+		Arena: &domain.ArenaReport{
+			Decisions:      10,
+			AgreementShare: 0.8,
+			Models: []domain.ArenaModelStats{
+				{
+					Model:          "dre-x-1",
+					Verdicts:       10,
+					AvgAllowReturn: domain.MustParseDecimal("0.001800"),
+					AUC:            0.62,
+					CostUSD:        domain.MustParseDecimal("0.0001512"),
+				},
+			},
+		},
 		Comparisons: &domain.ReportComparisons{
 			AllEntriesReturn:  domain.MustParseDecimal("0.012400"),
 			AllowReturn:       domain.MustParseDecimal("0.018200"),
 			RejectedAvgReturn: domain.MustParseDecimal("-0.004100"),
 			Brier:             0.21,
 			ECE:               0.06,
+			BaseRate:          0.55,
+			ConstantBrier:     0.25,
+			BrierSkillScore:   0.16,
+			AUC:               0.62,
+			CalibrationCount:  42,
+			Groups: map[string]domain.GroupStats{
+				"allow": {
+					Count:        25,
+					SumNetReturn: domain.MustParseDecimal("0.455000"),
+					AvgNetReturn: domain.MustParseDecimal("0.018200"),
+				},
+			},
+			Difference: &domain.DifferenceStats{
+				Mean:          domain.MustParseDecimal("0.022300"),
+				Low:           domain.MustParseDecimal("0.004100"),
+				High:          domain.MustParseDecimal("0.040500"),
+				ContainsZero:  false,
+				BootstrapReps: 1000,
+				Days:          7,
+			},
 			Reliability: []domain.ReliabilityBucket{
 				{LowerBound: 0, Count: 10, MeanPredicted: 0.12, ObservedRate: 0.1},
 				{LowerBound: 0.5, Count: 20, MeanPredicted: 0.62, ObservedRate: 0.6},
@@ -250,6 +310,7 @@ func TestParityReport(t *testing.T) {
 					ECE:          0.06,
 					NetReturnSum: domain.MustParseDecimal("0.280800"),
 					CostUSD:      domain.MustParseDecimal("0.0003024"),
+					AvgNetReturn: domain.MustParseDecimal("0.006686"),
 				},
 			},
 		},
@@ -276,6 +337,63 @@ func TestParityReport(t *testing.T) {
 	if string(c.Comparisons.ByModel[0].NetReturnSum) != "0.280800" {
 		t.Fatalf("byModel money lost on the wire: %+v", c.Comparisons.ByModel[0])
 	}
+	if c.Comparisons.ByModel[0].AvgNetReturn == nil || string(*c.Comparisons.ByModel[0].AvgNetReturn) != "0.006686" {
+		t.Fatalf("byModel avgNetReturn lost on the wire: %+v", c.Comparisons.ByModel[0])
+	}
+	if c.Comparisons.BaseRate == nil || *c.Comparisons.BaseRate != 0.55 {
+		t.Fatalf("baseRate lost on the wire: %+v", c.Comparisons)
+	}
+	if c.Comparisons.ConstantBrier == nil || *c.Comparisons.ConstantBrier != 0.25 {
+		t.Fatalf("constantBrier lost on the wire: %+v", c.Comparisons)
+	}
+	if c.Comparisons.BrierSkillScore == nil || *c.Comparisons.BrierSkillScore != 0.16 {
+		t.Fatalf("brierSkillScore lost on the wire: %+v", c.Comparisons)
+	}
+	if c.Comparisons.Auc == nil || *c.Comparisons.Auc != 0.62 {
+		t.Fatalf("auc lost on the wire: %+v", c.Comparisons)
+	}
+	if c.Comparisons.CalibrationCount == nil || *c.Comparisons.CalibrationCount != 42 {
+		t.Fatalf("calibrationCount lost on the wire: %+v", c.Comparisons)
+	}
+	if len(c.Comparisons.Groups) != 1 || c.Comparisons.Groups["allow"].Count != 25 {
+		t.Fatalf("groups lost on the wire: %+v", c.Comparisons.Groups)
+	}
+	if string(c.Comparisons.Groups["allow"].SumNetReturn) != "0.455000" {
+		t.Fatalf("groups money lost on the wire: %+v", c.Comparisons.Groups)
+	}
+	if c.Comparisons.Difference == nil || string(c.Comparisons.Difference.Mean) != "0.022300" {
+		t.Fatalf("difference lost on the wire: %+v", c.Comparisons.Difference)
+	}
+	if c.Comparisons.Difference.ContainsZero || c.Comparisons.Difference.BootstrapReps != 1000 || c.Comparisons.Difference.Days != 7 {
+		t.Fatalf("difference tail lost on the wire: %+v", c.Comparisons.Difference)
+	}
+	if c.PolicyHash == nil || *c.PolicyHash != parityPolicy {
+		t.Fatalf("policyHash lost on the wire: %+v", c)
+	}
+	if c.OtherPolicyDecisions == nil || *c.OtherPolicyDecisions != 3 {
+		t.Fatalf("otherPolicyDecisions lost on the wire: %+v", c)
+	}
+	if c.BackfillLabeled == nil || *c.BackfillLabeled != 5 {
+		t.Fatalf("backfillLabeled lost on the wire: %+v", c)
+	}
+	if c.BackfillExcluded == nil || *c.BackfillExcluded != 2 {
+		t.Fatalf("backfillExcluded lost on the wire: %+v", c)
+	}
+	if c.Assumptions == nil || c.Assumptions.HorizonBars != 12 || c.Assumptions.FeeBpsRoundTrip != 20 {
+		t.Fatalf("assumptions lost on the wire: %+v", c.Assumptions)
+	}
+	if c.Assumptions.PriceSource != "marketdata-binance" || !c.Assumptions.EqualSize || !c.Assumptions.NoSlippage || !c.Assumptions.NoFunding {
+		t.Fatalf("assumptions tail lost on the wire: %+v", c.Assumptions)
+	}
+	if c.Arena == nil || c.Arena.Decisions != 10 || c.Arena.AgreementShare != 0.8 {
+		t.Fatalf("arena lost on the wire: %+v", c.Arena)
+	}
+	if len(c.Arena.Models) != 1 || c.Arena.Models[0].Model != "dre-x-1" || c.Arena.Models[0].Verdicts != 10 {
+		t.Fatalf("arena models lost on the wire: %+v", c.Arena)
+	}
+	if string(c.Arena.Models[0].AvgAllowReturn) != "0.001800" {
+		t.Fatalf("arena money lost on the wire: %+v", c.Arena.Models[0])
+	}
 
 	var back domain.Report
 	if err := json.Unmarshal(mustWire(t, c), &back); err != nil {
@@ -286,6 +404,50 @@ func TestParityReport(t *testing.T) {
 	}
 	if back.Comparisons == nil || back.Comparisons.Brier != 0.21 || len(back.Comparisons.ByModel) != 1 {
 		t.Fatalf("reverse comparisons mismatch: %+v", back.Comparisons)
+	}
+	if back.PolicyHash != parityPolicy || back.OtherPolicyDecisions != 3 {
+		t.Fatalf("reverse policy mismatch: %+v", back)
+	}
+	if back.BackfillLabeled != 5 || back.BackfillExcluded != 2 {
+		t.Fatalf("reverse backfill mismatch: %+v", back)
+	}
+	if back.Assumptions == nil || *back.Assumptions != *d.Assumptions {
+		t.Fatalf("reverse assumptions mismatch: %+v", back.Assumptions)
+	}
+	if back.Arena == nil || back.Arena.Decisions != 10 || back.Arena.AgreementShare != 0.8 || len(back.Arena.Models) != 1 {
+		t.Fatalf("reverse arena mismatch: %+v", back.Arena)
+	}
+	gotArena := back.Arena.Models[0]
+	wantArena := d.Arena.Models[0]
+	if gotArena.Model != wantArena.Model || gotArena.Verdicts != wantArena.Verdicts ||
+		gotArena.AvgAllowReturn.String() != wantArena.AvgAllowReturn.String() ||
+		gotArena.AUC != wantArena.AUC || gotArena.CostUSD.String() != wantArena.CostUSD.String() {
+		t.Fatalf("reverse arena model mismatch: %+v", gotArena)
+	}
+	gotGrp := back.Comparisons.Groups["allow"]
+	wantGrp := d.Comparisons.Groups["allow"]
+	if gotGrp.Count != wantGrp.Count ||
+		gotGrp.SumNetReturn.String() != wantGrp.SumNetReturn.String() ||
+		gotGrp.AvgNetReturn.String() != wantGrp.AvgNetReturn.String() {
+		t.Fatalf("reverse groups mismatch: %+v", gotGrp)
+	}
+	gotDiff, wantDiff := back.Comparisons.Difference, d.Comparisons.Difference
+	if gotDiff == nil ||
+		gotDiff.Mean.String() != wantDiff.Mean.String() ||
+		gotDiff.Low.String() != wantDiff.Low.String() ||
+		gotDiff.High.String() != wantDiff.High.String() ||
+		gotDiff.ContainsZero != wantDiff.ContainsZero ||
+		gotDiff.BootstrapReps != wantDiff.BootstrapReps ||
+		gotDiff.Days != wantDiff.Days {
+		t.Fatalf("reverse difference mismatch: %+v", gotDiff)
+	}
+	if back.Comparisons.BaseRate != 0.55 || back.Comparisons.ConstantBrier != 0.25 ||
+		back.Comparisons.BrierSkillScore != 0.16 || back.Comparisons.AUC != 0.62 ||
+		back.Comparisons.CalibrationCount != 42 {
+		t.Fatalf("reverse calibration mismatch: %+v", back.Comparisons)
+	}
+	if back.Comparisons.ByModel[0].AvgNetReturn.String() != "0.006686" {
+		t.Fatalf("reverse byModel avg mismatch: %+v", back.Comparisons.ByModel[0])
 	}
 }
 
@@ -310,5 +472,54 @@ func TestParityModelChanged(t *testing.T) {
 	}
 	if back != d {
 		t.Fatalf("reverse mismatch: %+v", back)
+	}
+}
+
+func TestParityArenaDecision(t *testing.T) {
+	choice := "long"
+	resp := DecisionResponse{
+		Answers: DecisionResponseAnswers{
+			"direction": Answer{Type: AnswerTypeChoice, Choice: &choice},
+		},
+		Model: "dre-x-1",
+	}
+	v := GateVerdict{
+		Verdict:    GateVerdictVerdictALLOW,
+		Code:       "allow",
+		Reasons:    []string{"all gate checks passed"},
+		Checks:     []Check{{Name: "risk_check", Passed: true}},
+		PolicyHash: parityPolicy,
+		DecidedAt:  parityTS,
+	}
+	c := ArenaDecision{
+		DecisionID: parityULID,
+		Model:      "dre-x-1",
+		Response:   resp,
+		Verdict:    v,
+	}
+	wire := mustWire(t, c)
+	var back ArenaDecision
+	if err := json.Unmarshal(wire, &back); err != nil {
+		t.Fatalf("ArenaDecision not wire-compatible: %v", err)
+	}
+	if back.DecisionID != parityULID || back.Model != "dre-x-1" {
+		t.Fatalf("round-trip mismatch: %+v", back)
+	}
+	if string(back.Verdict.Verdict) != "ALLOW" || back.Verdict.PolicyHash != parityPolicy {
+		t.Fatalf("verdict lost on the wire: %+v", back.Verdict)
+	}
+	if back.Response.Model != "dre-x-1" || back.Response.Answers["direction"].Choice == nil || *back.Response.Answers["direction"].Choice != "long" {
+		t.Fatalf("response lost on the wire: %+v", back.Response)
+	}
+}
+
+func TestParityNotifySent(t *testing.T) {
+	c := NotifySent{Kind: "verdict", Channel: "telegram", Ok: true}
+	var back NotifySent
+	if err := json.Unmarshal(mustWire(t, c), &back); err != nil {
+		t.Fatalf("NotifySent not wire-compatible: %v", err)
+	}
+	if back != c {
+		t.Fatalf("round-trip mismatch: %+v", back)
 	}
 }

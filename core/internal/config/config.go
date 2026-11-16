@@ -27,6 +27,9 @@ type Config struct {
 	Gate       GateConfig      `json:"gate"`
 	Outcome    OutcomeConfig   `json:"outcome"`
 	Providers  ProvidersConfig `json:"providers"`
+	Notify     NotifyConfig    `json:"notify"`
+	Signals    SignalsConfig   `json:"signals"`
+	Arena      ArenaConfig     `json:"arena"`
 }
 
 // GateConfig tunes the risk gate thresholds.
@@ -38,8 +41,48 @@ type GateConfig struct {
 
 // OutcomeConfig tunes outcome labeling for shadow evaluation.
 type OutcomeConfig struct {
-	HorizonBars int `json:"horizonBars"`
-	FeeBps      int `json:"feeBps"`
+	HorizonBars      int `json:"horizonBars"`
+	FeeBps           int `json:"feeBps"`
+	LabelIntervalSec int `json:"labelIntervalSec"`
+}
+
+// NotifyConfig holds outbound operator notification settings.
+type NotifyConfig struct {
+	Telegram TelegramConfig `json:"telegram"`
+}
+
+// TelegramConfig holds the Telegram notification channel settings.
+// ChatID and SecretRef carry no secret values: SecretRef is a
+// conn/<id>/<field> reference resolved via the secret store.
+type TelegramConfig struct {
+	Enabled   bool   `json:"enabled"`
+	ChatID    string `json:"chatId"`
+	SecretRef string `json:"secretRef"`
+}
+
+// SignalsConfig holds local signal source settings.
+type SignalsConfig struct {
+	Trend TrendConfig `json:"trend"`
+}
+
+// TrendConfig tunes the built-in trend signal source.
+type TrendConfig struct {
+	Enabled   bool     `json:"enabled"`
+	Symbols   []string `json:"symbols"`
+	Timeframe string   `json:"timeframe"`
+	Fast      int      `json:"fast"`
+	Slow      int      `json:"slow"`
+	Sides     []string `json:"sides"`
+}
+
+// ArenaConfig holds the cross-model arena comparison settings.
+type ArenaConfig struct {
+	Enabled         bool   `json:"enabled"`
+	Profile         string `json:"profile"`
+	Model           string `json:"model"`
+	BaseURL         string `json:"baseUrl"`
+	SecretRef       string `json:"secretRef"`
+	PricePerBillion string `json:"pricePerBillion"`
 }
 
 // ProvidersConfig holds provider connection settings.
@@ -75,8 +118,9 @@ func Default() Config {
 			MinBlock: 0.50,
 		},
 		Outcome: OutcomeConfig{
-			HorizonBars: 12,
-			FeeBps:      20,
+			HorizonBars:      12,
+			FeeBps:           10,
+			LabelIntervalSec: 300,
 		},
 		Providers: ProvidersConfig{
 			Decision: DecisionConfig{
@@ -91,6 +135,31 @@ func Default() Config {
 				ID:      "marketdata-binance",
 				BaseURL: "https://api.binance.com",
 			},
+		},
+		Notify: NotifyConfig{
+			Telegram: TelegramConfig{
+				Enabled:   false,
+				ChatID:    "",
+				SecretRef: "",
+			},
+		},
+		Signals: SignalsConfig{
+			Trend: TrendConfig{
+				Enabled:   false,
+				Symbols:   nil,
+				Timeframe: "1h",
+				Fast:      12,
+				Slow:      26,
+				Sides:     []string{"buy"},
+			},
+		},
+		Arena: ArenaConfig{
+			Enabled:         false,
+			Profile:         "drex",
+			Model:           "drex-max-v1.1",
+			BaseURL:         "",
+			SecretRef:       "conn/drex/apiKey",
+			PricePerBillion: "60",
 		},
 	}
 }
@@ -128,6 +197,9 @@ func (c Config) Validate() error {
 	if c.Outcome.FeeBps < 0 || c.Outcome.FeeBps > 10000 {
 		return invalid("outcome.feeBps must be in [0, 10000]")
 	}
+	if c.Outcome.LabelIntervalSec < 1 || c.Outcome.LabelIntervalSec > 86400 {
+		return invalid("outcome.labelIntervalSec must be in [1, 86400]")
+	}
 	d := c.Providers.Decision
 	if strings.TrimSpace(d.ID) == "" {
 		return invalid("providers.decision.id must not be empty")
@@ -162,6 +234,67 @@ func (c Config) Validate() error {
 	if strings.TrimSpace(d.BaseURL) != "" && !isHTTPURL(d.BaseURL) {
 		return invalid("providers.decision.baseUrl must be an http(s) URL")
 	}
+	if tg := c.Notify.Telegram; tg.Enabled {
+		if strings.TrimSpace(tg.ChatID) == "" {
+			return invalid("notify.telegram.chatId must not be empty")
+		}
+		if strings.TrimSpace(tg.SecretRef) == "" {
+			return invalid("notify.telegram.secretRef must not be empty")
+		}
+	}
+	if tr := c.Signals.Trend; tr.Enabled {
+		if len(tr.Symbols) == 0 {
+			return invalid("signals.trend.symbols must not be empty")
+		}
+		for _, s := range tr.Symbols {
+			if strings.TrimSpace(s) == "" {
+				return invalid("signals.trend.symbols must not contain empty entries")
+			}
+		}
+		if strings.TrimSpace(tr.Timeframe) == "" {
+			return invalid("signals.trend.timeframe must not be empty")
+		}
+		if tr.Fast <= 0 {
+			return invalid("signals.trend.fast must be > 0")
+		}
+		if tr.Slow <= tr.Fast {
+			return invalid("signals.trend.slow must be > fast")
+		}
+		if len(tr.Sides) == 0 {
+			return invalid("signals.trend.sides must not be empty")
+		}
+		for _, s := range tr.Sides {
+			if s != "buy" && s != "sell" {
+				return invalid(fmt.Sprintf("signals.trend.sides must be buy|sell, got %q", s))
+			}
+		}
+	}
+	if a := c.Arena; a.Enabled {
+		if a.Profile != "drex" && a.Profile != "jev" {
+			return invalid(fmt.Sprintf("arena.profile must be drex or jev, got %q", a.Profile))
+		}
+		if strings.TrimSpace(a.Model) == "" {
+			return invalid("arena.model must not be empty")
+		}
+		am := strings.TrimSpace(a.Model)
+		if strings.HasSuffix(am, "-latest") || strings.HasSuffix(am, "-preview") {
+			return invalid("arena.model must pin a concrete model id, aliases like *-latest/*-preview are not allowed")
+		}
+		if strings.TrimSpace(a.SecretRef) == "" {
+			return invalid("arena.secretRef must not be empty")
+		}
+		price, err := domain.ParseDecimal(strings.TrimSpace(a.PricePerBillion))
+		if err != nil {
+			return domain.WrapError(domain.CodeInvalidRequest,
+				"config: arena.pricePerBillion is not a decimal", err)
+		}
+		if price.Sign() <= 0 {
+			return invalid("arena.pricePerBillion must be > 0")
+		}
+		if strings.TrimSpace(a.BaseURL) != "" && !isLoopbackHTTPURL(a.BaseURL) {
+			return invalid("arena.baseUrl must be an https URL or a loopback http URL (127.0.0.1, ::1)")
+		}
+	}
 	return nil
 }
 
@@ -172,6 +305,31 @@ func isHTTPURL(s string) bool {
 		return false
 	}
 	return u.Scheme == "http" || u.Scheme == "https"
+}
+
+// isLoopbackHTTPURL reports whether s is an absolute http(s) URL without
+// userinfo, query or fragment, where plain http is restricted to the
+// 127.0.0.1 and ::1 loopback hosts (mirrors the decision providers).
+func isLoopbackHTTPURL(s string) bool {
+	u, err := url.Parse(strings.TrimSpace(s))
+	if err != nil || !u.IsAbs() {
+		return false
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "https" && scheme != "http" {
+		return false
+	}
+	if u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		return false
+	}
+	host := u.Hostname()
+	if host == "" {
+		return false
+	}
+	if scheme == "http" && host != "127.0.0.1" && host != "::1" {
+		return false
+	}
+	return true
 }
 
 // Load reads the JSON config at path. A missing file is an error.

@@ -130,3 +130,19 @@ type Journal interface {
 	// Verify checks the hash chain integrity.
 	Verify(ctx context.Context) (domain.VerifyResult, error)
 }
+
+// Notification is an already-sanitized outbound message.
+//
+// Text carries no secrets: callers pass the final rendered message.
+type Notification struct {
+	// Kind classifies the message (e.g. "verdict", "report").
+	Kind string
+	// Text is the already-sanitized message body.
+	Text string
+}
+
+// Notifier delivers sanitized notifications to an operator channel.
+type Notifier interface {
+	// Send delivers n; implementations never receive secrets.
+	Send(ctx context.Context, n Notification) error
+}

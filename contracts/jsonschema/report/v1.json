@@ -21,7 +21,13 @@
     "decisionCostUsd": { "$ref": "../common/v1.json#/$defs/Decimal" },
     "latencyP50Ms": { "type": "integer", "minimum": 0 },
     "latencyP95Ms": { "type": "integer", "minimum": 0 },
-    "comparisons": { "$ref": "#/$defs/ReportComparisons" }
+    "comparisons": { "$ref": "#/$defs/ReportComparisons" },
+    "policyHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "otherPolicyDecisions": { "type": "integer", "minimum": 0 },
+    "backfillLabeled": { "type": "integer", "minimum": 0 },
+    "backfillExcluded": { "type": "integer", "minimum": 0 },
+    "assumptions": { "$ref": "#/$defs/ReportAssumptions" },
+    "arena": { "$ref": "#/$defs/ArenaReport" }
   },
   "$defs": {
     "ReportComparisons": {
@@ -41,7 +47,17 @@
         "byModel": {
           "type": "array",
           "items": { "$ref": "#/$defs/ModelBreakdown" }
-        }
+        },
+        "groups": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/GroupStats" }
+        },
+        "difference": { "$ref": "#/$defs/DifferenceStats" },
+        "baseRate": { "type": "number", "minimum": 0, "maximum": 1 },
+        "constantBrier": { "type": "number", "minimum": 0, "maximum": 1 },
+        "brierSkillScore": { "type": "number" },
+        "auc": { "type": "number", "minimum": 0, "maximum": 1 },
+        "calibrationCount": { "type": "integer", "minimum": 0 }
       }
     },
     "ReliabilityBucket": {
@@ -65,7 +81,69 @@
         "brier": { "type": "number", "minimum": 0, "maximum": 1 },
         "ece": { "type": "number", "minimum": 0, "maximum": 1 },
         "netReturnSum": { "$ref": "../common/v1.json#/$defs/Decimal" },
+        "costUsd": { "$ref": "../common/v1.json#/$defs/Decimal" },
+        "avgNetReturn": { "$ref": "../common/v1.json#/$defs/Decimal" }
+      }
+    },
+    "GroupStats": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["count", "sumNetReturn", "avgNetReturn"],
+      "properties": {
+        "count": { "type": "integer", "minimum": 0 },
+        "sumNetReturn": { "$ref": "../common/v1.json#/$defs/Decimal" },
+        "avgNetReturn": { "$ref": "../common/v1.json#/$defs/Decimal" }
+      }
+    },
+    "DifferenceStats": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mean", "low", "high", "containsZero", "bootstrapReps", "days"],
+      "properties": {
+        "mean": { "$ref": "../common/v1.json#/$defs/Decimal" },
+        "low": { "$ref": "../common/v1.json#/$defs/Decimal" },
+        "high": { "$ref": "../common/v1.json#/$defs/Decimal" },
+        "containsZero": { "type": "boolean" },
+        "bootstrapReps": { "type": "integer", "minimum": 0 },
+        "days": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "ReportAssumptions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["horizonBars", "feeBpsRoundTrip", "priceSource", "equalSize", "noSlippage", "noFunding"],
+      "properties": {
+        "horizonBars": { "type": "integer" },
+        "feeBpsRoundTrip": { "type": "integer" },
+        "priceSource": { "type": "string" },
+        "equalSize": { "type": "boolean" },
+        "noSlippage": { "type": "boolean" },
+        "noFunding": { "type": "boolean" }
+      }
+    },
+    "ArenaModelStats": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model", "verdicts", "avgAllowReturn", "auc", "costUsd"],
+      "properties": {
+        "model": { "type": "string", "minLength": 1 },
+        "verdicts": { "type": "integer", "minimum": 0 },
+        "avgAllowReturn": { "$ref": "../common/v1.json#/$defs/Decimal" },
+        "auc": { "type": "number", "minimum": 0, "maximum": 1 },
         "costUsd": { "$ref": "../common/v1.json#/$defs/Decimal" }
+      }
+    },
+    "ArenaReport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["decisions", "agreementShare", "models"],
+      "properties": {
+        "decisions": { "type": "integer", "minimum": 0 },
+        "agreementShare": { "type": "number", "minimum": 0, "maximum": 1 },
+        "models": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ArenaModelStats" }
+        }
       }
     }
   }

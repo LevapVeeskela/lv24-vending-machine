@@ -49,6 +49,19 @@
       "description": "See common $defs/Timestamp. Inlined so the generated Go field is time.Time.",
       "type": "string",
       "format": "date-time"
+    },
+    "receivedAt": {
+      "description": "Journal time when gate.request was accepted (event ts).",
+      "type": "string",
+      "format": "date-time"
+    },
+    "backfill": {
+      "description": "True when the signal arrived later than one timeframe interval; the entry bar rule ignores receivedAt.",
+      "type": "boolean"
+    },
+    "priceSource": {
+      "description": "Candle provider id used for labeling.",
+      "type": "string"
     }
   }
 }

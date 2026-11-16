@@ -24,6 +24,8 @@ func TestContractExamples(t *testing.T) {
 		"outcome.json":                  func() any { return &Outcome{} },
 		"report.json":                   func() any { return &Report{} },
 		"event.json":                    func() any { return &Event{} },
+		"arena-decision.json":           func() any { return &ArenaDecision{} },
+		"notify-sent.json":              func() any { return &NotifySent{} },
 	}
 
 	invalid := map[string]func() any{
@@ -57,6 +59,10 @@ func TestContractExamples(t *testing.T) {
 		"invalid-decimal.json": func() any { return new(Decimal) },
 		// invalid-instrument-ref.json: missing required "symbol".
 		"invalid-instrument-ref.json": func() any { return &InstrumentRef{} },
+		// invalid-arena-decision.json: missing required "decisionId".
+		"invalid-arena-decision.json": func() any { return &ArenaDecision{} },
+		// invalid-notify-sent.json: missing required "ok".
+		"invalid-notify-sent.json": func() any { return &NotifySent{} },
 	}
 
 	files, err := filepath.Glob(filepath.Join(examplesDir, "*.json"))

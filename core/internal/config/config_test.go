@@ -24,6 +24,8 @@ func TestValidateBad(t *testing.T) {
 		{"horizonHigh", func(c *Config) { c.Outcome.HorizonBars = 1001 }},
 		{"feeNeg", func(c *Config) { c.Outcome.FeeBps = -1 }},
 		{"feeHigh", func(c *Config) { c.Outcome.FeeBps = 10001 }},
+		{"labelZero", func(c *Config) { c.Outcome.LabelIntervalSec = 0 }},
+		{"labelHigh", func(c *Config) { c.Outcome.LabelIntervalSec = 86401 }},
 		{"gateVersion", func(c *Config) { c.Gate.Version = "" }},
 		{"minPassZero", func(c *Config) { c.Gate.MinPass = 0 }},
 		{"minPassHigh", func(c *Config) { c.Gate.MinPass = 1.5 }},
@@ -37,6 +39,67 @@ func TestValidateBad(t *testing.T) {
 		{"priceZero", func(c *Config) { c.Providers.Decision.PricePerBillion = "0" }},
 		{"marketID", func(c *Config) { c.Providers.MarketData.ID = "" }},
 		{"marketURL", func(c *Config) { c.Providers.MarketData.BaseURL = "ftp://x" }},
+		{"tgChat", func(c *Config) { c.Notify.Telegram.Enabled = true }},
+		{"tgSecret", func(c *Config) {
+			c.Notify.Telegram.Enabled = true
+			c.Notify.Telegram.ChatID = "123"
+		}},
+		{"trendSymbols", func(c *Config) {
+			c.Signals.Trend.Enabled = true
+			c.Signals.Trend.Symbols = nil
+		}},
+		{"trendSymbolEmpty", func(c *Config) {
+			c.Signals.Trend.Enabled = true
+			c.Signals.Trend.Symbols = []string{"BTCUSDT", " "}
+		}},
+		{"trendTimeframe", func(c *Config) {
+			c.Signals.Trend.Enabled = true
+			c.Signals.Trend.Symbols = []string{"BTCUSDT"}
+			c.Signals.Trend.Timeframe = ""
+		}},
+		{"trendFast", func(c *Config) {
+			c.Signals.Trend.Enabled = true
+			c.Signals.Trend.Symbols = []string{"BTCUSDT"}
+			c.Signals.Trend.Fast = 0
+		}},
+		{"trendSlow", func(c *Config) {
+			c.Signals.Trend.Enabled = true
+			c.Signals.Trend.Symbols = []string{"BTCUSDT"}
+			c.Signals.Trend.Slow = c.Signals.Trend.Fast
+		}},
+		{"trendSides", func(c *Config) {
+			c.Signals.Trend.Enabled = true
+			c.Signals.Trend.Symbols = []string{"BTCUSDT"}
+			c.Signals.Trend.Sides = []string{"hold"}
+		}},
+		{"arenaProfile", func(c *Config) {
+			c.Arena.Enabled = true
+			c.Arena.Profile = "openai"
+		}},
+		{"arenaModel", func(c *Config) {
+			c.Arena.Enabled = true
+			c.Arena.Model = ""
+		}},
+		{"arenaLatest", func(c *Config) {
+			c.Arena.Enabled = true
+			c.Arena.Model = "drex-max-latest"
+		}},
+		{"arenaPreview", func(c *Config) {
+			c.Arena.Enabled = true
+			c.Arena.Model = "drex-max-preview"
+		}},
+		{"arenaSecret", func(c *Config) {
+			c.Arena.Enabled = true
+			c.Arena.SecretRef = ""
+		}},
+		{"arenaPrice", func(c *Config) {
+			c.Arena.Enabled = true
+			c.Arena.PricePerBillion = "0"
+		}},
+		{"arenaURL", func(c *Config) {
+			c.Arena.Enabled = true
+			c.Arena.BaseURL = "http://example.com"
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -145,12 +208,16 @@ func TestOutcomeDefaults(t *testing.T) {
 	if c.Outcome.HorizonBars != 12 {
 		t.Fatalf("HorizonBars = %d, want 12", c.Outcome.HorizonBars)
 	}
-	if c.Outcome.FeeBps != 20 {
-		t.Fatalf("FeeBps = %d, want 20", c.Outcome.FeeBps)
+	if c.Outcome.FeeBps != 10 {
+		t.Fatalf("FeeBps = %d, want 10", c.Outcome.FeeBps)
+	}
+	if c.Outcome.LabelIntervalSec != 300 {
+		t.Fatalf("LabelIntervalSec = %d, want 300", c.Outcome.LabelIntervalSec)
 	}
 	for key, want := range map[string]float64{
-		"outcome.horizonBars": 12,
-		"outcome.feeBps":      20,
+		"outcome.horizonBars":      12,
+		"outcome.feeBps":           10,
+		"outcome.labelIntervalSec": 300,
 	} {
 		v, err := c.Get(key)
 		if err != nil {
@@ -214,6 +281,49 @@ func TestDefaultPaths(t *testing.T) {
 	})
 	if err != nil || p2 == "" {
 		t.Fatalf("DefaultConfigPath fallback = %q, %v", p2, err)
+	}
+}
+
+func TestSectionDefaults(t *testing.T) {
+	c := Default()
+	if c.Notify.Telegram.Enabled {
+		t.Fatalf("Notify.Telegram.Enabled = true, want false")
+	}
+	tr := c.Signals.Trend
+	if tr.Enabled {
+		t.Fatalf("Signals.Trend.Enabled = true, want false")
+	}
+	if tr.Timeframe != "1h" || tr.Fast != 12 || tr.Slow != 26 {
+		t.Fatalf("Trend defaults = %+v, want 1h/12/26", tr)
+	}
+	if len(tr.Sides) != 1 || tr.Sides[0] != "buy" {
+		t.Fatalf("Trend.Sides = %v, want [buy]", tr.Sides)
+	}
+	if c.Arena.Enabled {
+		t.Fatalf("Arena.Enabled = true, want false")
+	}
+}
+
+func TestEnabledSectionsValid(t *testing.T) {
+	c := Default()
+	c.Notify.Telegram.Enabled = true
+	c.Notify.Telegram.ChatID = "123456"
+	c.Notify.Telegram.SecretRef = "conn/tg/token"
+	c.Signals.Trend.Enabled = true
+	c.Signals.Trend.Symbols = []string{"BTCUSDT"}
+	c.Signals.Trend.Sides = []string{"buy", "sell"}
+	c.Arena.Enabled = true
+	c.Arena.BaseURL = "http://127.0.0.1:11434/v1"
+	if err := c.Validate(); err != nil {
+		t.Fatalf("Validate() = %v", err)
+	}
+	c.Arena.BaseURL = "https://example.com/v1"
+	if err := c.Validate(); err != nil {
+		t.Fatalf("Validate() https arena = %v", err)
+	}
+	c.Signals.Trend.Symbols = []string{"BTCUSDT", "ETHUSDT"}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("Validate() multi-symbol = %v", err)
 	}
 }
 

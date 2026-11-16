@@ -12,6 +12,8 @@ const (
 	EventGateVerdict          = "gate.verdict"
 	EventOutcomeLabeled       = "outcome.labeled"
 	EventDecisionModelChanged = "decision.model_changed"
+	EventArenaDecision        = "arena.decision"
+	EventNotifySent           = "notify.sent"
 )
 
 // EventSchemaVersion is the current journal payload schema version.

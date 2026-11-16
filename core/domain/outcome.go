@@ -25,4 +25,10 @@ type Outcome struct {
 	// exactly the used bars (decimals normalized to 12 decimal places).
 	CandlesHash string    `json:"candlesHash"`
 	LabeledAt   time.Time `json:"labeledAt"`
+	// ReceivedAt is the journal time when gate.request was accepted.
+	ReceivedAt time.Time `json:"receivedAt,omitempty"`
+	// Backfill marks signals that arrived later than one timeframe interval.
+	Backfill bool `json:"backfill,omitempty"`
+	// PriceSource is the candle provider id used for labeling.
+	PriceSource string `json:"priceSource,omitempty"`
 }

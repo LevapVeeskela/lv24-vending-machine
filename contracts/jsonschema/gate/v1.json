@@ -13,7 +13,7 @@
     "intentKind": { "enum": ["entry", "exit"] },
     "timeframe": { "type": "string", "minLength": 1 },
     "ts": {
-      "description": "See common $defs/Timestamp. Inlined so the generated Go field is time.Time (a named time.Time type would not implement json.Unmarshaler).",
+      "description": "Moment the signal became known (the close of the signal bar), not the bar open.",
       "type": "string",
       "format": "date-time"
     },

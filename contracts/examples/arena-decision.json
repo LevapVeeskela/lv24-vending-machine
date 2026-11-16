@@ -1,0 +1,28 @@
+{
+  "decisionId": "01J9ZQ8W3E12AB3456789CDEFG",
+  "model": "dre-x-1",
+  "response": {
+    "answers": {
+      "direction": {
+        "type": "choice",
+        "choice": "long",
+        "probabilities": { "long": 0.6, "flat": 0.3, "short": 0.1 },
+        "confidence": 0.4
+      }
+    },
+    "model": "dre-x-1",
+    "requestedModel": "dre-x-1",
+    "usage": { "inputTokens": 120, "outputTokens": 40, "costUsd": "0.0000072" },
+    "requestId": "req-001"
+  },
+  "verdict": {
+    "verdict": "ALLOW",
+    "code": "allow",
+    "reasons": ["all gate checks passed"],
+    "checks": [{ "name": "risk_check", "passed": true }],
+    "decisionId": "01J9ZQ8W3E12AB3456789CDEFG",
+    "model": "dre-x-1",
+    "policyHash": "b9ae3472b8ff26cc2889f5db91eb555ed09a935a112f16984ea1014a69e59b4f",
+    "decidedAt": "2026-11-16T06:00:00Z"
+  }
+}

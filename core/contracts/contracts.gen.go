@@ -96,6 +96,156 @@ func (j *Answer) UnmarshalJSON(value []byte) error {
 	return nil
 }
 
+type ArenaDecision struct {
+	// DecisionID corresponds to the JSON schema field "decisionId".
+	DecisionID string `json:"decisionId"`
+
+	// Model corresponds to the JSON schema field "model".
+	Model string `json:"model"`
+
+	// Response corresponds to the JSON schema field "response".
+	Response DecisionResponse `json:"response"`
+
+	// Verdict corresponds to the JSON schema field "verdict".
+	Verdict GateVerdict `json:"verdict"`
+}
+
+// UnmarshalJSON implements json.Unmarshaler.
+func (j *ArenaDecision) UnmarshalJSON(value []byte) error {
+	var raw map[string]interface{}
+	if err := json.Unmarshal(value, &raw); err != nil {
+		return err
+	}
+	if _, ok := raw["decisionId"]; raw != nil && !ok {
+		return fmt.Errorf("field decisionId in ArenaDecision: required")
+	}
+	if _, ok := raw["model"]; raw != nil && !ok {
+		return fmt.Errorf("field model in ArenaDecision: required")
+	}
+	if _, ok := raw["response"]; raw != nil && !ok {
+		return fmt.Errorf("field response in ArenaDecision: required")
+	}
+	if _, ok := raw["verdict"]; raw != nil && !ok {
+		return fmt.Errorf("field verdict in ArenaDecision: required")
+	}
+	type Plain ArenaDecision
+	var plain Plain
+	if err := json.Unmarshal(value, &plain); err != nil {
+		return err
+	}
+	if utf8.RuneCountInString(string(plain.DecisionID)) < 1 {
+		return fmt.Errorf("field %s length: must be >= %d", "decisionId", 1)
+	}
+	if utf8.RuneCountInString(string(plain.Model)) < 1 {
+		return fmt.Errorf("field %s length: must be >= %d", "model", 1)
+	}
+	*j = ArenaDecision(plain)
+	return nil
+}
+
+type ArenaModelStats struct {
+	// Auc corresponds to the JSON schema field "auc".
+	Auc float64 `json:"auc"`
+
+	// AvgAllowReturn corresponds to the JSON schema field "avgAllowReturn".
+	AvgAllowReturn Decimal `json:"avgAllowReturn"`
+
+	// CostUSD corresponds to the JSON schema field "costUsd".
+	CostUSD Decimal `json:"costUsd"`
+
+	// Model corresponds to the JSON schema field "model".
+	Model string `json:"model"`
+
+	// Verdicts corresponds to the JSON schema field "verdicts".
+	Verdicts int `json:"verdicts"`
+}
+
+// UnmarshalJSON implements json.Unmarshaler.
+func (j *ArenaModelStats) UnmarshalJSON(value []byte) error {
+	var raw map[string]interface{}
+	if err := json.Unmarshal(value, &raw); err != nil {
+		return err
+	}
+	if _, ok := raw["auc"]; raw != nil && !ok {
+		return fmt.Errorf("field auc in ArenaModelStats: required")
+	}
+	if _, ok := raw["avgAllowReturn"]; raw != nil && !ok {
+		return fmt.Errorf("field avgAllowReturn in ArenaModelStats: required")
+	}
+	if _, ok := raw["costUsd"]; raw != nil && !ok {
+		return fmt.Errorf("field costUsd in ArenaModelStats: required")
+	}
+	if _, ok := raw["model"]; raw != nil && !ok {
+		return fmt.Errorf("field model in ArenaModelStats: required")
+	}
+	if _, ok := raw["verdicts"]; raw != nil && !ok {
+		return fmt.Errorf("field verdicts in ArenaModelStats: required")
+	}
+	type Plain ArenaModelStats
+	var plain Plain
+	if err := json.Unmarshal(value, &plain); err != nil {
+		return err
+	}
+	if 1 < plain.Auc {
+		return fmt.Errorf("field %s: must be <= %v", "auc", 1)
+	}
+	if 0 > plain.Auc {
+		return fmt.Errorf("field %s: must be >= %v", "auc", 0)
+	}
+	if utf8.RuneCountInString(string(plain.Model)) < 1 {
+		return fmt.Errorf("field %s length: must be >= %d", "model", 1)
+	}
+	if 0 > plain.Verdicts {
+		return fmt.Errorf("field %s: must be >= %v", "verdicts", 0)
+	}
+	*j = ArenaModelStats(plain)
+	return nil
+}
+
+type ArenaReport struct {
+	// AgreementShare corresponds to the JSON schema field "agreementShare".
+	AgreementShare float64 `json:"agreementShare"`
+
+	// Decisions corresponds to the JSON schema field "decisions".
+	Decisions int `json:"decisions"`
+
+	// Models corresponds to the JSON schema field "models".
+	Models []ArenaModelStats `json:"models"`
+}
+
+// UnmarshalJSON implements json.Unmarshaler.
+func (j *ArenaReport) UnmarshalJSON(value []byte) error {
+	var raw map[string]interface{}
+	if err := json.Unmarshal(value, &raw); err != nil {
+		return err
+	}
+	if _, ok := raw["agreementShare"]; raw != nil && !ok {
+		return fmt.Errorf("field agreementShare in ArenaReport: required")
+	}
+	if _, ok := raw["decisions"]; raw != nil && !ok {
+		return fmt.Errorf("field decisions in ArenaReport: required")
+	}
+	if _, ok := raw["models"]; raw != nil && !ok {
+		return fmt.Errorf("field models in ArenaReport: required")
+	}
+	type Plain ArenaReport
+	var plain Plain
+	if err := json.Unmarshal(value, &plain); err != nil {
+		return err
+	}
+	if 1 < plain.AgreementShare {
+		return fmt.Errorf("field %s: must be <= %v", "agreementShare", 1)
+	}
+	if 0 > plain.AgreementShare {
+		return fmt.Errorf("field %s: must be >= %v", "agreementShare", 0)
+	}
+	if 0 > plain.Decisions {
+		return fmt.Errorf("field %s: must be >= %v", "decisions", 0)
+	}
+	*j = ArenaReport(plain)
+	return nil
+}
+
 type Check struct {
 	// Detail corresponds to the JSON schema field "detail".
 	Detail *string `json:"detail,omitempty,omitzero"`
@@ -289,6 +439,65 @@ func (j *DecisionResponse) UnmarshalJSON(value []byte) error {
 	return nil
 }
 
+type DifferenceStats struct {
+	// BootstrapReps corresponds to the JSON schema field "bootstrapReps".
+	BootstrapReps int `json:"bootstrapReps"`
+
+	// ContainsZero corresponds to the JSON schema field "containsZero".
+	ContainsZero bool `json:"containsZero"`
+
+	// Days corresponds to the JSON schema field "days".
+	Days int `json:"days"`
+
+	// High corresponds to the JSON schema field "high".
+	High Decimal `json:"high"`
+
+	// Low corresponds to the JSON schema field "low".
+	Low Decimal `json:"low"`
+
+	// Mean corresponds to the JSON schema field "mean".
+	Mean Decimal `json:"mean"`
+}
+
+// UnmarshalJSON implements json.Unmarshaler.
+func (j *DifferenceStats) UnmarshalJSON(value []byte) error {
+	var raw map[string]interface{}
+	if err := json.Unmarshal(value, &raw); err != nil {
+		return err
+	}
+	if _, ok := raw["bootstrapReps"]; raw != nil && !ok {
+		return fmt.Errorf("field bootstrapReps in DifferenceStats: required")
+	}
+	if _, ok := raw["containsZero"]; raw != nil && !ok {
+		return fmt.Errorf("field containsZero in DifferenceStats: required")
+	}
+	if _, ok := raw["days"]; raw != nil && !ok {
+		return fmt.Errorf("field days in DifferenceStats: required")
+	}
+	if _, ok := raw["high"]; raw != nil && !ok {
+		return fmt.Errorf("field high in DifferenceStats: required")
+	}
+	if _, ok := raw["low"]; raw != nil && !ok {
+		return fmt.Errorf("field low in DifferenceStats: required")
+	}
+	if _, ok := raw["mean"]; raw != nil && !ok {
+		return fmt.Errorf("field mean in DifferenceStats: required")
+	}
+	type Plain DifferenceStats
+	var plain Plain
+	if err := json.Unmarshal(value, &plain); err != nil {
+		return err
+	}
+	if 0 > plain.BootstrapReps {
+		return fmt.Errorf("field %s: must be >= %v", "bootstrapReps", 0)
+	}
+	if 0 > plain.Days {
+		return fmt.Errorf("field %s: must be >= %v", "days", 0)
+	}
+	*j = DifferenceStats(plain)
+	return nil
+}
+
 // Journal event envelope per 06-risk-execution.md section 11.
 type Event struct {
 	// CodeVersion corresponds to the JSON schema field "codeVersion".
@@ -428,8 +637,7 @@ type GateRequest struct {
 	// Timeframe corresponds to the JSON schema field "timeframe".
 	Timeframe string `json:"timeframe"`
 
-	// See common $defs/Timestamp. Inlined so the generated Go field is time.Time (a
-	// named time.Time type would not implement json.Unmarshaler).
+	// Moment the signal became known (the close of the signal bar), not the bar open.
 	Ts time.Time `json:"ts"`
 }
 
@@ -709,6 +917,44 @@ func (j *GateVerdict) UnmarshalJSON(value []byte) error {
 	return nil
 }
 
+type GroupStats struct {
+	// AvgNetReturn corresponds to the JSON schema field "avgNetReturn".
+	AvgNetReturn Decimal `json:"avgNetReturn"`
+
+	// Count corresponds to the JSON schema field "count".
+	Count int `json:"count"`
+
+	// SumNetReturn corresponds to the JSON schema field "sumNetReturn".
+	SumNetReturn Decimal `json:"sumNetReturn"`
+}
+
+// UnmarshalJSON implements json.Unmarshaler.
+func (j *GroupStats) UnmarshalJSON(value []byte) error {
+	var raw map[string]interface{}
+	if err := json.Unmarshal(value, &raw); err != nil {
+		return err
+	}
+	if _, ok := raw["avgNetReturn"]; raw != nil && !ok {
+		return fmt.Errorf("field avgNetReturn in GroupStats: required")
+	}
+	if _, ok := raw["count"]; raw != nil && !ok {
+		return fmt.Errorf("field count in GroupStats: required")
+	}
+	if _, ok := raw["sumNetReturn"]; raw != nil && !ok {
+		return fmt.Errorf("field sumNetReturn in GroupStats: required")
+	}
+	type Plain GroupStats
+	var plain Plain
+	if err := json.Unmarshal(value, &plain); err != nil {
+		return err
+	}
+	if 0 > plain.Count {
+		return fmt.Errorf("field %s: must be >= %v", "count", 0)
+	}
+	*j = GroupStats(plain)
+	return nil
+}
+
 // Reference to a trading instrument on a venue.
 type InstrumentRef struct {
 	// Symbol corresponds to the JSON schema field "symbol".
@@ -746,6 +992,9 @@ func (j *InstrumentRef) UnmarshalJSON(value []byte) error {
 }
 
 type ModelBreakdown struct {
+	// AvgNetReturn corresponds to the JSON schema field "avgNetReturn".
+	AvgNetReturn *Decimal `json:"avgNetReturn,omitempty,omitzero"`
+
 	// Brier corresponds to the JSON schema field "brier".
 	Brier float64 `json:"brier"`
 
@@ -816,6 +1065,47 @@ func (j *ModelBreakdown) UnmarshalJSON(value []byte) error {
 	return nil
 }
 
+type NotifySent struct {
+	// Channel corresponds to the JSON schema field "channel".
+	Channel string `json:"channel"`
+
+	// Kind corresponds to the JSON schema field "kind".
+	Kind string `json:"kind"`
+
+	// Ok corresponds to the JSON schema field "ok".
+	Ok bool `json:"ok"`
+}
+
+// UnmarshalJSON implements json.Unmarshaler.
+func (j *NotifySent) UnmarshalJSON(value []byte) error {
+	var raw map[string]interface{}
+	if err := json.Unmarshal(value, &raw); err != nil {
+		return err
+	}
+	if _, ok := raw["channel"]; raw != nil && !ok {
+		return fmt.Errorf("field channel in NotifySent: required")
+	}
+	if _, ok := raw["kind"]; raw != nil && !ok {
+		return fmt.Errorf("field kind in NotifySent: required")
+	}
+	if _, ok := raw["ok"]; raw != nil && !ok {
+		return fmt.Errorf("field ok in NotifySent: required")
+	}
+	type Plain NotifySent
+	var plain Plain
+	if err := json.Unmarshal(value, &plain); err != nil {
+		return err
+	}
+	if utf8.RuneCountInString(string(plain.Channel)) < 1 {
+		return fmt.Errorf("field %s length: must be >= %d", "channel", 1)
+	}
+	if utf8.RuneCountInString(string(plain.Kind)) < 1 {
+		return fmt.Errorf("field %s length: must be >= %d", "kind", 1)
+	}
+	*j = NotifySent(plain)
+	return nil
+}
+
 type Option struct {
 	// Description corresponds to the JSON schema field "description".
 	Description string `json:"description"`
@@ -850,6 +1140,10 @@ func (j *Option) UnmarshalJSON(value []byte) error {
 
 // Labeled trading outcome for one signal.
 type Outcome struct {
+	// True when the signal arrived later than one timeframe interval; the entry bar
+	// rule ignores receivedAt.
+	Backfill *bool `json:"backfill,omitempty,omitzero"`
+
 	// Lowercase hex SHA-256 of the canonical JSON of exactly the used bars. Decimal
 	// fields are normalized to 12 decimal places; timestamps are UTC RFC3339Nano.
 	CandlesHash string `json:"candlesHash"`
@@ -894,6 +1188,12 @@ type Outcome struct {
 	// Signed return from the entry bar open to the exit bar close, minus the
 	// round-trip fee.
 	NetReturn Decimal `json:"netReturn"`
+
+	// Candle provider id used for labeling.
+	PriceSource *string `json:"priceSource,omitempty,omitzero"`
+
+	// Journal time when gate.request was accepted (event ts).
+	ReceivedAt *time.Time `json:"receivedAt,omitempty,omitzero"`
 
 	// Side corresponds to the JSON schema field "side".
 	Side OutcomeSide `json:"side"`
@@ -1150,6 +1450,18 @@ func (j *ReliabilityBucket) UnmarshalJSON(value []byte) error {
 
 // Summary of labeled outcomes and gate performance.
 type Report struct {
+	// Arena corresponds to the JSON schema field "arena".
+	Arena *ArenaReport `json:"arena,omitempty,omitzero"`
+
+	// Assumptions corresponds to the JSON schema field "assumptions".
+	Assumptions *ReportAssumptions `json:"assumptions,omitempty,omitzero"`
+
+	// BackfillExcluded corresponds to the JSON schema field "backfillExcluded".
+	BackfillExcluded *int `json:"backfillExcluded,omitempty,omitzero"`
+
+	// BackfillLabeled corresponds to the JSON schema field "backfillLabeled".
+	BackfillLabeled *int `json:"backfillLabeled,omitempty,omitzero"`
+
 	// Comparisons corresponds to the JSON schema field "comparisons".
 	Comparisons *ReportComparisons `json:"comparisons,omitempty,omitzero"`
 
@@ -1168,11 +1480,71 @@ type Report struct {
 	// LatencyP95Ms corresponds to the JSON schema field "latencyP95Ms".
 	LatencyP95Ms int `json:"latencyP95Ms"`
 
+	// OtherPolicyDecisions corresponds to the JSON schema field
+	// "otherPolicyDecisions".
+	OtherPolicyDecisions *int `json:"otherPolicyDecisions,omitempty,omitzero"`
+
+	// PolicyHash corresponds to the JSON schema field "policyHash".
+	PolicyHash *string `json:"policyHash,omitempty,omitzero"`
+
 	// Sufficient corresponds to the JSON schema field "sufficient".
 	Sufficient bool `json:"sufficient"`
 
 	// VerdictCounts corresponds to the JSON schema field "verdictCounts".
 	VerdictCounts ReportVerdictCounts `json:"verdictCounts"`
+}
+
+type ReportAssumptions struct {
+	// EqualSize corresponds to the JSON schema field "equalSize".
+	EqualSize bool `json:"equalSize"`
+
+	// FeeBpsRoundTrip corresponds to the JSON schema field "feeBpsRoundTrip".
+	FeeBpsRoundTrip int `json:"feeBpsRoundTrip"`
+
+	// HorizonBars corresponds to the JSON schema field "horizonBars".
+	HorizonBars int `json:"horizonBars"`
+
+	// NoFunding corresponds to the JSON schema field "noFunding".
+	NoFunding bool `json:"noFunding"`
+
+	// NoSlippage corresponds to the JSON schema field "noSlippage".
+	NoSlippage bool `json:"noSlippage"`
+
+	// PriceSource corresponds to the JSON schema field "priceSource".
+	PriceSource string `json:"priceSource"`
+}
+
+// UnmarshalJSON implements json.Unmarshaler.
+func (j *ReportAssumptions) UnmarshalJSON(value []byte) error {
+	var raw map[string]interface{}
+	if err := json.Unmarshal(value, &raw); err != nil {
+		return err
+	}
+	if _, ok := raw["equalSize"]; raw != nil && !ok {
+		return fmt.Errorf("field equalSize in ReportAssumptions: required")
+	}
+	if _, ok := raw["feeBpsRoundTrip"]; raw != nil && !ok {
+		return fmt.Errorf("field feeBpsRoundTrip in ReportAssumptions: required")
+	}
+	if _, ok := raw["horizonBars"]; raw != nil && !ok {
+		return fmt.Errorf("field horizonBars in ReportAssumptions: required")
+	}
+	if _, ok := raw["noFunding"]; raw != nil && !ok {
+		return fmt.Errorf("field noFunding in ReportAssumptions: required")
+	}
+	if _, ok := raw["noSlippage"]; raw != nil && !ok {
+		return fmt.Errorf("field noSlippage in ReportAssumptions: required")
+	}
+	if _, ok := raw["priceSource"]; raw != nil && !ok {
+		return fmt.Errorf("field priceSource in ReportAssumptions: required")
+	}
+	type Plain ReportAssumptions
+	var plain Plain
+	if err := json.Unmarshal(value, &plain); err != nil {
+		return err
+	}
+	*j = ReportAssumptions(plain)
+	return nil
 }
 
 type ReportComparisons struct {
@@ -1182,14 +1554,35 @@ type ReportComparisons struct {
 	// AllowReturn corresponds to the JSON schema field "allowReturn".
 	AllowReturn Decimal `json:"allowReturn"`
 
+	// Auc corresponds to the JSON schema field "auc".
+	Auc *float64 `json:"auc,omitempty,omitzero"`
+
+	// BaseRate corresponds to the JSON schema field "baseRate".
+	BaseRate *float64 `json:"baseRate,omitempty,omitzero"`
+
 	// Brier corresponds to the JSON schema field "brier".
 	Brier float64 `json:"brier"`
+
+	// BrierSkillScore corresponds to the JSON schema field "brierSkillScore".
+	BrierSkillScore *float64 `json:"brierSkillScore,omitempty,omitzero"`
 
 	// ByModel corresponds to the JSON schema field "byModel".
 	ByModel []ModelBreakdown `json:"byModel"`
 
+	// CalibrationCount corresponds to the JSON schema field "calibrationCount".
+	CalibrationCount *int `json:"calibrationCount,omitempty,omitzero"`
+
+	// ConstantBrier corresponds to the JSON schema field "constantBrier".
+	ConstantBrier *float64 `json:"constantBrier,omitempty,omitzero"`
+
+	// Difference corresponds to the JSON schema field "difference".
+	Difference *DifferenceStats `json:"difference,omitempty,omitzero"`
+
 	// Ece corresponds to the JSON schema field "ece".
 	Ece float64 `json:"ece"`
+
+	// Groups corresponds to the JSON schema field "groups".
+	Groups ReportComparisonsGroups `json:"groups,omitempty,omitzero"`
 
 	// RejectedAvgReturn corresponds to the JSON schema field "rejectedAvgReturn".
 	RejectedAvgReturn Decimal `json:"rejectedAvgReturn"`
@@ -1197,6 +1590,8 @@ type ReportComparisons struct {
 	// Reliability corresponds to the JSON schema field "reliability".
 	Reliability []ReliabilityBucket `json:"reliability"`
 }
+
+type ReportComparisonsGroups map[string]GroupStats
 
 // UnmarshalJSON implements json.Unmarshaler.
 func (j *ReportComparisons) UnmarshalJSON(value []byte) error {
@@ -1230,11 +1625,32 @@ func (j *ReportComparisons) UnmarshalJSON(value []byte) error {
 	if err := json.Unmarshal(value, &plain); err != nil {
 		return err
 	}
+	if plain.Auc != nil && 1 < *plain.Auc {
+		return fmt.Errorf("field %s: must be <= %v", "auc", 1)
+	}
+	if plain.Auc != nil && 0 > *plain.Auc {
+		return fmt.Errorf("field %s: must be >= %v", "auc", 0)
+	}
+	if plain.BaseRate != nil && 1 < *plain.BaseRate {
+		return fmt.Errorf("field %s: must be <= %v", "baseRate", 1)
+	}
+	if plain.BaseRate != nil && 0 > *plain.BaseRate {
+		return fmt.Errorf("field %s: must be >= %v", "baseRate", 0)
+	}
 	if 1 < plain.Brier {
 		return fmt.Errorf("field %s: must be <= %v", "brier", 1)
 	}
 	if 0 > plain.Brier {
 		return fmt.Errorf("field %s: must be >= %v", "brier", 0)
+	}
+	if plain.CalibrationCount != nil && 0 > *plain.CalibrationCount {
+		return fmt.Errorf("field %s: must be >= %v", "calibrationCount", 0)
+	}
+	if plain.ConstantBrier != nil && 1 < *plain.ConstantBrier {
+		return fmt.Errorf("field %s: must be <= %v", "constantBrier", 1)
+	}
+	if plain.ConstantBrier != nil && 0 > *plain.ConstantBrier {
+		return fmt.Errorf("field %s: must be >= %v", "constantBrier", 0)
 	}
 	if 1 < plain.Ece {
 		return fmt.Errorf("field %s: must be <= %v", "ece", 1)
@@ -1280,6 +1696,12 @@ func (j *Report) UnmarshalJSON(value []byte) error {
 	if err := json.Unmarshal(value, &plain); err != nil {
 		return err
 	}
+	if plain.BackfillExcluded != nil && 0 > *plain.BackfillExcluded {
+		return fmt.Errorf("field %s: must be >= %v", "backfillExcluded", 0)
+	}
+	if plain.BackfillLabeled != nil && 0 > *plain.BackfillLabeled {
+		return fmt.Errorf("field %s: must be >= %v", "backfillLabeled", 0)
+	}
 	if 0 > plain.LabeledCount {
 		return fmt.Errorf("field %s: must be >= %v", "labeledCount", 0)
 	}
@@ -1288,6 +1710,14 @@ func (j *Report) UnmarshalJSON(value []byte) error {
 	}
 	if 0 > plain.LatencyP95Ms {
 		return fmt.Errorf("field %s: must be >= %v", "latencyP95Ms", 0)
+	}
+	if plain.OtherPolicyDecisions != nil && 0 > *plain.OtherPolicyDecisions {
+		return fmt.Errorf("field %s: must be >= %v", "otherPolicyDecisions", 0)
+	}
+	if plain.PolicyHash != nil {
+		if matched, _ := regexp.MatchString(`^[0-9a-f]{64}$`, string(*plain.PolicyHash)); !matched {
+			return fmt.Errorf("field %s pattern match: must match %s", "PolicyHash", `^[0-9a-f]{64}$`)
+		}
 	}
 	*j = Report(plain)
 	return nil

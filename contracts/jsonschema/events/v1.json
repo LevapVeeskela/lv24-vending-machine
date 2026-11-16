@@ -59,6 +59,27 @@
           "format": "date-time"
         }
       }
+    },
+    "ArenaDecision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["decisionId", "model", "response", "verdict"],
+      "properties": {
+        "decisionId": { "type": "string", "minLength": 1 },
+        "model": { "type": "string", "minLength": 1 },
+        "response": { "$ref": "../decision/v1.json#/$defs/DecisionResponse" },
+        "verdict": { "$ref": "../gate/v1.json#/$defs/GateVerdict" }
+      }
+    },
+    "NotifySent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "channel", "ok"],
+      "properties": {
+        "kind": { "type": "string", "minLength": 1 },
+        "channel": { "type": "string", "minLength": 1 },
+        "ok": { "type": "boolean" }
+      }
     }
   }
 }
