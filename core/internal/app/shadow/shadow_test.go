@@ -201,19 +201,31 @@ func (f *fakeNotifier) sent() []ports.Notification {
 
 func seedEvent(t *testing.T, jr *memJournal, kind string, payload any) {
 	t.Helper()
+	seedEventAt(t, jr, kind, baseTime, payload)
+}
+
+// seedEventAt appends a fixture event with an explicit timestamp.
+func seedEventAt(t *testing.T, jr *memJournal, kind string, ts time.Time, payload any) {
+	t.Helper()
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		t.Fatalf("marshal %s: %v", kind, err)
 	}
 	if _, err := jr.Append(context.Background(), domain.Event{
 		Kind:          kind,
-		TS:            baseTime,
+		TS:            ts,
 		SchemaVersion: domain.EventSchemaVersion,
 		Payload:       raw,
 		CodeVersion:   "v-test",
 	}); err != nil {
 		t.Fatalf("seed %s: %v", kind, err)
 	}
+}
+
+// seedOldGateRequest seeds the first gate request that starts the weekly clock.
+func seedOldGateRequest(t *testing.T, jr *memJournal, ts time.Time) {
+	t.Helper()
+	seedEventAt(t, jr, domain.EventGateRequest, ts, domain.GateRequest{SignalID: "sig-old"})
 }
 
 func testConfig(statusPath string) Config {
@@ -343,6 +355,24 @@ func TestModelChangedSendErrorRecordsOKFalse(t *testing.T) {
 	if r.Status().LastCycleError == "" {
 		t.Fatalf("LastCycleError empty, want recorded send error")
 	}
+	if got := r.Status().LastSeq; got != 0 {
+		t.Fatalf("lastSeq = %d, want 0 (cursor must not pass a failed send)", got)
+	}
+
+	// A later retry with a healthy notifier delivers the same event.
+	n.err = nil
+	if err := r.Step(context.Background()); err != nil {
+		t.Fatalf("retry Step() = %v", err)
+	}
+	if got := n.sent(); len(got) != 2 {
+		t.Fatalf("sends = %d, want 2 (retry after failure)", len(got))
+	}
+	if got := jr.eventsOf(domain.EventNotifySent); len(got) != 2 {
+		t.Fatalf("notify.sent = %d, want 2", len(got))
+	}
+	if got := r.Status().LastSeq; got == 0 {
+		t.Fatalf("lastSeq = 0, want advanced after a successful retry")
+	}
 }
 
 func seedAbstain(t *testing.T, jr *memJournal) {
@@ -407,8 +437,73 @@ func TestOtherVerdictResetsStreak(t *testing.T) {
 	}
 }
 
+func TestProviderConfigSendsOncePerHour(t *testing.T) {
+	jr := &memJournal{}
+	seedEvent(t, jr, domain.EventGateVerdict, domain.GateVerdict{
+		Verdict: domain.VerdictAbstain,
+		Code:    providerAuth,
+	})
+	now := baseTime
+	n := &fakeNotifier{}
+	r := newRunner(jr, mutableDeps(&now), testConfig(""), nil, nil, nil, nil, n)
+
+	if err := r.Step(context.Background()); err != nil {
+		t.Fatalf("Step() = %v", err)
+	}
+	sends := n.sent()
+	if len(sends) != 1 || sends[0].Kind != notifyProviderConfig {
+		t.Fatalf("sends = %v, want one %s", sends, notifyProviderConfig)
+	}
+	if !strings.Contains(sends[0].Text, providerAuth) {
+		t.Fatalf("text = %q, want the fault code", sends[0].Text)
+	}
+
+	// Within the hour: neither the same nor another fault code re-alerts.
+	seedEvent(t, jr, domain.EventGateVerdict, domain.GateVerdict{
+		Verdict: domain.VerdictAbstain,
+		Code:    providerMisconfigured,
+	})
+	if err := r.Step(context.Background()); err != nil {
+		t.Fatalf("Step() = %v", err)
+	}
+	if got := n.sent(); len(got) != 1 {
+		t.Fatalf("sends = %d, want still 1 (rate limited)", len(got))
+	}
+
+	// An hour later the trailing fault is announced again.
+	now = now.Add(2 * time.Hour)
+	if err := r.Step(context.Background()); err != nil {
+		t.Fatalf("Step() = %v", err)
+	}
+	sends = n.sent()
+	if len(sends) != 2 || !strings.Contains(sends[1].Text, providerMisconfigured) {
+		t.Fatalf("sends = %v, want a second alert for %s", sends, providerMisconfigured)
+	}
+}
+
+func TestStepPhasesHonorsPhaseFlags(t *testing.T) {
+	jr := &memJournal{}
+	var order []string
+	l := &fakeLabeler{order: &order}
+	s := &fakeSignals{reqs: []domain.GateRequest{{SignalID: "sig-1"}}, order: &order}
+	e := &fakeEvaluator{order: &order}
+	r := newRunner(jr, fixedDeps(), testConfig(""), l, s, e, nil, nil)
+
+	r.stepPhases(context.Background(), false, true)
+	if got := strings.Join(order, ","); got != "signals,evaluator" {
+		t.Fatalf("trend-only order = %q, want signals,evaluator", got)
+	}
+
+	order = nil
+	r.stepPhases(context.Background(), true, false)
+	if got := strings.Join(order, ","); got != "labeler" {
+		t.Fatalf("label-only order = %q, want labeler", got)
+	}
+}
+
 func TestWeeklySendsCountsOnly(t *testing.T) {
 	jr := &memJournal{}
+	seedOldGateRequest(t, jr, baseTime.Add(-8*24*time.Hour))
 	n := &fakeNotifier{}
 	rep := &fakeReporter{rep: domain.Report{
 		LabeledCount: 5,
@@ -436,21 +531,43 @@ func TestWeeklySendsCountsOnly(t *testing.T) {
 	}
 }
 
-func TestWeeklyFirstTimeRequiresLabeled(t *testing.T) {
+func TestWeeklyRequiresSevenDaysSinceFirstRequest(t *testing.T) {
 	jr := &memJournal{}
 	n := &fakeNotifier{}
-	rep := &fakeReporter{rep: domain.Report{LabeledCount: 0, VerdictCounts: map[string]int{}}}
-	r := newRunner(jr, fixedDeps(), testConfig(""), nil, nil, nil, rep, n)
+	rep := &fakeReporter{rep: domain.Report{LabeledCount: 5, VerdictCounts: map[string]int{}}}
+	now := baseTime
+	r := newRunner(jr, mutableDeps(&now), testConfig(""), nil, nil, nil, rep, n)
+
+	// No gate request at all: the weekly clock never starts.
 	if err := r.Step(context.Background()); err != nil {
 		t.Fatalf("Step() = %v", err)
 	}
 	if got := n.sent(); len(got) != 0 {
-		t.Fatalf("sends = %v, want no weekly with zero labeled", got)
+		t.Fatalf("sends = %v, want none without a gate request", got)
+	}
+
+	// A recent first request keeps the weekly summary closed.
+	seedOldGateRequest(t, jr, now.Add(-24*time.Hour))
+	if err := r.Step(context.Background()); err != nil {
+		t.Fatalf("Step() = %v", err)
+	}
+	if got := n.sent(); len(got) != 0 {
+		t.Fatalf("sends = %v, want none at one day", got)
+	}
+
+	// Seven days after the first request it becomes due.
+	now = now.Add(7 * 24 * time.Hour)
+	if err := r.Step(context.Background()); err != nil {
+		t.Fatalf("Step() = %v", err)
+	}
+	if got := n.sent(); len(got) != 1 || got[0].Kind != "gate.weekly" {
+		t.Fatalf("sends = %v, want one gate.weekly", got)
 	}
 }
 
 func TestWeeklyAfterSevenDays(t *testing.T) {
 	jr := &memJournal{}
+	seedOldGateRequest(t, jr, baseTime)
 	n := &fakeNotifier{}
 	rep := &fakeReporter{rep: domain.Report{LabeledCount: 1, VerdictCounts: map[string]int{}}}
 	now := baseTime
@@ -459,8 +576,8 @@ func TestWeeklyAfterSevenDays(t *testing.T) {
 	if err := r.Step(context.Background()); err != nil {
 		t.Fatalf("first Step() = %v", err)
 	}
-	if got := n.sent(); len(got) != 1 {
-		t.Fatalf("sends = %d, want 1 (first weekly)", len(got))
+	if got := n.sent(); len(got) != 0 {
+		t.Fatalf("sends = %d, want 0 before seven days", len(got))
 	}
 
 	// Six days later: still within the seven-day window.
@@ -468,17 +585,113 @@ func TestWeeklyAfterSevenDays(t *testing.T) {
 	if err := r.Step(context.Background()); err != nil {
 		t.Fatalf("Step() = %v", err)
 	}
-	if got := n.sent(); len(got) != 1 {
-		t.Fatalf("sends = %d, want still 1 at six days", len(got))
+	if got := n.sent(); len(got) != 0 {
+		t.Fatalf("sends = %d, want still 0 at six days", len(got))
 	}
 
-	// Seven days later: a second weekly is due.
+	// Seven days later: the first weekly is due.
 	now = now.Add(24 * time.Hour)
 	if err := r.Step(context.Background()); err != nil {
 		t.Fatalf("Step() = %v", err)
 	}
+	if got := n.sent(); len(got) != 1 {
+		t.Fatalf("sends = %d, want 1 at seven days", len(got))
+	}
+
+	// A restart on the same journal must not repeat it.
+	n2 := &fakeNotifier{}
+	r2 := newRunner(jr, mutableDeps(&now), testConfig(""), nil, nil, nil, rep, n2)
+	if err := r2.Step(context.Background()); err != nil {
+		t.Fatalf("restarted Step() = %v", err)
+	}
+	if got := n2.sent(); len(got) != 0 {
+		t.Fatalf("restart sends = %d, want 0", len(got))
+	}
+	if got := jr.eventsOf(domain.EventNotifySent); len(got) != 1 {
+		t.Fatalf("notify.sent = %d, want 1 weekly record", len(got))
+	}
+}
+
+func TestWeeklyNotDuplicatedAcrossRestart(t *testing.T) {
+	jr := &memJournal{}
+	seedOldGateRequest(t, jr, baseTime.Add(-8*24*time.Hour))
+	rep := &fakeReporter{rep: domain.Report{LabeledCount: 3, VerdictCounts: map[string]int{}}}
+	path := filepath.Join(t.TempDir(), "status.json")
+
+	n1 := &fakeNotifier{}
+	r1 := newRunner(jr, fixedDeps(), testConfig(path), nil, nil, nil, rep, n1)
+	if err := r1.Step(context.Background()); err != nil {
+		t.Fatalf("first Step() = %v", err)
+	}
+	if got := n1.sent(); len(got) != 1 || got[0].Kind != "gate.weekly" {
+		t.Fatalf("first sends = %v, want one gate.weekly", got)
+	}
+
+	// Same journal, same status path: the journal weekly record suppresses it.
+	n2 := &fakeNotifier{}
+	r2 := newRunner(jr, fixedDeps(), testConfig(path), nil, nil, nil, rep, n2)
+	if err := r2.Step(context.Background()); err != nil {
+		t.Fatalf("second Step() = %v", err)
+	}
+	if got := n2.sent(); len(got) != 0 {
+		t.Fatalf("second runner sends = %d, want 0", len(got))
+	}
+
+	// Even with a fresh status file the journal remains the source of truth.
+	n3 := &fakeNotifier{}
+	r3 := newRunner(jr, fixedDeps(), testConfig(filepath.Join(t.TempDir(), "status.json")), nil, nil, nil, rep, n3)
+	if err := r3.Step(context.Background()); err != nil {
+		t.Fatalf("third Step() = %v", err)
+	}
+	if got := n3.sent(); len(got) != 0 {
+		t.Fatalf("fresh-status runner sends = %d, want 0", len(got))
+	}
+	if got := jr.eventsOf(domain.EventNotifySent); len(got) != 1 {
+		t.Fatalf("notify.sent = %d, want 1 weekly record", len(got))
+	}
+}
+
+func TestOneNotificationPerStep(t *testing.T) {
+	jr := &memJournal{}
+	seedEvent(t, jr, domain.EventDecisionModelChanged, domain.ModelChanged{
+		RequestedModel: "test-model",
+		PreviousModel:  "model-v1",
+		ActualModel:    "model-v2",
+	})
+	seedEvent(t, jr, domain.EventDecisionModelChanged, domain.ModelChanged{
+		RequestedModel: "test-model",
+		PreviousModel:  "model-v2",
+		ActualModel:    "model-v3",
+	})
+	n := &fakeNotifier{}
+	r := newRunner(jr, fixedDeps(), testConfig(""), nil, nil, nil, nil, n)
+
+	if err := r.Step(context.Background()); err != nil {
+		t.Fatalf("first Step() = %v", err)
+	}
+	if got := n.sent(); len(got) != 1 {
+		t.Fatalf("first Step sends = %d, want 1", len(got))
+	}
+	if err := r.Step(context.Background()); err != nil {
+		t.Fatalf("second Step() = %v", err)
+	}
+	sends := n.sent()
+	if len(sends) != 2 {
+		t.Fatalf("sends after two steps = %d, want 2", len(sends))
+	}
+	if !strings.Contains(sends[1].Text, "model-v2 -> model-v3") {
+		t.Fatalf("second send text = %q, want the second event", sends[1].Text)
+	}
+	if got := jr.eventsOf(domain.EventNotifySent); len(got) != 2 {
+		t.Fatalf("notify.sent = %d, want 2", len(got))
+	}
+
+	// A third step must not repeat anything.
+	if err := r.Step(context.Background()); err != nil {
+		t.Fatalf("third Step() = %v", err)
+	}
 	if got := n.sent(); len(got) != 2 {
-		t.Fatalf("sends = %d, want 2 at seven days", len(got))
+		t.Fatalf("sends after third step = %d, want still 2", len(got))
 	}
 }
 
@@ -622,8 +835,8 @@ func TestDebugSizeStable(t *testing.T) {
 	n := &fakeNotifier{}
 	rep := &fakeReporter{rep: domain.Report{LabeledCount: 1, VerdictCounts: map[string]int{}}}
 	r := newRunner(jr, fixedDeps(), testConfig(""), nil, nil, nil, rep, n)
-	if got := r.debugSize(); got != 2 {
-		t.Fatalf("debugSize = %d, want 2 (fixed keys initialized)", got)
+	if got := r.debugSize(); got != 3 {
+		t.Fatalf("debugSize = %d, want 3 (fixed keys initialized)", got)
 	}
 	for i := 0; i < 5; i++ {
 		if err := r.Step(context.Background()); err != nil {

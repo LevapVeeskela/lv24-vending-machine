@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -44,6 +46,10 @@ type Reporter interface {
 type Config struct {
 	// LabelInterval is the period between cycles; <=0 means 5m.
 	LabelInterval time.Duration
+	// TrendInterval is the trend bar duration. When positive, Run scans the
+	// trend source two seconds after each bar close instead of on the label
+	// ticker; zero means the trend source is disabled (or has no schedule).
+	TrendInterval time.Duration
 	// StatusPath is the file the status JSON is atomically written to.
 	StatusPath string
 	// CodeVersion is stamped on the status and every notify.sent event.
@@ -70,14 +76,25 @@ const defaultInterval = 5 * time.Minute
 
 // Notification kinds and streak keys.
 const (
-	notifyUnavailable = "gate.unavailable"
-	notifyWeekly      = "gate.weekly"
-	streakUnavailable = "provider_unavailable"
-	notifyChannel     = "telegram"
+	notifyUnavailable    = "gate.unavailable"
+	notifyProviderConfig = "gate.provider_config"
+	notifyWeekly         = "gate.weekly"
+	streakUnavailable    = "provider_unavailable"
+	notifyChannel        = "telegram"
 )
 
 // providerUnavailable is the gate verdict code that feeds the outage streak.
 const providerUnavailable = "provider_unavailable"
+
+// providerAuth and providerMisconfigured are the gate verdict codes that mean
+// the provider needs operator attention now, not after an outage streak.
+const (
+	providerAuth          = "provider_auth"
+	providerMisconfigured = "provider_misconfigured"
+)
+
+// trendScanDelay is how long after a bar close the trend scan runs.
+const trendScanDelay = 2 * time.Second
 
 // Runner drives the shadow gate loop.
 type Runner struct {
@@ -95,8 +112,12 @@ type Runner struct {
 	lastSeq int64
 	// streaks holds bounded consecutive-event counters keyed by metric.
 	streaks map[string]int
-	// lastSent holds the last send time per rate-limited notification kind.
+	// lastSent holds the in-memory send time per rate-limited notification
+	// kind. It is a guard against hot loops only, never the source of truth:
+	// the weekly schedule is derived from the journal.
 	lastSent map[string]time.Time
+	// trendOffset is the delay applied after a bar close; tests shorten it.
+	trendOffset time.Duration
 
 	// Status snapshot fields, assembled under mu.
 	events         int64
@@ -124,13 +145,15 @@ func New(jr ports.Journal, labeler Labeler, signals SignalSource, evaluator Eval
 		cfg:       cfg,
 		streaks:   make(map[string]int),
 		lastSent:  make(map[string]time.Time),
+
+		trendOffset: trendScanDelay,
 	}
 	// Initialize the fixed persistent keys so debugSize reflects the steady
 	// state from the very first step: the provider-unavailable streak counter
-	// and the weekly rate-limit timestamp. A zero time still means "never
-	// sent", so the weekly check is unchanged.
+	// and the in-memory rate limits. A zero time means "never sent".
 	r.streaks[streakUnavailable] = 0
-	r.lastSent[notifyWeekly] = time.Time{}
+	r.lastSent[notifyUnavailable] = time.Time{}
+	r.lastSent[notifyProviderConfig] = time.Time{}
 	// Restore the notification cursor from a previous run so notifications
 	// only process events appended after the last persisted seq. A missing or
 	// corrupt status file leaves the cursor at zero (reprocess from scratch).
@@ -145,37 +168,108 @@ func New(jr ports.Journal, labeler Labeler, signals SignalSource, evaluator Eval
 	return r, nil
 }
 
-// Step runs one full cycle. It returns nil: per-phase errors are recorded in
-// the status and never stop the loop.
+// Step runs one full cycle: labels, scans and evaluates, notifies, and writes
+// the status. It returns nil: per-phase errors are recorded in the status and
+// never stop the loop.
 func (r *Runner) Step(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.step(ctx)
+	r.stepPhases(ctx, true, true)
 	return nil
 }
 
-// Run steps immediately and then on every LabelInterval until ctx is
-// cancelled. The mutex prevents overlapping steps; on cancel it waits for an
-// in-flight step to finish before returning.
+// Run runs a label cycle immediately and then on every LabelInterval until ctx
+// is cancelled. When a trend interval is configured, the trend scan runs on its
+// own timer two seconds after each bar close instead of on the label ticker.
+// The mutex prevents overlapping cycles; on cancel it waits for an in-flight
+// cycle to finish before returning.
 func (r *Runner) Run(ctx context.Context) {
-	r.Step(ctx)
+	// With no trend schedule the trend source stays on the label ticker, which
+	// is the pre-existing behaviour for signal sources without a timeframe.
+	trendOnLabel := r.cfg.TrendInterval <= 0
+	r.mu.Lock()
+	r.stepPhases(ctx, true, trendOnLabel)
+	r.mu.Unlock()
+
 	interval := r.cfg.LabelInterval
 	if interval <= 0 {
 		interval = defaultInterval
 	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+
+	var trendC <-chan time.Time
+	var trendTimer *time.Timer
+	if !trendOnLabel {
+		trendTimer = time.NewTimer(r.NextTrendDelay(r.deps.Now()))
+		defer trendTimer.Stop()
+		trendC = trendTimer.C
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
-			// Wait for any in-flight step (Step holds the mutex).
+			// Wait for any in-flight cycle (a cycle holds the mutex).
 			r.mu.Lock()
 			r.mu.Unlock()
 			return
 		case <-ticker.C:
-			r.Step(ctx)
+			r.mu.Lock()
+			r.stepPhases(ctx, true, false)
+			r.mu.Unlock()
+		case <-trendC:
+			r.mu.Lock()
+			r.stepPhases(ctx, false, true)
+			r.mu.Unlock()
+			trendTimer.Reset(r.NextTrendDelay(r.deps.Now()))
 		}
 	}
+}
+
+// NextTrendDelay returns the wait until the next trend scan: two seconds after
+// the next bar close of the configured trend interval. It returns zero when no
+// trend interval is configured.
+func (r *Runner) NextTrendDelay(now time.Time) time.Duration {
+	return nextTrendDelay(now, r.cfg.TrendInterval, r.trendOffset)
+}
+
+// nextTrendDelay aligns now to the bar grid and adds the post-close offset.
+func nextTrendDelay(now time.Time, interval, offset time.Duration) time.Duration {
+	if interval <= 0 {
+		return 0
+	}
+	fire := now.Truncate(interval).Add(offset)
+	if !fire.After(now) {
+		fire = fire.Add(interval)
+	}
+	return fire.Sub(now)
+}
+
+// TimeframeInterval parses a candle timeframe (an amount followed by m, h, d
+// or w) into the bar duration used to schedule trend scans.
+func TimeframeInterval(raw string) (time.Duration, error) {
+	s := strings.ToLower(strings.TrimSpace(raw))
+	if len(s) < 2 {
+		return 0, fmt.Errorf("timeframe %q must be an amount followed by m, h, d or w", raw)
+	}
+	n, err := strconv.Atoi(s[:len(s)-1])
+	if err != nil || n <= 0 {
+		return 0, fmt.Errorf("timeframe %q must start with a positive integer", raw)
+	}
+	var unit time.Duration
+	switch s[len(s)-1] {
+	case 'm':
+		unit = time.Minute
+	case 'h':
+		unit = time.Hour
+	case 'd':
+		unit = 24 * time.Hour
+	case 'w':
+		unit = 7 * 24 * time.Hour
+	default:
+		return 0, fmt.Errorf("timeframe %q unit must be m, h, d or w", raw)
+	}
+	return time.Duration(n) * unit, nil
 }
 
 // Status returns a snapshot of the last written status.
@@ -202,8 +296,10 @@ func (r *Runner) debugSize() int {
 	return len(r.streaks) + len(r.lastSent)
 }
 
-// step runs one cycle under the caller-held mutex.
-func (r *Runner) step(ctx context.Context) {
+// stepPhases runs one cycle under the caller-held mutex. doLabel runs the
+// outcome labeler; doTrend scans and evaluates the signal source. The label
+// ticker and the trend timer each run only their own phase.
+func (r *Runner) stepPhases(ctx context.Context, doLabel, doTrend bool) {
 	var cycleErr string
 	record := func(err error) {
 		if err == nil {
@@ -217,7 +313,7 @@ func (r *Runner) step(ctx context.Context) {
 	}
 
 	// a) Label outcomes.
-	if r.labeler != nil {
+	if doLabel && r.labeler != nil {
 		sum, err := r.labeler.Run(ctx)
 		if err != nil {
 			record(err)
@@ -227,7 +323,7 @@ func (r *Runner) step(ctx context.Context) {
 	}
 
 	// b) Scan signals and evaluate each one.
-	if r.signals != nil {
+	if doTrend && r.signals != nil {
 		reqs, err := r.signals.Scan(ctx)
 		if err != nil {
 			record(err)
@@ -260,94 +356,195 @@ func (r *Runner) step(ctx context.Context) {
 	r.lastCycleError = cycleErr
 }
 
-// notify walks new journal events, collects sanitized notifications, sends
-// them, and appends one notify.sent event per notification.
+// notify walks new journal events, builds the notifications that are due,
+// sends at most one of them, and appends a notify.sent event for it.
+//
+// The cursor (lastSeq) only moves past an event once its notification was
+// delivered. A send error therefore leaves the cursor in front of the event so
+// the notification is retried later; events that need no notification are
+// skipped by advancing the cursor to the first pending event.
 func (r *Runner) notify(ctx context.Context) error {
 	type pending struct {
-		kind string
-		text string
+		seq     int64
+		kind    string
+		text    string
+		weekly  bool
+		rateKey string
 	}
+	now := r.deps.Now()
 	var out []pending
 	var notifyErr error
-	now := r.deps.Now()
 
-	err := r.jr.Walk(ctx, r.lastSeq, "", func(ev domain.Event) error {
-		if ev.Seq > r.lastSeq {
-			r.lastSeq = ev.Seq
+	// The weekly schedule, the outage streak and the trailing provider fault
+	// are derived from the journal, so a restarted Runner on the same journal
+	// cannot repeat a weekly summary.
+	firstRequest, lastWeekly, providerFault, stateErr := r.journalState(ctx)
+	if stateErr != nil {
+		notifyErr = stateErr
+	}
+
+	walkSeq := r.lastSeq
+	if err := r.jr.Walk(ctx, r.lastSeq, "", func(ev domain.Event) error {
+		if ev.Seq > walkSeq {
+			walkSeq = ev.Seq
 		}
-		switch ev.Kind {
-		case domain.EventDecisionModelChanged:
-			var mc domain.ModelChanged
-			if err := json.Unmarshal(ev.Payload, &mc); err != nil {
-				return nil
-			}
-			out = append(out, pending{
-				kind: domain.EventDecisionModelChanged,
-				text: fmt.Sprintf("decision model changed: %s -> %s (requested %s)",
-					mc.PreviousModel, mc.ActualModel, mc.RequestedModel),
-			})
-		case domain.EventGateVerdict:
-			var v domain.GateVerdict
-			if err := json.Unmarshal(ev.Payload, &v); err != nil {
-				return nil
-			}
-			if v.Verdict == domain.VerdictAbstain && v.Code == providerUnavailable {
-				r.streaks[streakUnavailable]++
-				if r.streaks[streakUnavailable] >= 3 {
-					last := r.lastSent[notifyUnavailable]
-					if last.IsZero() || now.Sub(last) >= time.Hour {
-						out = append(out, pending{
-							kind: notifyUnavailable,
-							text: "gate unavailable: 3 consecutive ABSTAIN from the decision provider",
-						})
-						r.lastSent[notifyUnavailable] = now
-					}
-				}
-			} else {
-				r.streaks[streakUnavailable] = 0
-			}
+		if ev.Kind != domain.EventDecisionModelChanged {
+			return nil
 		}
+		var mc domain.ModelChanged
+		if err := json.Unmarshal(ev.Payload, &mc); err != nil {
+			return nil
+		}
+		out = append(out, pending{
+			seq:  ev.Seq,
+			kind: domain.EventDecisionModelChanged,
+			text: fmt.Sprintf("decision model changed: %s -> %s (requested %s)",
+				mc.PreviousModel, mc.ActualModel, mc.RequestedModel),
+		})
 		return nil
-	})
-	if err != nil {
+	}); err != nil {
 		notifyErr = err
 	}
 
-	// Weekly summary.
-	if r.reporter != nil && r.weeklyDue(now) {
-		rep, err := r.reporter.Build(ctx)
-		if err != nil {
-			notifyErr = err
-		} else {
-			last := r.lastSent[notifyWeekly]
-			if !last.IsZero() || rep.LabeledCount > 0 {
-				out = append(out, pending{kind: notifyWeekly, text: weeklyText(rep)})
-				r.lastSent[notifyWeekly] = now
-			}
+	// Outage notification: only while the journal ends in a provider outage
+	// streak, and at most once per hour (in-memory rate limit).
+	if r.streaks[streakUnavailable] >= 3 {
+		last := r.lastSent[notifyUnavailable]
+		if last.IsZero() || now.Sub(last) >= time.Hour {
+			out = append(out, pending{
+				seq:     walkSeq,
+				kind:    notifyUnavailable,
+				text:    "gate unavailable: 3 consecutive ABSTAIN from the decision provider",
+				rateKey: notifyUnavailable,
+			})
 		}
 	}
 
-	// Send outside the walk, then append one notify.sent per notification.
-	for _, p := range out {
-		ok := true
-		if err := r.notifier.Send(ctx, ports.Notification{Kind: p.kind, Text: p.text}); err != nil {
-			ok = false
-			notifyErr = err
+	// Provider configuration attention: an auth or misconfiguration verdict is
+	// an operator problem, not an outage streak. At most once per hour across
+	// both codes.
+	if providerFault != "" {
+		last := r.lastSent[notifyProviderConfig]
+		if last.IsZero() || now.Sub(last) >= time.Hour {
+			out = append(out, pending{
+				seq:     walkSeq,
+				kind:    notifyProviderConfig,
+				text:    providerConfigText(providerFault),
+				rateKey: notifyProviderConfig,
+			})
 		}
-		if err := r.appendNotifySent(ctx, p.kind, ok); err != nil {
-			notifyErr = err
+	}
+
+	// Weekly summary: first gate request at least seven days ago and no
+	// successful weekly notification within the last seven days.
+	if r.reporter != nil && weeklyDue(now, firstRequest, lastWeekly) {
+		out = append(out, pending{seq: walkSeq, kind: notifyWeekly, weekly: true, rateKey: notifyWeekly})
+	}
+
+	if len(out) == 0 {
+		// Nothing to send: advance past every event that needed no notification.
+		if walkSeq > r.lastSeq {
+			r.lastSeq = walkSeq
+		}
+		return notifyErr
+	}
+
+	first := out[0]
+	if first.weekly {
+		rep, err := r.reporter.Build(ctx)
+		if err != nil {
+			return err
+		}
+		first.text = weeklyText(rep)
+	}
+
+	sendErr := r.notifier.Send(ctx, ports.Notification{Kind: first.kind, Text: first.text})
+	if sendErr != nil {
+		notifyErr = sendErr
+	}
+	if _, appendErr := r.appendNotifySent(ctx, first.kind, sendErr == nil); appendErr != nil {
+		notifyErr = appendErr
+	}
+	if sendErr == nil {
+		// Delivered: move the cursor past the source event only. Later events
+		// stay pending for the following steps; the notify.sent record is
+		// skipped by the walk and passed on the next clean sweep.
+		if first.seq > r.lastSeq {
+			r.lastSeq = first.seq
+		}
+		if first.rateKey != "" {
+			r.lastSent[first.rateKey] = now
 		}
 	}
 	return notifyErr
 }
 
-// weeklyDue reports whether a weekly summary is due as of now.
-func (r *Runner) weeklyDue(now time.Time) bool {
-	last := r.lastSent[notifyWeekly]
-	if last.IsZero() {
+// journalState derives the notification schedule inputs from the whole journal:
+// the trailing provider-unavailable streak, the first gate.request timestamp,
+// the timestamp of the latest successful weekly notification, and the trailing
+// provider auth/misconfiguration code.
+func (r *Runner) journalState(ctx context.Context) (firstRequest, lastWeekly time.Time, providerFault string, err error) {
+	streak := 0
+	walkErr := r.jr.Walk(ctx, 0, "", func(ev domain.Event) error {
+		switch ev.Kind {
+		case domain.EventGateRequest:
+			if firstRequest.IsZero() {
+				firstRequest = ev.TS
+			}
+		case domain.EventGateVerdict:
+			var v domain.GateVerdict
+			if json.Unmarshal(ev.Payload, &v) != nil {
+				return nil
+			}
+			switch {
+			case v.Verdict == domain.VerdictAbstain && v.Code == providerUnavailable:
+				streak++
+				providerFault = ""
+			case v.Verdict == domain.VerdictAbstain && (v.Code == providerAuth || v.Code == providerMisconfigured):
+				streak = 0
+				providerFault = v.Code
+			default:
+				streak = 0
+				providerFault = ""
+			}
+		case domain.EventNotifySent:
+			var p notifySentPayload
+			if json.Unmarshal(ev.Payload, &p) != nil {
+				return nil
+			}
+			if p.Kind == notifyWeekly && p.OK {
+				lastWeekly = ev.TS
+			}
+		}
+		return nil
+	})
+	if walkErr != nil {
+		return time.Time{}, time.Time{}, "", walkErr
+	}
+	r.streaks[streakUnavailable] = streak
+	return firstRequest, lastWeekly, providerFault, nil
+}
+
+// providerConfigText renders the operator alert for a provider fault code
+// without echoing provider output.
+func providerConfigText(code string) string {
+	return fmt.Sprintf("gate provider config: %s (check provider credentials and settings)", code)
+}
+
+// weeklyDue reports whether a weekly summary is due as of now. The first
+// request must be at least seven days old, and any previous weekly must be at
+// least seven days old too.
+func weeklyDue(now, firstRequest, lastWeekly time.Time) bool {
+	if firstRequest.IsZero() {
+		return false
+	}
+	if now.Sub(firstRequest) < 7*24*time.Hour {
+		return false
+	}
+	if lastWeekly.IsZero() {
 		return true
 	}
-	return now.Sub(last) >= 7*24*time.Hour
+	return now.Sub(lastWeekly) >= 7*24*time.Hour
 }
 
 // weeklyText renders a weekly summary with counts only: no sums, symbols,
@@ -365,15 +562,20 @@ func weeklyText(rep domain.Report) string {
 		abstain)
 }
 
-// appendNotifySent appends one notify.sent event.
-func (r *Runner) appendNotifySent(ctx context.Context, kind string, ok bool) error {
-	payload, err := json.Marshal(struct {
-		Kind    string `json:"kind"`
-		Channel string `json:"channel"`
-		OK      bool   `json:"ok"`
-	}{Kind: kind, Channel: notifyChannel, OK: ok})
+// notifySentPayload is the payload of a notify.sent event. It is the journal
+// record that drives the weekly schedule after a restart.
+type notifySentPayload struct {
+	Kind    string `json:"kind"`
+	Channel string `json:"channel"`
+	OK      bool   `json:"ok"`
+}
+
+// appendNotifySent appends one notify.sent event and returns its seq. The
+// caller decides whether to advance the notification cursor.
+func (r *Runner) appendNotifySent(ctx context.Context, kind string, ok bool) (int64, error) {
+	payload, err := json.Marshal(notifySentPayload{Kind: kind, Channel: notifyChannel, OK: ok})
 	if err != nil {
-		return err
+		return 0, err
 	}
 	stored, err := r.jr.Append(ctx, domain.Event{
 		Kind:          domain.EventNotifySent,
@@ -383,12 +585,9 @@ func (r *Runner) appendNotifySent(ctx context.Context, kind string, ok bool) err
 		CodeVersion:   r.cfg.CodeVersion,
 	})
 	if err != nil {
-		return err
+		return 0, err
 	}
-	if stored.Seq > r.lastSeq {
-		r.lastSeq = stored.Seq
-	}
-	return nil
+	return stored.Seq, nil
 }
 
 // writeStatus derives the status from the journal and writes it atomically.

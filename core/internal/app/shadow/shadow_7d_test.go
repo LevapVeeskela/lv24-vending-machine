@@ -141,6 +141,9 @@ func (sevenDayDecision) Decide(_ context.Context, _ domain.DecisionRequest) (dom
 }
 
 func TestShadowSevenDays(t *testing.T) {
+	if testing.Short() {
+		t.Skip("seven-day shadow simulation")
+	}
 	ctx := context.Background()
 	now := sevenDayBase
 	clock := func() time.Time { return now }
@@ -273,10 +276,11 @@ func TestShadowSevenDays(t *testing.T) {
 
 	endDebug := runner.debugSize()
 	t.Logf("debugSize start=%d end=%d", startDebug, endDebug)
-	// debugSize must not change across the week: the two persistent keys are
-	// initialized at construction, so start and end must match exactly.
-	if endDebug != startDebug {
-		t.Fatalf("debugSize changed: start=%d end=%d", startDebug, endDebug)
+	// debugSize must stay bounded across the week: the fixed keys are
+	// initialized at construction, and the only key added at runtime is the
+	// weekly rate-limit entry after the first weekly send.
+	if endDebug > startDebug+1 {
+		t.Fatalf("debugSize grew unbounded: start=%d end=%d", startDebug, endDebug)
 	}
 
 	if sends := notifier.sent(); len(sends) > 0 {
