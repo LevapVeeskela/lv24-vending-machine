@@ -36,6 +36,9 @@ const (
 	maxBodyBytes = 8 << 20
 )
 
+// symbolSeparators strips the pair separators accepted on input.
+var symbolSeparators = strings.NewReplacer("/", "", "-", "")
+
 // Config holds the provider connection settings.
 type Config struct {
 	// BaseURL overrides the Binance REST base URL. Empty means DefaultBaseURL.
@@ -102,8 +105,13 @@ func (p *Provider) Descriptor() ports.Descriptor {
 // (CloseTime >= now), drops candles past req.To and truncates to the
 // requested limit. No retries are performed.
 func (p *Provider) Candles(ctx context.Context, req domain.CandleRequest) ([]domain.Candle, error) {
-	if strings.TrimSpace(req.Symbol) == "" || strings.TrimSpace(req.Interval) == "" {
-		return nil, domain.NewError(domain.CodeInvalidRequest, "marketdata-binance: symbol and interval are required")
+	// Interval is passed to Binance verbatim; only the symbol is normalized.
+	symbol, err := normalizeSymbol(req.Symbol)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(req.Interval) == "" {
+		return nil, domain.NewError(domain.CodeInvalidRequest, "marketdata-binance: interval is required")
 	}
 	target := req.Limit
 	if target <= 0 {
@@ -131,7 +139,7 @@ func (p *Provider) Candles(ctx context.Context, req domain.CandleRequest) ([]dom
 		if per < 1 {
 			per = 1
 		}
-		page, err := p.fetchPage(ctx, req.Symbol, req.Interval, per, startMs, endMs)
+		page, err := p.fetchPage(ctx, symbol, req.Interval, per, startMs, endMs)
 		if err != nil {
 			return nil, err
 		}
@@ -178,6 +186,17 @@ func (p *Provider) Candles(ctx context.Context, req domain.CandleRequest) ([]dom
 		res = res[:target]
 	}
 	return res, nil
+}
+
+// normalizeSymbol converts the accepted user spellings (BTC/USDT, BTC-USDT,
+// btcusdt) into the Binance Spot form BTCUSDT. Trimming, uppercasing and
+// separator removal only; no other validation is attempted.
+func normalizeSymbol(symbol string) (string, error) {
+	norm := symbolSeparators.Replace(strings.ToUpper(strings.TrimSpace(symbol)))
+	if norm == "" {
+		return "", domain.NewError(domain.CodeInvalidRequest, "marketdata-binance: symbol is required")
+	}
+	return norm, nil
 }
 
 // fetchPage performs one GET /api/v3/klines request.
@@ -245,7 +264,7 @@ func (p *Provider) fetchPage(ctx context.Context, symbol, interval string, limit
 		return nil, regionErr
 	case resp.StatusCode == http.StatusBadRequest:
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-		return nil, domain.NewError(domain.CodeInvalidRequest, "marketdata-binance: bad request")
+		return nil, domain.NewError(domain.CodeInvalidRequest, "marketdata-binance: unknown symbol or interval (400)")
 	case resp.StatusCode >= 500 && resp.StatusCode <= 599:
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 		unavail := domain.NewError(domain.CodeUnavailable, fmt.Sprintf("marketdata-binance: upstream status %d", resp.StatusCode))
