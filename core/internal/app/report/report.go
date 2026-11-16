@@ -367,7 +367,7 @@ func (b *Builder) Build(ctx context.Context) (domain.Report, error) {
 		BackfillLabeled:      backfillLabeled,
 		BackfillExcluded:     backfillExcluded,
 		Assumptions:          assumptions(labeled),
-		Arena:                arenaReport(arenas, resolved, verdicts),
+		Arena:                arenaReport(arenas, resolved, verdicts, selected, b.includeBackfill),
 	}
 	// An explicitly requested policy that no verdict used has no
 	// comparable outcomes; this is not an error.
@@ -746,9 +746,11 @@ func assumptions(labeled []labeledOutcome) *domain.ReportAssumptions {
 	}
 }
 
-// arenaReport aggregates arena.decision events. It returns nil when no
-// arena event was recorded.
-func arenaReport(events []arenaPayload, outcomes map[string]domain.Outcome, verdicts map[string]verdictInfo) *domain.ArenaReport {
+// arenaReport aggregates arena.decision events of the selected policy. It
+// returns nil when no arena event was recorded. Events whose decision has
+// no verdict of the selected policy, or whose primary outcome is an
+// excluded backfill, are ignored.
+func arenaReport(events []arenaPayload, outcomes map[string]domain.Outcome, verdicts map[string]verdictInfo, selected string, includeBackfill bool) *domain.ArenaReport {
 	if len(events) == 0 {
 		return nil
 	}
@@ -757,8 +759,16 @@ func arenaReport(events []arenaPayload, outcomes map[string]domain.Outcome, verd
 	decisionIDs := map[string]struct{}{}
 	agreed := 0
 	for _, e := range events {
+		pv, ok := verdicts[e.DecisionID]
+		if !ok || pv.policyHash != selected {
+			continue
+		}
+		o, hasOutcome := outcomes[e.DecisionID]
+		if hasOutcome && o.Backfill && !includeBackfill {
+			continue
+		}
 		decisionIDs[e.DecisionID] = struct{}{}
-		if pv, ok := verdicts[e.DecisionID]; ok && pv.verdict == string(e.Verdict.Verdict) {
+		if pv.verdict == string(e.Verdict.Verdict) {
 			agreed++
 		}
 		if e.Model == "" {
@@ -771,7 +781,6 @@ func arenaReport(events []arenaPayload, outcomes map[string]domain.Outcome, verd
 		}
 		acc.verdicts++
 		acc.cost = acc.cost.Add(e.Response.Usage.CostUSD)
-		o, hasOutcome := outcomes[e.DecisionID]
 		if e.Verdict.Verdict == domain.VerdictAllow && hasOutcome {
 			acc.allowSum = acc.allowSum.Add(o.NetReturn)
 			acc.allowCount++

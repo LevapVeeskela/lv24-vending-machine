@@ -438,3 +438,56 @@ func TestArenaReport(t *testing.T) {
 	almostEqual(t, "m2 auc", m2.AUC, 1)
 	decimalIs(t, "m2 cost", m2.CostUSD, "0.07")
 }
+
+// TestArenaPolicyFilter keeps only arena events of the selected policy.
+func TestArenaPolicyFilter(t *testing.T) {
+	polA := strings.Repeat("a", 64)
+	polB := strings.Repeat("b", 64)
+	now := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	jr := &fakeJournal{}
+	appendSpec(t, jr, decSpec{id: "ad1", sig: "ad1", model: "primary", cost: "0.001",
+		net: "0.05", p: fp(0.7), verdict: domain.VerdictAllow, policy: polA, entry: now})
+	appendSpec(t, jr, decSpec{id: "ad2", sig: "ad2", model: "primary", cost: "0.001",
+		net: "0.20", p: fp(0.8), verdict: domain.VerdictAllow, policy: polB, entry: now})
+	mkArena := func(id, model string, v domain.Verdict, p float64, cost string) {
+		appendEv(t, jr, domain.Event{
+			Kind:       domain.EventArenaDecision,
+			DecisionID: id,
+			Payload: mustPayload(t, arenaPayload{
+				DecisionID: id,
+				Model:      model,
+				Response: domain.DecisionResponse{
+					Answers: map[string]domain.Answer{
+						riskQuestion: {
+							Type:          domain.QuestionChoice,
+							Choice:        "pass",
+							Probabilities: map[string]float64{"pass": p, "block": 1 - p},
+						},
+					},
+					Model: model,
+					Usage: domain.Usage{CostUSD: domain.MustParseDecimal(cost), LatencyMS: 10},
+				},
+				Verdict: domain.GateVerdict{Verdict: v, Code: "arena", Reasons: []string{}, Checks: []domain.Check{}},
+			}),
+		})
+	}
+	mkArena("ad1", "m1", domain.VerdictAllow, 0.6, "0.01")
+	mkArena("ad2", "m2", domain.VerdictAllow, 0.9, "0.02")
+	picked := buildReport(t, jr, Config{MinLabeled: 1, PolicyHash: polA})
+	if picked.Arena == nil || picked.Arena.Decisions != 1 {
+		t.Fatalf("arena = %+v, want 1 selected-policy decision", picked.Arena)
+	}
+	if len(picked.Arena.Models) != 1 || picked.Arena.Models[0].Model != "m1" ||
+		picked.Arena.Models[0].Verdicts != 1 {
+		t.Fatalf("arena models = %+v, want only m1", picked.Arena.Models)
+	}
+	if picked.Arena.Models[0].CostUSD.String() != "0.01" {
+		t.Fatalf("arena m1 cost = %q, want 0.01", picked.Arena.Models[0].CostUSD.String())
+	}
+	// Without an explicit policy the highest-seq verdict (polB) selects ad2.
+	auto := buildReport(t, jr, Config{MinLabeled: 1})
+	if auto.Arena == nil || auto.Arena.Decisions != 1 || len(auto.Arena.Models) != 1 ||
+		auto.Arena.Models[0].Model != "m2" {
+		t.Fatalf("auto arena = %+v, want only m2", auto.Arena)
+	}
+}
