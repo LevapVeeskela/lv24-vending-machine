@@ -100,7 +100,8 @@ func (p *Provider) Descriptor() ports.Descriptor {
 // seen so far, then sorts ascending by OpenTime, drops duplicates by
 // OpenTime (keeping the first occurrence), drops unclosed candles
 // (CloseTime >= now), drops candles past req.To and truncates to the
-// requested limit. No retries are performed.
+// requested limit. A page shorter than the requested limit ends the scan: no
+// further page is requested. No retries are performed.
 func (p *Provider) Candles(ctx context.Context, req domain.CandleRequest) ([]domain.Candle, error) {
 	// Interval is passed to Binance verbatim; only the symbol is normalized.
 	// The canonical form is shared with the core: BTC/USDT:USDT becomes
@@ -145,6 +146,10 @@ func (p *Provider) Candles(ctx context.Context, req domain.CandleRequest) ([]dom
 		if len(page) == 0 {
 			break
 		}
+		// A page shorter than the requested limit is the last page: the
+		// endpoint has no more candles in this direction. Do not spend a
+		// second request to confirm the end of the data.
+		shortPage := len(page) < per
 		maxMs := page[0].OpenTime.UnixMilli()
 		for _, c := range page[1:] {
 			if ms := c.OpenTime.UnixMilli(); ms > maxMs {
@@ -156,6 +161,9 @@ func (p *Provider) Candles(ctx context.Context, req domain.CandleRequest) ([]dom
 				continue
 			}
 			all = append(all, c)
+		}
+		if shortPage {
+			break
 		}
 		if hasPrev && maxMs <= prevMax {
 			break

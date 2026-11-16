@@ -98,21 +98,17 @@ func CandleConformance(t *testing.T, newProvider CandleFactory) {
 
 	t.Run("dedup", func(t *testing.T) {
 		var requests int
-		var secondStart string
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			requests++
 			candleCheckParams(t, r, "BTCUSDT", "1m")
-			if r.URL.Query().Get("startTime") == "" {
-				candleWritePage(t, w, [][]any{
-					candleRow(candleOpenMs(0), "1.00", "1.10", "0.90", "1.05", "10.0", candleOpenMs(0)+59999),
-					candleRow(candleOpenMs(1), "2.00", "2.10", "1.90", "2.05", "20.0", candleOpenMs(1)+59999),
-					candleRow(candleOpenMs(2), "3.00", "3.10", "2.90", "3.05", "30.0", candleOpenMs(2)+59999),
-				})
-				return
-			}
-			secondStart = r.URL.Query().Get("startTime")
+			// A full page with a duplicate open time inside it: the provider
+			// keeps the first occurrence and stops because the page is the
+			// last one it asked for.
 			candleWritePage(t, w, [][]any{
+				candleRow(candleOpenMs(0), "1.00", "1.10", "0.90", "1.05", "10.0", candleOpenMs(0)+59999),
+				candleRow(candleOpenMs(1), "2.00", "2.10", "1.90", "2.05", "20.0", candleOpenMs(1)+59999),
 				candleRow(candleOpenMs(2), "3.00", "3.10", "2.90", "3.05", "30.0", candleOpenMs(2)+59999),
+				candleRow(candleOpenMs(2), "9.00", "9.10", "8.90", "9.05", "90.0", candleOpenMs(2)+59999),
 				candleRow(candleOpenMs(3), "4.00", "4.10", "3.90", "4.05", "40.0", candleOpenMs(3)+59999),
 			})
 		}))
@@ -122,11 +118,8 @@ func CandleConformance(t *testing.T, newProvider CandleFactory) {
 		if err != nil {
 			t.Fatalf("Candles: %v", err)
 		}
-		if requests < 2 {
-			t.Fatalf("requests = %d, want at least 2", requests)
-		}
-		if want := strconv.FormatInt(candleOpenMs(2)+1, 10); secondStart != want {
-			t.Errorf("second startTime = %q, want %q", secondStart, want)
+		if requests != 1 {
+			t.Fatalf("requests = %d, want 1 for a full single page", requests)
 		}
 		if len(got) != 4 {
 			t.Fatalf("len = %d, want 4 unique candles", len(got))
@@ -136,42 +129,46 @@ func CandleConformance(t *testing.T, newProvider CandleFactory) {
 				t.Fatalf("candles[%d].OpenTime = %d, want %d", i, ms, want)
 			}
 		}
+		if got[2].Close.String() != "3.05" {
+			t.Fatalf("duplicate kept the wrong occurrence: close = %q, want 3.05", got[2].Close.String())
+		}
 	})
 
 	t.Run("pagination", func(t *testing.T) {
 		var requests int
+		const target = 1200
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			requests++
 			candleCheckParams(t, r, "BTCUSDT", "1m")
+			rows := make([][]any, 0, 1000)
 			if r.URL.Query().Get("startTime") == "" {
-				candleWritePage(t, w, [][]any{
-					candleRow(candleOpenMs(0), "1.00", "1.10", "0.90", "1.05", "10.0", candleOpenMs(0)+59999),
-					candleRow(candleOpenMs(1), "2.00", "2.10", "1.90", "2.05", "20.0", candleOpenMs(1)+59999),
-					candleRow(candleOpenMs(2), "3.00", "3.10", "2.90", "3.05", "30.0", candleOpenMs(2)+59999),
-				})
+				for i := 0; i < 1000; i++ {
+					rows = append(rows, candleRow(candleOpenMs(i), "1.00", "1.10", "0.90", "1.05", "10.0", candleOpenMs(i)+59999))
+				}
+				candleWritePage(t, w, rows)
 				return
 			}
-			if want := strconv.FormatInt(candleOpenMs(2)+1, 10); r.URL.Query().Get("startTime") != want {
-				t.Errorf("second startTime = %q, want %q", r.URL.Query().Get("startTime"), want)
+			if got := r.URL.Query().Get("limit"); got != "201" {
+				t.Errorf("second limit = %q, want 201", got)
 			}
-			candleWritePage(t, w, [][]any{
-				candleRow(candleOpenMs(3), "4.00", "4.10", "3.90", "4.05", "40.0", candleOpenMs(3)+59999),
-				candleRow(candleOpenMs(4), "5.00", "5.10", "4.90", "5.05", "50.0", candleOpenMs(4)+59999),
-			})
+			for i := 1000; i < target; i++ {
+				rows = append(rows, candleRow(candleOpenMs(i), "1.00", "1.10", "0.90", "1.05", "10.0", candleOpenMs(i)+59999))
+			}
+			candleWritePage(t, w, rows)
 		}))
 		defer srv.Close()
 		p := newProvider(t, srv.URL, ports.Deps{})
-		got, err := p.Candles(t.Context(), domain.CandleRequest{Symbol: "BTCUSDT", Interval: "1m", Limit: 5})
+		got, err := p.Candles(t.Context(), domain.CandleRequest{Symbol: "BTCUSDT", Interval: "1m", Limit: target})
 		if err != nil {
 			t.Fatalf("Candles: %v", err)
 		}
-		if requests < 2 {
-			t.Fatalf("requests = %d, want at least 2", requests)
+		if requests != 2 {
+			t.Fatalf("requests = %d, want 2 (full page then short page)", requests)
 		}
-		if len(got) != 5 {
-			t.Fatalf("len = %d, want 5", len(got))
+		if len(got) != target {
+			t.Fatalf("len = %d, want %d", len(got), target)
 		}
-		for i := 0; i < 5; i++ {
+		for i := 0; i < target; i++ {
 			if ms := got[i].OpenTime.UnixMilli(); ms != candleOpenMs(i) {
 				t.Fatalf("candles[%d].OpenTime = %d, want %d", i, ms, candleOpenMs(i))
 			}
