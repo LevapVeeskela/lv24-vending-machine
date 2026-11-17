@@ -181,8 +181,8 @@ commands:
   version [--json]
   init [--force] [--config FILE] [--data-dir DIR] [--json]
   config path|get KEY|validate [--config FILE] [--data-dir DIR] [--json]
-  doctor [--live] [--symbol SYMBOL] [--save-raw FILE] [--config FILE] [--data-dir DIR] [--json]
-  gate test --request FILE [--fixture FILE] [--save-raw FILE] [--config FILE] [--data-dir DIR] [--json]
+  doctor [--live] [--symbol SYMBOL] [--save-raw FILE] [--force] [--config FILE] [--data-dir DIR] [--json]
+  gate test --request FILE [--fixture FILE] [--save-raw FILE] [--force] [--config FILE] [--data-dir DIR] [--json]
   gate report [--policy HASH] [--include-backfill] [--share [--out FILE] [--force]] [--json] [--config FILE] [--data-dir DIR]
   journal verify [--config FILE] [--data-dir DIR] [--json]
   journal head [--config FILE] [--data-dir DIR] [--json]
@@ -226,7 +226,7 @@ subcommands:
   get KEY   print one dotted config value, e.g. gate.minPass
   validate  parse and validate the config file
 `,
-	"doctor": `usage: vend doctor [--live] [--symbol SYMBOL] [--save-raw FILE] [--config FILE] [--data-dir DIR] [--json]
+	"doctor": `usage: vend doctor [--live] [--symbol SYMBOL] [--save-raw FILE] [--force] [--config FILE] [--data-dir DIR] [--json]
 
 Check the config, data directory, journal chain, provider registry, secrets and
 gate policy. With --live, also run the opt-in network probes.
@@ -235,6 +235,7 @@ flags:
   --live           run the network probes (decision, candles, telegram)
   --symbol SYMBOL  symbol for the live candles probe (default BTCUSDT)
   --save-raw FILE  write the raw decision response to FILE (0600); needs --live
+  --force          overwrite an existing --save-raw file
 `,
 	"gate": `usage: vend gate test --request FILE [options]
        vend gate report [options]
@@ -243,7 +244,7 @@ subcommands:
   test    evaluate one gate request against the provider or an offline fixture
   report  build the shadow-gate report from the journal
 `,
-	"gate test": `usage: vend gate test --request FILE [--fixture FILE] [--save-raw FILE]
+	"gate test": `usage: vend gate test --request FILE [--fixture FILE] [--save-raw FILE] [--force]
                    [--config FILE] [--data-dir DIR] [--json]
 
 Evaluate one gate request and record the verdict in the journal. With
@@ -254,6 +255,7 @@ flags:
   --request FILE   gate request JSON file (required)
   --fixture FILE   decision response fixture for an offline replay
   --save-raw FILE  write the raw decision response to FILE (0600)
+  --force          overwrite an existing --save-raw file
 `,
 	"gate report": `usage: vend gate report [--policy HASH] [--include-backfill] [--share [--out FILE] [--force]]
                        [--json] [--config FILE] [--data-dir DIR]
@@ -582,6 +584,21 @@ func writeFileNew(path string, data []byte, perm os.FileMode, opts newFileOption
 		return werr
 	}
 	return nil
+}
+
+// failOutput maps writeFileNew's guard errors to a usage failure with a hint.
+func (r *runner) failOutput(jsonMode bool, err error) int {
+	switch {
+	case errors.Is(err, errOutputExists):
+		return r.fail(jsonMode, exitUsage, codeUsage, err.Error(),
+			"pass --force to overwrite the file, or choose another path", false, nil)
+	case errors.Is(err, errOutputInDataDir):
+		return r.fail(jsonMode, exitUsage, codeUsage, err.Error(),
+			"choose an output path outside the data directory", false, nil)
+	default:
+		return r.fail(jsonMode, exitGeneral, codeGeneral, err.Error(),
+			"check the output path is writable and retry", false, nil)
+	}
 }
 
 // pathInside reports whether path is dataDir itself or lies below it. Both

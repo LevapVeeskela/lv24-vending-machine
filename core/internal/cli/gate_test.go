@@ -16,6 +16,31 @@ import (
 	"github.com/LevapVeeskela/lv24-vending-machine/core/ports"
 )
 
+// TestGateTestSaveRawRefusesExistingFile: --save-raw must not overwrite a
+// file without --force, even when the decision itself succeeds.
+func TestGateTestSaveRawRefusesExistingFile(t *testing.T) {
+	env, _, stderr, cfgPath, dataDir := initTestEnv(t)
+	out := filepath.Join(t.TempDir(), "raw.json")
+	if err := os.WriteFile(out, []byte("old\n"), 0o600); err != nil {
+		t.Fatalf("seed raw file: %v", err)
+	}
+	code := runArgs(env, "gate", "test",
+		"--config", cfgPath, "--data-dir", dataDir,
+		"--request", testdataRel("gate-request.json"),
+		"--fixture", testdataRel("decision-response.json"),
+		"--save-raw", out)
+	if code != exitUsage {
+		t.Fatalf("save-raw without --force = %d, want %d, stderr=%s", code, exitUsage, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "already exists") {
+		t.Fatalf("stderr misses the existing-file hint: %q", stderr.String())
+	}
+	raw, err := os.ReadFile(out)
+	if err != nil || string(raw) != "old\n" {
+		t.Fatalf("existing file was modified: %q, err=%v", raw, err)
+	}
+}
+
 // TestGateTestReplayPrintsHint: repeating a signalId replays the recorded
 // verdict, says so on stdout and writes no new events.
 func TestGateTestReplayPrintsHint(t *testing.T) {

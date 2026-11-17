@@ -45,6 +45,7 @@ func (r *runner) cmdDoctor(args []string) int {
 	live := fs.Bool("live", false, "run opt-in network probes (decision, candles, telegram)")
 	symbol := fs.String("symbol", doctorSymbol, "symbol for the live candles probe")
 	saveRaw := fs.String("save-raw", "", "write the raw decision response to FILE (0600)")
+	saveForce := fs.Bool("force", false, "overwrite an existing --save-raw file")
 	if err := fs.Parse(rest); err != nil {
 		return exitUsage
 	}
@@ -52,9 +53,9 @@ func (r *runner) cmdDoctor(args []string) int {
 		return r.fail(jsonOut, exitUsage, codeUsage,
 			fmt.Sprintf("unexpected argument %q", fs.Arg(0)), doctorUsage, false, nil)
 	}
-	if !*live && (strings.TrimSpace(*saveRaw) != "" || flagWasSet(fs, "symbol")) {
+	if !*live && (strings.TrimSpace(*saveRaw) != "" || flagWasSet(fs, "symbol") || *saveForce) {
 		return r.fail(jsonOut, exitUsage, codeUsage,
-			"--symbol and --save-raw require --live", doctorUsage, false, nil)
+			"--symbol, --save-raw and --force require --live", doctorUsage, false, nil)
 	}
 	cfgPath, dataDir, err := r.resolvePaths(g.config, g.dataDir)
 	if err != nil {
@@ -172,7 +173,7 @@ func (r *runner) cmdDoctor(args []string) int {
 	}
 
 	if *live {
-		checks = append(checks, r.liveChecks(cfg, cfgErr, cfgValid, reg, *symbol, *saveRaw)...)
+		checks = append(checks, r.liveChecks(cfg, cfgErr, cfgValid, reg, *symbol, *saveRaw, dataDir, *saveForce)...)
 	}
 
 	ok := true
@@ -208,7 +209,7 @@ func (r *runner) cmdDoctor(args []string) int {
 // Telegram message. Each check reports only "ok" or a domain error code;
 // tokens, URLs and response bodies are never printed.
 func (r *runner) liveChecks(cfg config.Config, cfgErr error, cfgValid bool,
-	reg *registry.Registry, symbol, saveRaw string,
+	reg *registry.Registry, symbol, saveRaw, dataDir string, saveForce bool,
 ) []docCheck {
 	var out []docCheck
 	add := func(name string, ok bool, detail string) {
@@ -280,8 +281,9 @@ func (r *runner) liveChecks(cfg config.Config, cfgErr error, cfgValid bool,
 	if strings.TrimSpace(saveRaw) != "" {
 		if len(raw) == 0 {
 			add("save_raw", false, string(domain.CodeUnavailable))
-		} else if werr := writeFileAtomic(saveRaw, raw, 0o600); werr != nil {
-			add("save_raw", false, string(domain.CodeUnavailable))
+		} else if werr := writeFileNew(saveRaw, raw, 0o600,
+			newFileOptions{DataDir: dataDir, Force: saveForce}); werr != nil {
+			add("save_raw", false, werr.Error())
 		} else {
 			add("save_raw", true, "ok")
 		}

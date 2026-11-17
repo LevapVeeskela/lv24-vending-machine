@@ -62,6 +62,7 @@ func (r *runner) cmdGateTest(args []string) int {
 	reqFlag := fs.String("request", "", "gate request JSON file")
 	fixFlag := fs.String("fixture", "", "decision response fixture file (offline)")
 	saveRaw := fs.String("save-raw", "", "write the raw provider response to FILE (0600)")
+	saveForce := fs.Bool("force", false, "overwrite an existing --save-raw file")
 	if err := fs.Parse(rest); err != nil {
 		return exitUsage
 	}
@@ -185,9 +186,9 @@ func (r *runner) cmdGateTest(args []string) int {
 				"raw response unavailable, e.g. idempotent replay",
 				"omit --save-raw on replay or rerun with a new signalId", false, nil)
 		}
-		if werr := writeFileAtomic(*saveRaw, res.Response.Raw, 0o600); werr != nil {
-			return r.fail(jsonOut, exitGeneral, codeGeneral, werr.Error(),
-				"check the output path is writable and retry", false, nil)
+		if werr := writeFileNew(*saveRaw, res.Response.Raw, 0o600,
+			newFileOptions{DataDir: dataDir, Force: *saveForce}); werr != nil {
+			return r.failOutput(jsonOut, werr)
 		}
 	}
 
