@@ -179,7 +179,7 @@ func (r *runner) cmdSignalsEstimate(args []string) int {
 	if failed > 0 {
 		return r.fail(jsonOut, exitProvider, codeProvider,
 			fmt.Sprintf("signals estimate failed for %d of %d symbols", failed, len(estimates)),
-			"check the failing symbols and the marketdata provider, then retry", false, nil)
+			"check the failing symbols and the marketdata provider, or lower --days when a symbol's history is shorter than the window, then retry", false, nil)
 	}
 	return exitOK
 }

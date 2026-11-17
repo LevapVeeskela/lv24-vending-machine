@@ -3,6 +3,7 @@ package trend
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/LevapVeeskela/lv24-vending-machine/core/domain"
 )
@@ -93,9 +94,14 @@ func TestEstimateMatchesSequentialScan(t *testing.T) {
 	if len(estimates) != 1 || estimates[0].Err != nil {
 		t.Fatalf("estimates = %+v", estimates)
 	}
-	// One day of hourly bars plus the slow*4 warm-up reserve.
-	if len(provider.calls) != 1 || provider.calls[0].Limit != 32 {
-		t.Fatalf("estimate candle request = %+v, want limit 32", provider.calls)
+	// One day of hourly bars plus the slow*4 warm-up reserve and the slack,
+	// anchored at the start of the warm-up history so a paginating source
+	// serves the whole window.
+	if len(provider.calls) != 1 || provider.calls[0].Limit != 34 {
+		t.Fatalf("estimate candle request = %+v, want limit 34", provider.calls)
+	}
+	if want := testNow.Add(-32 * time.Hour); !provider.calls[0].From.Equal(want) {
+		t.Fatalf("estimate candle request from = %s, want %s", provider.calls[0].From, want)
 	}
 
 	var scanned int
@@ -146,7 +152,7 @@ func TestEstimateExcludesWarmupWindow(t *testing.T) {
 func TestEstimateProviderError(t *testing.T) {
 	provider := &fakeProvider{
 		bySymbol: map[string][]domain.Candle{
-			"ETHUSDT": makeSeries("ETHUSDT", "1h", []float64{10, 10, 20, 20, 5}),
+			"ETHUSDT": makeSeries("ETHUSDT", "1h", longSeries(10, 10, 20, 20, 5)),
 		},
 		errBySymbol: map[string]error{
 			"BTCUSDT": domain.NewError(domain.CodeUnavailable, "venue down"),
@@ -165,6 +171,37 @@ func TestEstimateProviderError(t *testing.T) {
 	}
 	if got[1].Symbol != "ETHUSDT" || got[1].Err != nil || got[1].Signals != 2 {
 		t.Fatalf("second estimate = %+v, want two signals", got[1])
+	}
+}
+
+// longSeries pads tail with flat closes so the series covers a one-day window
+// plus the warm-up history of the test generators.
+func longSeries(tail ...float64) []float64 {
+	const total = 40
+	closes := make([]float64, 0, total)
+	for len(closes) < total-len(tail) {
+		closes = append(closes, tail[0])
+	}
+	return append(closes, tail...)
+}
+
+// TestEstimateShortHistory proves a symbol whose candles start inside the
+// window is reported, not counted: dividing its crossings by the full number
+// of days would understate the frequency.
+func TestEstimateShortHistory(t *testing.T) {
+	provider := &fakeProvider{bySymbol: map[string][]domain.Candle{
+		"BTCUSDT": makeSeries("BTCUSDT", "1h", []float64{10, 10, 20, 20, 5}),
+	}}
+	cfg := Config{Symbols: []string{"BTCUSDT"}, Timeframe: "1h", Fast: 1, Slow: 2, Sides: []string{"buy", "sell"}}
+	got, err := newGenerator(t, cfg, provider).Estimate(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("Estimate: %v", err)
+	}
+	if len(got) != 1 || got[0].Err == nil || domain.CodeOf(got[0].Err) != domain.CodeInvalidRequest {
+		t.Fatalf("estimate = %+v, want an invalid_request error for the short history", got)
+	}
+	if got[0].Signals != 0 {
+		t.Fatalf("signals = %d, want 0 for an uncovered window", got[0].Signals)
 	}
 }
 

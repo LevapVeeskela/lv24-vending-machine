@@ -37,6 +37,10 @@ const (
 	// minBarsAboveSlow is the bar count required above Slow: one bar for the
 	// slow EMA to be defined on the previous bar and one to cross on.
 	minBarsAboveSlow = 2
+	// estimateSlackBars is added to the estimate candle request so the bar
+	// that is still forming and the bar cut by the From alignment never push
+	// the newest closed bar out of the requested limit.
+	estimateSlackBars = 2
 )
 
 // Config tunes one trend Generator.
@@ -274,9 +278,11 @@ func (g *Generator) evaluate(symbol string, raw []domain.Candle, now time.Time) 
 }
 
 // Estimate counts the crossings the generator would have emitted per symbol
-// over the last days of closed candles. The candle request adds the same
-// warm-up reserve the scan uses, and only crossings whose bar closed inside
-// the window are counted. It performs no journal I/O, calls no decision
+// over the last days of closed candles. The candle request starts at the
+// window start minus the same warm-up reserve the scan uses, so a paginating
+// source serves the whole window, and only crossings whose bar closed inside
+// the window are counted. A symbol whose history starts inside the window is
+// reported as an error instead of a diluted count. It performs no journal I/O, calls no decision
 // provider and never changes the scan watermark.
 func (g *Generator) Estimate(ctx context.Context, days int) ([]SymbolEstimate, error) {
 	if days < 1 {
@@ -287,6 +293,10 @@ func (g *Generator) Estimate(ctx context.Context, days int) ([]SymbolEstimate, e
 	cutoff := now.Add(-window)
 	// Round up so a partial bar at the window edge is requested too.
 	windowBars := int((window + g.interval - 1) / g.interval)
+	// Anchor the request at the start of the warm-up history. Without From a
+	// candle source may answer with its latest page only, which silently
+	// truncates a window longer than one page and understates the estimate.
+	from := cutoff.Add(-time.Duration(g.limit) * g.interval).Truncate(g.interval)
 	out := make([]SymbolEstimate, 0, len(g.symbols))
 	for _, symbol := range g.symbols {
 		if err := ctx.Err(); err != nil {
@@ -296,7 +306,8 @@ func (g *Generator) Estimate(ctx context.Context, days int) ([]SymbolEstimate, e
 		raw, err := g.candles.Candles(ctx, domain.CandleRequest{
 			Symbol:   symbol,
 			Interval: g.timeframe,
-			Limit:    windowBars + g.limit,
+			From:     from,
+			Limit:    windowBars + g.limit + estimateSlackBars,
 		})
 		if err != nil {
 			est.Err = err
@@ -307,6 +318,13 @@ func (g *Generator) Estimate(ctx context.Context, days int) ([]SymbolEstimate, e
 			continue
 		}
 		bars := closedBars(symbol, g.timeframe, raw, now)
+		// A history that starts inside the window cannot be divided by the
+		// full number of days: report the symbol instead of a low estimate.
+		if len(bars) == 0 || bars[0].OpenTime.After(cutoff) {
+			est.Err = invalid(fmt.Sprintf("%s candle history is shorter than the %d-day window", symbol, days))
+			out = append(out, est)
+			continue
+		}
 		crossings, err := Crossings(bars, g.fast, g.slow, g.sides)
 		if err != nil {
 			est.Err = err

@@ -35,10 +35,22 @@ func (p *candlesDouble) Candles(_ context.Context, req domain.CandleRequest) ([]
 	return append([]domain.Candle(nil), p.bySymbol[req.Symbol]...), nil
 }
 
-// cliBars builds hourly bars from closes; the last bar closes one hour before
-// now, so every bar is closed and recent enough for a one-day window.
+// cliHistoryPad is the number of flat hourly bars put in front of the test
+// closes: more than the default seven-day window plus the EMA warm-up, so the
+// history always covers the estimated window.
+const cliHistoryPad = 8*24 + 16
+
+// cliBars builds hourly bars from closes behind a flat history of the first
+// close; the last bar closes one hour before now, so every bar is closed and
+// the tested closes sit inside a one-day window. The flat prefix adds no
+// crossing.
 func cliBars(symbol string, closes []string) []domain.Candle {
 	now := time.Now().UTC()
+	padded := make([]string, 0, cliHistoryPad+len(closes))
+	for i := 0; i < cliHistoryPad; i++ {
+		padded = append(padded, closes[0])
+	}
+	closes = append(padded, closes...)
 	bars := make([]domain.Candle, len(closes))
 	for i, c := range closes {
 		open := now.Add(-time.Duration(len(closes)-i+1) * time.Hour)
@@ -233,6 +245,30 @@ func TestSignalsEstimateOneBadSymbol(t *testing.T) {
 	}
 	if got := strings.TrimSpace(stdout.String()); got != "journal ok: 0 events" {
 		t.Fatalf("journal stdout = %q, want 0 events", got)
+	}
+}
+
+// TestSignalsEstimateShortHistory proves a symbol whose candles start inside
+// the window is an error row with a non-zero exit, not a diluted estimate.
+func TestSignalsEstimateShortHistory(t *testing.T) {
+	bars := cliBars("BTCUSDT", alternatingCloses(20))
+	provider := &candlesDouble{bySymbol: map[string][]domain.Candle{
+		"BTCUSDT": bars[len(bars)-20:],
+	}}
+	env, stdout, stderr := signalsEnv(t, provider)
+	cfgPath, dataDir := initSignalsEnv(t, env, trendConfig("BTCUSDT"))
+	stdout.Reset()
+	stderr.Reset()
+
+	if code := runArgs(env, "signals", "estimate", "--config", cfgPath, "--data-dir", dataDir); code != exitProvider {
+		t.Fatalf("signals estimate = %d, want %d, stderr=%s", code, exitProvider, stderr.String())
+	}
+	if got := stdout.String(); !strings.Contains(got, "BTCUSDT error=invalid_request") ||
+		!strings.Contains(got, "total: signals=0 per_day=0.0") {
+		t.Fatalf("stdout = %q, want an error row and an empty total", got)
+	}
+	if !strings.Contains(stderr.String(), "lower --days") {
+		t.Fatalf("stderr = %q, want the hint to lower --days", stderr.String())
 	}
 }
 
