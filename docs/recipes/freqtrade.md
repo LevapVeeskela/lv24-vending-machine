@@ -241,6 +241,10 @@ vend journal verify
   responsibility.
 - One call is one HTTP POST to `127.0.0.1:8420`; no external network is used.
 - Live exchange keys are not needed for this recipe: `--dry-run` is enough.
+- Supported timeframes are a positive amount followed by a lowercase `m`, `h`,
+  `d` or `w` (`5m`, `1h`, `4h`, `1d`, `1w`). The gate answers HTTP 400 to
+  anything else, including Freqtrade's monthly `1M`: such a signal could not be
+  labeled.
 
 ## 6. What comes next
 

@@ -141,7 +141,10 @@ API (локальный, loopback):
 - `POST /v1/gate` с `Authorization: Bearer <token>`, `Content-Type: application/json`,
   телом = GateRequest (`signalId`, `instrument{venue,symbol}`, `side` buy|sell,
   `intentKind` entry|exit, `timeframe`, `ts`, `price`, `source`, `state` — объект
-  конечных чисел). Ответ 200:
+  конечных чисел). `timeframe` — положительное число и единица `m`, `h`, `d`
+  или `w` в нижнем регистре (`5m`, `4h`, `1d`); иное (`4H`, `1M`, `60`)
+  отклоняется с HTTP 400 до записи в журнал, потому что такой сигнал нельзя
+  разметить. Ответ 200:
   `{"mode":"shadow","signalId":"...","verdict":{"verdict":"ALLOW|REJECT|ABSTAIN|SKIP",
   "code":"...","reasons":[...],"checks":[...],"decisionId":"...","model":"...",
   "policyHash":"<64 hex>","decidedAt":"..."}}`.
