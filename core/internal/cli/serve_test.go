@@ -20,6 +20,7 @@ func serveTestAddr() string {
 
 func TestServeMissingToken(t *testing.T) {
 	env, _, stderr := testEnv(t)
+	env.Getenv = func(string) string { return "" }
 	addr := serveTestAddr()
 	code := runArgs(env, "serve", "--addr", addr)
 	if code != exitForbidden {
@@ -106,7 +107,7 @@ func TestShadowSignalsTrendDisabled(t *testing.T) {
 	defer func() { _ = closer.Close() }()
 	deps := shadowTestDeps()
 
-	signals, err := shadowSignals(config.TrendConfig{Enabled: false}, nil, deps)
+	signals, err := shadowSignals(config.TrendConfig{Enabled: false}, 0, nil, deps)
 	if err != nil {
 		t.Fatalf("shadowSignals(disabled) = %v", err)
 	}
@@ -132,7 +133,7 @@ func TestShadowSignalsTrendEnabled(t *testing.T) {
 		Fast:      2,
 		Slow:      3,
 		Sides:     []string{"buy"},
-	}, staticCandles{}, shadowTestDeps())
+	}, 0, staticCandles{}, shadowTestDeps())
 	if err != nil {
 		t.Fatalf("shadowSignals(enabled) = %v", err)
 	}
@@ -141,5 +142,82 @@ func TestShadowSignalsTrendEnabled(t *testing.T) {
 	}
 	if _, err := signals.Scan(context.Background()); err != nil {
 		t.Fatalf("Scan() = %v", err)
+	}
+}
+
+// crossCandles serves six hourly bars; the last one is still forming at the
+// fixed test clock, so the first five are closed and the last closed bar
+// produces exactly one buy cross (the closes mirror the trend package tests).
+type crossCandles struct{}
+
+func (crossCandles) Descriptor() ports.Descriptor {
+	return ports.Descriptor{ID: "marketdata-cross", Kind: ports.KindMarketData}
+}
+
+func (crossCandles) Candles(context.Context, domain.CandleRequest) ([]domain.Candle, error) {
+	closes := []string{"10", "9", "8", "7", "20", "30"}
+	base := time.Date(2026, time.November, 10, 6, 0, 0, 0, time.UTC)
+	bars := make([]domain.Candle, len(closes))
+	for i, c := range closes {
+		bars[i] = domain.Candle{
+			Symbol:    "BTCUSDT",
+			Interval:  "1h",
+			OpenTime:  base.Add(time.Duration(i) * time.Hour),
+			CloseTime: base.Add(time.Duration(i+1) * time.Hour),
+			Open:      domain.MustParseDecimal(c),
+			High:      domain.MustParseDecimal(c),
+			Low:       domain.MustParseDecimal(c),
+			Close:     domain.MustParseDecimal(c),
+			Volume:    domain.MustParseDecimal("1"),
+		}
+	}
+	return bars, nil
+}
+
+// TestShadowSignalsForwardsVenueAndLabel proves the generator receives both
+// values: the venue is visible on the emitted request, and the label interval
+// is observable at the guard boundary (1h holds exactly two 30m windows).
+func TestShadowSignalsForwardsVenueAndLabel(t *testing.T) {
+	signals, err := shadowSignals(config.TrendConfig{
+		Enabled:   true,
+		Venue:     "bybit",
+		Symbols:   []string{"BTCUSDT"},
+		Timeframe: "1h",
+		Fast:      2,
+		Slow:      3,
+		Sides:     []string{"buy"},
+	}, 1800, crossCandles{}, shadowTestDeps())
+	if err != nil {
+		t.Fatalf("shadowSignals() = %v", err)
+	}
+	reqs, err := signals.Scan(context.Background())
+	if err != nil {
+		t.Fatalf("Scan() = %v", err)
+	}
+	if len(reqs) != 1 {
+		t.Fatalf("signals = %d, want 1", len(reqs))
+	}
+	if got := reqs[0].Instrument.Venue; got != "bybit" {
+		t.Fatalf("venue = %q, want bybit (signals.trend.venue not forwarded)", got)
+	}
+}
+
+// TestShadowSignalsLabelWindowGuard is the regression for the dead guard: the
+// label granularity was not forwarded before, so a 1h candle was accepted
+// with a 1h label interval.
+func TestShadowSignalsLabelWindowGuard(t *testing.T) {
+	_, err := shadowSignals(config.TrendConfig{
+		Enabled:   true,
+		Symbols:   []string{"BTCUSDT"},
+		Timeframe: "1h",
+		Fast:      2,
+		Slow:      3,
+		Sides:     []string{"buy"},
+	}, 3600, crossCandles{}, shadowTestDeps())
+	if err == nil {
+		t.Fatal("shadowSignals() accepted timeframe shorter than twice the label interval")
+	}
+	if !strings.Contains(err.Error(), "twice the label interval") {
+		t.Fatalf("error %q misses the label-window guard", err)
 	}
 }

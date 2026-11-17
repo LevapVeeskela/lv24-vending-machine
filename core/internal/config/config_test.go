@@ -443,6 +443,100 @@ func TestLoadInvalidJSONMessage(t *testing.T) {
 	}
 }
 
+func TestTrendTimeframeValidation(t *testing.T) {
+	base := func() Config {
+		c := Default()
+		c.Signals.Trend.Enabled = true
+		c.Signals.Trend.Symbols = []string{"BTCUSDT"}
+		return c
+	}
+
+	if err := base().Validate(); err != nil {
+		t.Fatalf("default trend config: Validate() = %v", err)
+	}
+	// 1x was accepted before: config validate said ok, serve then failed on
+	// the same timeframe, which made the hint circular.
+	bad := base()
+	bad.Signals.Trend.Timeframe = "1x"
+	err := bad.Validate()
+	if err == nil {
+		t.Fatal("Validate() accepted timeframe 1x")
+	}
+	for _, want := range []string{"signals.trend.timeframe", "1x", "m, h, d or w"} {
+		if !contains(err.Error(), want) {
+			t.Fatalf("error %q misses %q", err, want)
+		}
+	}
+
+	// A candle must hold two label windows; 10m is shorter than 2x600s.
+	short := base()
+	short.Signals.Trend.Timeframe = "10m"
+	short.Outcome.LabelIntervalSec = 600
+	if err := short.Validate(); err == nil {
+		t.Fatal("Validate() accepted a timeframe shorter than twice labelIntervalSec")
+	} else if !contains(err.Error(), "twice outcome.labelIntervalSec") {
+		t.Fatalf("error %q misses the label-window guard", err)
+	}
+
+	// Exactly 2x is allowed.
+	edge := base()
+	edge.Signals.Trend.Timeframe = "1h"
+	edge.Outcome.LabelIntervalSec = 1800
+	if err := edge.Validate(); err != nil {
+		t.Fatalf("Validate() at exactly 2x label interval = %v", err)
+	}
+
+	// A disabled trend section is not used by serve, so its stale timeframe
+	// must not block unrelated commands.
+	disabled := Default()
+	disabled.Signals.Trend.Timeframe = "1x"
+	if err := disabled.Validate(); err != nil {
+		t.Fatalf("disabled trend timeframe: Validate() = %v", err)
+	}
+}
+
+// TestConfigDoesNotCheckProviderID documents the split: config validate has no
+// provider registry, so an unknown providers.decision.id is doctor's finding.
+func TestConfigDoesNotCheckProviderID(t *testing.T) {
+	c := Default()
+	c.Providers.Decision.ID = "decision-unknown"
+	if err := c.Validate(); err != nil {
+		t.Fatalf("Validate() = %v, want nil (doctor checks the registry)", err)
+	}
+}
+
+func TestLoadBOM(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	raw, err := json.Marshal(Default())
+	if err != nil {
+		t.Fatalf("Marshal() = %v", err)
+	}
+	if err := os.WriteFile(path, append([]byte("\xef\xbb\xbf"), raw...), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load(BOM) = %v", err)
+	}
+	if err := got.Validate(); err != nil {
+		t.Fatalf("Validate() = %v", err)
+	}
+}
+
+func TestLoadBOMInvalidJSONMentionsBOM(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte("\xef\xbb\xbf{"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load() accepted broken JSON")
+	}
+	if !contains(err.Error(), "file has BOM") {
+		t.Fatalf("error %q misses the BOM hint", err)
+	}
+}
+
 func contains(s, sub string) bool {
 	for i := 0; i+len(sub) <= len(s); i++ {
 		if s[i:i+len(sub)] == sub {

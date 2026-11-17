@@ -939,6 +939,118 @@ func TestNoNotifyWhenNotifierNil(t *testing.T) {
 	}
 }
 
+// TestNextTrendDelay pins the bar-grid alignment: a scan runs offset after
+// every close, never exactly on the close itself.
+func TestNextTrendDelay(t *testing.T) {
+	const hour = time.Hour
+	closeAt := time.Date(2026, 11, 16, 6, 0, 0, 0, time.UTC) // bar close
+	offset := 2 * time.Second
+
+	cases := []struct {
+		name     string
+		now      time.Time
+		interval time.Duration
+		offset   time.Duration
+		want     time.Duration
+	}{
+		{"exactly at close", closeAt, hour, offset, offset},
+		{"one second after close", closeAt.Add(time.Second), hour, offset, time.Second},
+		{"mid bar", closeAt.Add(30 * time.Minute), hour, offset, 30*time.Minute + offset},
+		{"exactly at fire", closeAt.Add(offset), hour, offset, hour},
+		{"no interval", closeAt.Add(30 * time.Minute), 0, offset, 0},
+		{"negative interval", closeAt, -hour, offset, 0},
+		{"mid bar without offset", closeAt.Add(30 * time.Minute), hour, 0, 30 * time.Minute},
+		{"close without offset waits a full bar", closeAt, hour, 0, hour},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := nextTrendDelay(tc.now, tc.interval, tc.offset); got != tc.want {
+				t.Fatalf("nextTrendDelay(%s, %s, %s) = %s, want %s",
+					tc.now, tc.interval, tc.offset, got, tc.want)
+			}
+		})
+	}
+}
+
+// countingLabeler and countingSignals are race-free counters for the Run
+// scheduler test: Run's goroutine writes while the test reads.
+type countingLabeler struct{ n atomic.Int32 }
+
+func (l *countingLabeler) Run(context.Context) (outcome.Summary, error) {
+	l.n.Add(1)
+	return outcome.Summary{}, nil
+}
+
+type countingSignals struct {
+	n     atomic.Int32
+	first chan time.Time
+}
+
+func (s *countingSignals) Scan(context.Context) ([]domain.GateRequest, error) {
+	s.n.Add(1)
+	select {
+	case s.first <- time.Now():
+	default:
+	}
+	return nil, nil
+}
+
+// TestRunTrendScanAfterBarClose runs the real scheduler with a short bar and
+// offset: the scan must wait for the bar close plus the offset, and the label
+// ticker must keep running without triggering it. Cancelling ctx must return
+// from Run.
+func TestRunTrendScanAfterBarClose(t *testing.T) {
+	jr := &memJournal{}
+	labeler := &countingLabeler{}
+	signals := &countingSignals{first: make(chan time.Time, 1)}
+
+	// A fixed clock makes the delay deterministic: now is 200ms into a 1s
+	// bar, the offset is 100ms, so the next fire is 900ms away.
+	now := baseTime.Add(200 * time.Millisecond)
+	deps := ports.Deps{Clock: func() time.Time { return now }}
+	r := newRunner(jr, deps, Config{
+		LabelInterval: 10 * time.Millisecond,
+		TrendInterval: time.Second,
+		StatusPath:    filepath.Join(t.TempDir(), "status.json"),
+		CodeVersion:   "v-test",
+	}, labeler, signals, nil, nil, nil)
+	r.trendOffset = 100 * time.Millisecond
+	want := 900 * time.Millisecond
+	if got := r.NextTrendDelay(now); got != want {
+		t.Fatalf("NextTrendDelay() = %s, want %s", got, want)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	start := time.Now()
+	go func() {
+		r.Run(ctx)
+		close(done)
+	}()
+
+	var first time.Time
+	select {
+	case first = <-signals.first:
+	case <-time.After(3 * time.Second):
+		cancel()
+		<-done
+		t.Fatal("trend scan did not run within 3s")
+	}
+	if elapsed := first.Sub(start); elapsed < want-100*time.Millisecond {
+		t.Fatalf("trend scan after %s, want not before %s (bar close + offset)", elapsed, want)
+	}
+	if got := labeler.n.Load(); got < 2 {
+		t.Fatalf("label cycles before the trend scan = %d, want >= 2", got)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return after ctx cancel")
+	}
+}
+
 func TestRunCancelDoesNotOverlapStep(t *testing.T) {
 	jr := &memJournal{}
 	entered := make(chan struct{}, 8)
