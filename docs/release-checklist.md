@@ -42,6 +42,12 @@
   прогон занимает около 3 минут. PowerShell:
   `$env:VEND_E2E='1'; go -C tools test -count=1 ./e2e/...`.
 
+  При падении любого шага тест оставляет в системном временном каталоге
+  `vend-e2e-failure-*` stdout и stderr `vend serve`, ответ заглушки `/ctl/stats`,
+  `vend status --json`, последние 200 событий `vend journal tail --json` и
+  конфиг; путь печатается в выводе. Файлы проходят через фильтр секретов.
+  Успешный прогон каталог удаляет.
+
   Если `python` в PATH нет, но есть `python3`, используйте
   `python3 -m unittest discover -s examples -p "test_*.py"`: задача
   `test:clients:python` сама выбирает доступную команду. Если нет ни `python`,

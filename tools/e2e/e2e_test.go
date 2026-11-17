@@ -14,11 +14,9 @@ package e2e
 
 import (
 	"bytes"
-	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -93,28 +91,14 @@ type gateInstrument struct {
 	Symbol string `json:"symbol"`
 }
 
-// lockedBuffer is an io.Writer safe for concurrent child output.
-type lockedBuffer struct {
-	mu sync.Mutex
-	b  bytes.Buffer
-}
-
-func (l *lockedBuffer) Write(p []byte) (int, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.b.Write(p)
-}
-
-func (l *lockedBuffer) String() string {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.b.String()
-}
-
 // process is one child command with captured output and an exact-PID stop.
+// stdout and stderr are kept apart for the failure dump; log is their merged
+// view, used in test messages.
 type process struct {
 	name    string
 	cmd     *exec.Cmd
+	stdout  lockedBuffer
+	stderr  lockedBuffer
 	log     *lockedBuffer
 	done    chan error
 	mu      sync.Mutex
@@ -124,17 +108,15 @@ type process struct {
 // startProcess starts exe and begins capturing its stdout and stderr.
 func startProcess(t *testing.T, name, exe string, args, env []string) *process {
 	t.Helper()
-	logs := &lockedBuffer{}
 	cmd := exec.Command(exe, args...)
 	cmd.Env = env
-	cmd.Stdout = logs
-	cmd.Stderr = logs
+	p := &process{name: name, cmd: cmd, log: &lockedBuffer{}, done: make(chan error, 1)}
+	cmd.Stdout = io.MultiWriter(&p.stdout, p.log)
+	cmd.Stderr = io.MultiWriter(&p.stderr, p.log)
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start %s: %v", name, err)
 	}
-	p := &process{name: name, cmd: cmd, log: logs, done: make(chan error, 1)}
 	go func() { p.done <- cmd.Wait() }()
-	t.Cleanup(p.stop)
 	return p
 }
 
@@ -148,8 +130,12 @@ func (p *process) alive() bool {
 	}
 }
 
-// stop kills exactly this PID and waits for it once.
+// stop kills exactly this PID and waits for it once. A nil process is a
+// process that never started, which is not an error.
 func (p *process) stop() {
+	if p == nil {
+		return
+	}
 	p.mu.Lock()
 	if p.stopped {
 		p.mu.Unlock()
@@ -176,27 +162,28 @@ func TestShadowGateE2E(t *testing.T) {
 		t.Skip("set VEND_E2E=1 to run the end-to-end rehearsal")
 	}
 	started := time.Now()
-	root := repoRoot(t)
 	tmp := t.TempDir()
+	h := newHarness(t, started)
+	h.step("setup: work tree")
+	root := repoRoot(t)
 	binDir := filepath.Join(tmp, "bin")
 	if err := os.MkdirAll(binDir, 0o700); err != nil {
 		t.Fatalf("create bin dir: %v", err)
 	}
 
+	h.step("build: vend")
 	vend := vendBinary(t, root, filepath.Join(binDir, exeName("vend")))
+	h.vendPath = vend
 	t.Logf("vend under test: %s", vend)
+	h.step("build: smokestub")
 	stub := buildBinary(t, filepath.Join(root, "tools"), "./smokestub", filepath.Join(binDir, exeName("smokestub")))
 
 	decisionSecret := randomSecret(t)
 	telegramSecret := randomSecret(t)
 	localToken := randomSecret(t)
-	secrets := []string{decisionSecret, telegramSecret, localToken}
-	redact := func(s string) string {
-		for _, secret := range secrets {
-			s = strings.ReplaceAll(s, secret, "<redacted>")
-		}
-		return s
-	}
+	h.addSecret(decisionSecret)
+	h.addSecret(telegramSecret)
+	h.addSecret(localToken)
 
 	env := childEnv(map[string]string{
 		decisionSecretEnv: decisionSecret,
@@ -204,20 +191,27 @@ func TestShadowGateE2E(t *testing.T) {
 		localSecretEnv:    localToken,
 	})
 
+	h.step("start: smokestub")
 	stubAddr := freeAddr(t)
 	stubBase := "http://" + stubAddr
-	stubProc := startProcess(t, "smokestub", stub, []string{"--addr", stubAddr}, env)
-	waitHTTP(t, stubProc, stubBase+"/ctl/stats", 30*time.Second, redact)
+	stubProc := h.start("smokestub", stub, []string{"--addr", stubAddr}, env)
+	h.stub = stubProc
+	h.stubBase = stubBase
+	waitHTTP(t, stubProc, stubBase+"/ctl/stats", 30*time.Second, h.redact)
 
 	configPath := filepath.Join(tmp, "config.json")
 	dataDir := filepath.Join(tmp, "data")
 	writeConfig(t, configPath, stubBase)
+	h.configPath = configPath
+	h.dataDir = dataDir
 
+	h.step("start: vend serve")
 	vendAddr := freeAddr(t)
 	vendBase := "http://" + vendAddr
 	vendArgs := []string{"serve", "--addr", vendAddr, "--config", configPath, "--data-dir", dataDir}
-	vendProc := startProcess(t, "vend", vend, vendArgs, env)
-	waitHTTP(t, vendProc, vendBase+"/healthz", 60*time.Second, redact)
+	vendProc := h.start("vend", vend, vendArgs, env)
+	h.vend = vendProc
+	waitHTTP(t, vendProc, vendBase+"/healthz", 60*time.Second, h.redact)
 
 	client := &http.Client{Timeout: e2eTimeout}
 	post := func(token string, body []byte) (int, []byte) {
@@ -225,6 +219,7 @@ func TestShadowGateE2E(t *testing.T) {
 	}
 
 	// 1. A plain buy signal is accepted and allowed.
+	h.step("1: plain buy signal")
 	sigA := newSignal(t, "e2e-allow-1", "BTC/USDT", "123456.789")
 	status, raw := post(localToken, sigA)
 	requireStatus(t, status, http.StatusOK, raw)
@@ -242,6 +237,7 @@ func TestShadowGateE2E(t *testing.T) {
 
 	// 2. A futures-style symbol is accepted. Klines are not requested before
 	// the labeling window closes, and the counter is keyed by BTCUSDT.
+	h.step("2: futures symbol")
 	sigB := newSignal(t, "e2e-allow-2", "BTC/USDT:USDT", "123457.001")
 	status, raw = post(localToken, sigB)
 	requireStatus(t, status, http.StatusOK, raw)
@@ -255,6 +251,7 @@ func TestShadowGateE2E(t *testing.T) {
 	}
 
 	// 3. The identical body replays the recorded decision without a new call.
+	h.step("3: identical replay")
 	status, raw = post(localToken, sigA)
 	requireStatus(t, status, http.StatusOK, raw)
 	var replay gateResponse
@@ -264,6 +261,7 @@ func TestShadowGateE2E(t *testing.T) {
 	}
 
 	// 4. The same signalId with another body is a conflict.
+	h.step("4: duplicate signal id")
 	conflict := newSignal(t, "e2e-allow-1", "BTC/USDT", "123458.002")
 	status, raw = post(localToken, conflict)
 	if status != http.StatusConflict {
@@ -276,6 +274,7 @@ func TestShadowGateE2E(t *testing.T) {
 	}
 
 	// 5. A request without the bearer token is rejected.
+	h.step("5: missing bearer token")
 	status, raw = post("", sigA)
 	if status != http.StatusUnauthorized {
 		t.Fatalf("unauthenticated status = %d, want 401: %s", status, raw)
@@ -283,6 +282,7 @@ func TestShadowGateE2E(t *testing.T) {
 
 	// 6. A provider-rejected request is an ABSTAIN with provider_misconfigured
 	// and produces one operator alert on the next cycle.
+	h.step("6: misconfigured alert")
 	setCtl(t, client, stubBase, "decision=404")
 	sigC := newSignal(t, "e2e-misconfigured", "BTC/USDT", "123459.003")
 	status, raw = post(localToken, sigC)
@@ -304,6 +304,7 @@ func TestShadowGateE2E(t *testing.T) {
 	// waits for the next one), so the alert is due within about 80 seconds of
 	// the first one. The bound leaves room for a slow machine: a freshly built
 	// binary can start and cycle slowly while it is being scanned.
+	h.step("7: auth alert")
 	setCtl(t, client, stubBase, "decision=401")
 	sigD := newSignal(t, "e2e-auth", "BTC/USDT", "123460.004")
 	status, raw = post(localToken, sigD)
@@ -327,10 +328,11 @@ func TestShadowGateE2E(t *testing.T) {
 
 	// 7b. The journal tail CLI must show exactly the two delivered alerts and
 	// no failed send.
+	h.step("7b: journal notify.sent")
 	tailOut, tailErr, code := runVend(t, vend, configPath, dataDir,
 		"journal", "tail", "--kind", "notify.sent", "--json")
 	if code != 0 {
-		t.Fatalf("journal tail exit = %d: %s", code, redact(tailOut+tailErr))
+		t.Fatalf("journal tail exit = %d: %s", code, h.redact(tailOut+tailErr))
 	}
 	var sent []struct {
 		Seq     int64  `json:"seq"`
@@ -340,17 +342,17 @@ func TestShadowGateE2E(t *testing.T) {
 		} `json:"payload"`
 	}
 	if err := json.Unmarshal([]byte(tailOut), &sent); err != nil {
-		t.Fatalf("decode journal tail: %v (%s)", err, redact(tailOut))
+		t.Fatalf("decode journal tail: %v (%s)", err, h.redact(tailOut))
 	}
 	if len(sent) != 2 {
-		t.Fatalf("notify.sent in journal tail = %d, want exactly 2: %s", len(sent), redact(tailOut))
+		t.Fatalf("notify.sent in journal tail = %d, want exactly 2: %s", len(sent), h.redact(tailOut))
 	}
 	for i, ev := range sent {
 		if ev.Kind != "notify.sent" {
 			t.Fatalf("journal tail event %d kind = %q, want notify.sent", i, ev.Kind)
 		}
 		if !ev.Payload.OK {
-			t.Fatalf("journal tail event %d has ok=false: %s", i, redact(tailOut))
+			t.Fatalf("journal tail event %d has ok=false: %s", i, h.redact(tailOut))
 		}
 		if i > 0 && ev.Seq <= sent[i-1].Seq {
 			t.Fatalf("journal tail seqs are not ascending: %d then %d", sent[i-1].Seq, ev.Seq)
@@ -364,6 +366,7 @@ func TestShadowGateE2E(t *testing.T) {
 
 	// 8. After (horizonBars+1) bars plus two cycles every entry signal is
 	// labeled exactly once, and all klines requests use the canonical symbol.
+	h.step("8: outcome labeling")
 	before := waitStatus(t, vend, configPath, dataDir, 3*time.Minute, "all four outcomes labeled", func(st shadowStatus) bool {
 		return st.Labeled >= 4
 	})
@@ -382,9 +385,11 @@ func TestShadowGateE2E(t *testing.T) {
 
 	// 9. A restart on the same journal must not relabel, repeat an alert, or
 	// lose lastLabelAt.
+	h.step("9: restart")
 	vendProc.stop()
-	vendProc = startProcess(t, "vend", vend, vendArgs, env)
-	waitHTTP(t, vendProc, vendBase+"/healthz", 60*time.Second, redact)
+	vendProc = h.start("vend", vend, vendArgs, env)
+	h.vend = vendProc
+	waitHTTP(t, vendProc, vendBase+"/healthz", 60*time.Second, h.redact)
 	waitStatus(t, vend, configPath, dataDir, 45*time.Second, "the restarted runner status", func(st shadowStatus) bool {
 		return st.UpdatedAt.After(before.UpdatedAt)
 	})
@@ -412,9 +417,10 @@ func TestShadowGateE2E(t *testing.T) {
 	}
 
 	// 10. The report, the sanitized share and the journal check.
+	h.step("10: report, share, verify")
 	reportOut, reportErr, code := runVend(t, vend, configPath, dataDir, "gate", "report")
 	if code != 0 {
-		t.Fatalf("gate report exit = %d: %s", code, redact(reportOut+reportErr))
+		t.Fatalf("gate report exit = %d: %s", code, h.redact(reportOut+reportErr))
 	}
 	for _, line := range []string{"window:", "labeled:", "awaiting labeling:"} {
 		if !strings.Contains(reportOut, line) {
@@ -423,7 +429,7 @@ func TestShadowGateE2E(t *testing.T) {
 	}
 	shareOut, shareErr, code := runVend(t, vend, configPath, dataDir, "gate", "report", "--share")
 	if code != 0 {
-		t.Fatalf("gate report --share exit = %d: %s", code, redact(shareOut+shareErr))
+		t.Fatalf("gate report --share exit = %d: %s", code, h.redact(shareOut+shareErr))
 	}
 	for _, forbidden := range []string{
 		"BTCUSDT", "BTC/USDT", "binance", "123456.789", "123457.001",
@@ -435,17 +441,18 @@ func TestShadowGateE2E(t *testing.T) {
 	}
 	verifyOut, verifyErr, code := runVend(t, vend, configPath, dataDir, "journal", "verify")
 	if code != 0 {
-		t.Fatalf("journal verify exit = %d: %s", code, redact(verifyOut+verifyErr))
+		t.Fatalf("journal verify exit = %d: %s", code, h.redact(verifyOut+verifyErr))
 	}
 	if !strings.Contains(verifyOut, "journal ok") {
 		t.Fatalf("journal verify output = %q, want journal ok", verifyOut)
 	}
 
 	// 11. No generated secret reaches the output of vend or the stub.
+	h.step("11: secret scan")
 	vendProc.stop()
 	stubProc.stop()
 	cli := strings.Join([]string{reportOut, reportErr, shareOut, shareErr, verifyOut, verifyErr}, "\n")
-	for _, secret := range secrets {
+	for _, secret := range h.secrets {
 		if strings.Contains(vendProc.log.String(), secret) {
 			t.Fatalf("vend output leaks a generated secret")
 		}
@@ -632,13 +639,13 @@ func newSignal(t *testing.T, id, symbol, price string) []byte {
 }
 
 // waitHTTP polls url until it answers 200, failing if the process exits.
-func waitHTTP(t *testing.T, p *process, url string, timeout time.Duration, redact func(string) string) {
+func waitHTTP(t *testing.T, p *process, url string, timeout time.Duration, clean func(string) string) {
 	t.Helper()
 	client := &http.Client{Timeout: e2eTimeout}
 	deadline := time.Now().Add(timeout)
 	for {
 		if !p.alive() {
-			t.Fatalf("%s exited before %s answered\n%s", p.name, url, redact(p.log.String()))
+			t.Fatalf("%s exited before %s answered\n%s", p.name, url, clean(p.log.String()))
 		}
 		resp, err := client.Get(url)
 		if err == nil {
@@ -649,7 +656,7 @@ func waitHTTP(t *testing.T, p *process, url string, timeout time.Duration, redac
 			}
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("%s did not answer %s within %s\n%s", p.name, url, timeout, redact(p.log.String()))
+			t.Fatalf("%s did not answer %s within %s\n%s", p.name, url, timeout, clean(p.log.String()))
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
@@ -758,23 +765,11 @@ func totalKlines(s stats) int {
 // runVend runs one CLI command and returns stdout, stderr and the exit code.
 func runVend(t *testing.T, bin, configPath, dataDir string, args ...string) (string, string, int) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-	full := append(append([]string{}, args...), "--config", configPath, "--data-dir", dataDir)
-	cmd := exec.CommandContext(ctx, bin, full...)
-	cmd.Env = childEnv(nil)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	err := cmd.Run()
+	stdout, stderr, code, err := execVend(bin, configPath, dataDir, args...)
 	if err != nil {
-		var exitErr *exec.ExitError
-		if !errors.As(err, &exitErr) {
-			t.Fatalf("vend %s: %v", strings.Join(args, " "), err)
-		}
-		return stdout.String(), stderr.String(), exitErr.ExitCode()
+		t.Fatalf("vend %s: %v", strings.Join(args, " "), err)
 	}
-	return stdout.String(), stderr.String(), 0
+	return stdout, stderr, code
 }
 
 // lastStatus reads the current shadow status once.
