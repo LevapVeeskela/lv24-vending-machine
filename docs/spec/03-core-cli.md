@@ -259,8 +259,9 @@ Decimal (строки); float — только вероятности/метри
 
 `vend status`: снимок `shadow-status.json` (версия, policyHash, последняя
 ошибка цикла, updatedAt, lastSeq) плюс пересчёт событий и меток по журналу.
-`lastLabelAt` при старте раннера восстанавливается из времени последнего
-`outcome.labeled` в журнале, поэтому рестарт не обнуляет его. Без запущенного
+`lastLabelAt` — время последнего события `outcome.labeled` в журнале: и
+работающий цикл, и раннер после рестарта берут его оттуда, поэтому рестарт не
+обнуляет и не сдвигает значение. Без запущенного
 раннера `policy: none`, `last label: never`. `--json` отдаёт
 поля `version`, `policyHash`, `events`, `labeled`, `lastLabelAt`,
 `lastCycleError`, `updatedAt`, `lastSeq`.

@@ -351,13 +351,10 @@ func TestShadowGateE2E(t *testing.T) {
 	if after.Labeled != before.Labeled {
 		t.Fatalf("labeled after restart = %d, want %d", after.Labeled, before.Labeled)
 	}
-	// Known defect, reported in the stage H report and not fixed here: a
-	// running cycle stamps lastLabelAt with the cycle clock after labeling,
-	// while a restart re-derives it from the last outcome.labeled event, so
-	// the value shifts by a few milliseconds. Require the same label time
-	// within one second until the product writes one canonical value.
-	if drift := after.LastLabelAt.Sub(before.LastLabelAt); drift < -time.Second || drift > time.Second {
-		t.Fatalf("lastLabelAt after restart = %s, want %s within 1s", after.LastLabelAt, before.LastLabelAt)
+	// lastLabelAt is the journal time of the latest label, so the running
+	// cycle and the restarted runner must report exactly the same value.
+	if !after.LastLabelAt.Equal(before.LastLabelAt) {
+		t.Fatalf("lastLabelAt after restart = %s, want %s", after.LastLabelAt, before.LastLabelAt)
 	}
 	if after.LastLabelAt.IsZero() {
 		t.Fatal("lastLabelAt is empty after restart")

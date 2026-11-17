@@ -238,13 +238,12 @@ func New(jr ports.Journal, labeler Labeler, signals SignalSource, evaluator Eval
 	// in-memory snapshot field, and a restart must not make an old label look
 	// like it never happened. A journal read failure is not fatal here; the
 	// next cycle records it in the status like every other phase error.
-	if err := jr.Walk(context.Background(), 0, domain.EventOutcomeLabeled, func(ev domain.Event) error {
-		if at := ev.TS.UTC(); at.After(r.lastLabelAt) {
-			r.lastLabelAt = at
+	if at, err := lastLabelTime(context.Background(), jr); err != nil {
+		if deps.Logger != nil {
+			deps.Logger.Warn("shadow: cannot restore last label time", "err", sanitizeErr(err))
 		}
-		return nil
-	}); err != nil && deps.Logger != nil {
-		deps.Logger.Warn("shadow: cannot restore last label time", "err", sanitizeErr(err))
+	} else {
+		r.lastLabelAt = at
 	}
 	return r, nil
 }
@@ -326,6 +325,23 @@ func nextTrendDelay(now time.Time, interval, offset time.Duration) time.Duration
 	return fire.Sub(now)
 }
 
+// lastLabelTime returns the journal time of the latest outcome.labeled event,
+// or the zero time when the journal holds none. It is the single source of
+// Status.LastLabelAt, at runtime and after a restart.
+func lastLabelTime(ctx context.Context, jr ports.Journal) (time.Time, error) {
+	var last time.Time
+	err := jr.Walk(ctx, 0, domain.EventOutcomeLabeled, func(ev domain.Event) error {
+		if at := ev.TS.UTC(); at.After(last) {
+			last = at
+		}
+		return nil
+	})
+	if err != nil {
+		return time.Time{}, err
+	}
+	return last, nil
+}
+
 // Status returns a snapshot of the last written status.
 func (r *Runner) Status() Status {
 	r.mu.Lock()
@@ -373,7 +389,19 @@ func (r *Runner) stepPhases(ctx context.Context, doLabel, doTrend bool) {
 		if err != nil {
 			record(err)
 		} else if sum.Labeled > 0 {
-			r.lastLabelAt = r.deps.Now()
+			// The status carries the journal time of the latest label: the
+			// same value a restarted runner restores, so lastLabelAt does not
+			// shift across a restart. The cycle clock is only a fallback for
+			// a labeler that reports labels the journal does not hold.
+			at, err := lastLabelTime(ctx, r.jr)
+			switch {
+			case err != nil:
+				record(err)
+			case at.IsZero():
+				r.lastLabelAt = r.deps.Now()
+			default:
+				r.lastLabelAt = at
+			}
 		}
 	}
 
