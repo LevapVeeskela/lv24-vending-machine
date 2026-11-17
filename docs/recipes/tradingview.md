@@ -1,81 +1,86 @@
-# Рецепт: TradingView → shadow-гейт
+# Recipe: TradingView → shadow gate
 
-**Коротко: в M1 вебхуки TradingView гейт напрямую не принимает.** Причина не в
-лени, а в несовместимости транспорта: алерты TradingView не умеют того, что
-требует локальный API. Ниже — почему, какие есть варианты и что нужно решить
-до реализации.
+[Русская версия](tradingview.ru.md)
 
-## Что умеет TradingView
+**In short: in M1 the gate does not accept TradingView webhooks directly.**
+The reason is not laziness but transport incompatibility: TradingView alerts
+cannot do what the local API requires. Below is why, what the options are, and
+what must be decided before implementation.
 
-Ограничения платформы (проверять в актуальной документации TradingView, они
-меняются):
+## What TradingView can do
 
-- вебхук уходит только на **80 или 443 порт** по HTTP/HTTPS;
-- на ответ даётся около **3 секунд**, иначе доставка считается неуспешной;
-- на аккаунте обязательна **двухфакторная аутентификация** — без неё алерты с
-  вебхуком не включаются;
-- **произвольные заголовки задать нельзя**: настраиваются URL и тело сообщения,
-  но не `Authorization`. Значит, `Authorization: Bearer <token>` отправить
-  невозможно;
-- тело алерта — свободный текст, в который подставляются значения из
-  плейсхолдеров; JSON нужно собирать вручную и он не типизирован.
+Platform limits (check the current TradingView documentation; they change):
 
-## Что требует гейт
+- a webhook goes only to **port 80 or 443** over HTTP/HTTPS;
+- about **3 seconds** are allowed for the answer, otherwise delivery is
+  considered failed;
+- **two-factor authentication** is mandatory on the account — without it,
+  alerts with a webhook cannot be enabled;
+- **arbitrary headers cannot be set**: the URL and the message body are
+  configurable, but not `Authorization`. So `Authorization: Bearer <token>`
+  cannot be sent;
+- the alert body is free text with placeholder values; JSON has to be built by
+  hand and is not typed.
 
-`POST /v1/gate` из `vend serve`:
+## What the gate requires
 
-- слушает только `127.0.0.1` (loopback), порт по умолчанию `8420`;
-- требует заголовок `Authorization: Bearer <token>` с локальным токеном;
-- требует `Content-Type: application/json` и строгий `GateRequest`:
+`POST /v1/gate` from `vend serve`:
+
+- listens on `127.0.0.1` only (loopback), default port `8420`;
+- requires the `Authorization: Bearer <token>` header with the local token;
+- requires `Content-Type: application/json` and a strict `GateRequest`:
   `signalId`, `instrument{venue,symbol}`, `side`, `intentKind`, `timeframe`,
   `ts`, `price`, `source`, `state`;
-- отклоняет неизвестные поля и мусор в теле;
-- рассчитан на миллисекундный локальный вызов, а не на публичный интернет.
+- rejects unknown fields and garbage in the body;
+- is designed for a millisecond local call, not for the public internet.
 
-Публичного эндпоинта, TLS-терминации и проверки подписи в M1 нет — это
-сознательное решение local-first ([ADR-0005](../adr/0005-local-first.md)),
-а не недоделка.
+There is no public endpoint, TLS termination or signature verification in M1 —
+this is a deliberate local-first decision
+([ADR-0005](../adr/0005-local-first.md)), not an omission.
 
-## Почему нельзя «просто открыть порт»
+## Why "just open the port" does not work
 
-Даже если пробросить `8420` наружу, получится:
+Even if `8420` is exposed to the internet, the result is:
 
-1. **Нет авторизации.** TradingView не пришлёт bearer-токен; проверять
-   нечего, кроме тела, а тело может прислать кто угодно, кто узнал URL.
-2. **Нет TLS и нормальной идентичности клиента.** Секрет в URL алерта
-   попадает в логи и в интерфейс TradingView.
-3. **Нет защиты от повторов.** Один и тот же алерт может прийти дважды;
-   гейт дедуплицирует по `signalId`, но `signalId` должен быть стабильным,
-   а из свободного текста его ещё надо разобрать.
-4. **3 секунды.** Гейт может ходить к decision-модели; если он не уложится,
-   TradingView будет ретраить и считать доставку сломанной.
-5. **Нет маппинга.** Алерт — это текст, а не `GateRequest`: нужно
-   преобразование тикера, стороны, таймфрейма и цены, с валидацией.
+1. **No authorization.** TradingView will not send a bearer token; there is
+   nothing to check except the body, and anyone who learns the URL can send a
+   body.
+2. **No TLS and no proper client identity.** A secret in the alert URL ends up
+   in logs and in the TradingView interface.
+3. **No replay protection.** The same alert may arrive twice; the gate
+   deduplicates by `signalId`, but `signalId` must be stable, and it still has
+   to be parsed out of free text.
+4. **3 seconds.** The gate may call a decision model; if it does not fit,
+   TradingView retries and considers delivery broken.
+5. **No mapping.** An alert is text, not a `GateRequest`: the ticker, side,
+   timeframe and price need conversion with validation.
 
-## Варианты для ADR
+## Options for an ADR
 
-1. **Публичный bridge-сервис** (рекомендуемый, если TradingView нужен):
-   отдельный процесс на VPS с HTTPS на 443, собственным секретом в теле
-   алерта, проверкой подписи/общего секрета, rate limit, защитой от повторов
-   и очередью. Bridge сразу отвечает TradingView `200`, а `GateRequest`
-   отправляет в гейт по приватному каналу (туннель к машине владельца либо
-   гейт на том же хосте). Это новая поверхность атаки и отдельная
-   эксплуатация — только через ADR.
-2. **Ручной/полуавтоматический перенос**: алерт приходит на почту или в
-   Telegram, владелец или отдельный скрипт превращает его в `GateRequest` и
-   вызывает локальный API. Дешево, но не автоматизация.
-3. **Не поддерживать TradingView в M1** (текущее состояние). Сигналы берём
-   из Freqtrade и встроенного trend-источника; см.
-   [рецепт Freqtrade](freqtrade.md).
+1. **A public bridge service** (recommended if TradingView is needed): a
+   separate process on a VPS with HTTPS on 443, its own secret in the alert
+   body, signature/shared-secret verification, rate limiting, replay
+   protection and a queue. The bridge answers TradingView `200` immediately
+   and sends the `GateRequest` to the gate over a private channel (a tunnel to
+   the owner's machine or a gate on the same host). This is a new attack
+   surface and separate operations — only through an ADR.
+2. **Manual/semi-automatic transfer**: the alert arrives by email or Telegram,
+   and the owner or a separate script turns it into a `GateRequest` and calls
+   the local API. Cheap, but not automation.
+3. **Do not support TradingView in M1** (the current state). Signals come from
+   Freqtrade and the built-in trend source; see the
+   [Freqtrade recipe](freqtrade.md).
 
-## Что должно быть в ADR до кода
+## What an ADR must contain before code
 
-- модель угроз публичного эндпоинта: аутентификация, replay, лимиты, логи без
-  секретов;
-- схема маппинга алерта в `GateRequest` (тикер, сторона, таймфрейм, цена, `ts`);
-- поведение при таймауте 3 секунд: очередь и немедленный `200`;
-- где живёт bridge, кто его обновляет и как он попадает в журнал решений;
-- совместимость с `shadow`: вердикт по-прежнему только журналируется.
+- the threat model of the public endpoint: authentication, replay, limits,
+  logs without secrets;
+- the mapping of an alert to a `GateRequest` (ticker, side, timeframe, price,
+  `ts`);
+- behavior on the 3-second timeout: a queue and an immediate `200`;
+- where the bridge lives, who updates it, and how it reaches the decision
+  journal;
+- compatibility with `shadow`: the verdict is still only journaled.
 
-До появления такого ADR рецепта с кодом не будет: приём вебхуков TradingView
-в M1 не заявлен и не тестируется.
+Until such an ADR exists, there will be no recipe with code: accepting
+TradingView webhooks is not claimed or tested in M1.
