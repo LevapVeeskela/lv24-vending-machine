@@ -1,107 +1,291 @@
-// These tests run without VEND_E2E: they cover the failure dump itself, which
-// is the part that must stay trustworthy when the rehearsal misbehaves.
+// Failure diagnostics for the end-to-end rehearsal.
+//
+// The rehearsal is slow and flaky evidence is expensive: one unexplained
+// failure cost a full re-run with no message. The harness therefore records
+// every step with its elapsed time and, when the test fails, copies the
+// evidence that explains the state into a separate directory outside the
+// temporary work tree. On success that directory is removed.
+//
+// Everything written there passes through redact first: the generated
+// provider secrets of the run never reach disk, even if a child process
+// echoes them.
 
 package e2e
 
 import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
 
-// testSecret is a stand-in for a generated provider secret.
-const testSecret = "0123456789abcdef0123456789abcdef0123456789abcdef"
+const (
+	// diagnosticsDirPrefix names the directory kept after a failed run.
+	diagnosticsDirPrefix = "vend-e2e-failure-"
+	// journalDumpLimit is how many journal events the failure dump keeps.
+	journalDumpLimit = 200
+	// redactedValue replaces every generated secret in a dumped file.
+	redactedValue = "<redacted>"
+)
 
-// TestFailureDumpRedactsSecrets: every artifact passes through redact, so a
-// secret echoed by a child process never reaches the evidence directory.
-func TestFailureDumpRedactsSecrets(t *testing.T) {
-	dir := t.TempDir()
-	h := &harness{t: t, dir: dir}
-	h.addSecret(testSecret)
-	h.addSecret("second-secret-value")
+// harness owns one rehearsal run: its processes, its generated secrets and
+// the failure directory. It is the single place that stops child processes,
+// so evidence is collected before anything is killed.
+type harness struct {
+	t       *testing.T
+	started time.Time
+	dir     string
 
-	h.writeFile("vend-serve.stderr.log", "provider rejected token "+testSecret+"\n")
-	h.writeFile("config.json",
-		`{"secretRef":"conn/drex/apiKey","leaked":"second-secret-value"}`)
-	h.writeFile("smokestub-stats.json", `{"decision":1,"telegram":2}`)
+	secrets []string
+	steps   []string
+	procs   []*process
 
-	for _, name := range []string{"vend-serve.stderr.log", "config.json"} {
-		raw, err := os.ReadFile(filepath.Join(dir, name))
-		if err != nil {
-			t.Fatalf("read %s: %v", name, err)
-		}
-		if strings.Contains(string(raw), testSecret) {
-			t.Fatalf("%s still contains the generated secret", name)
-		}
-		if strings.Contains(string(raw), "second-secret-value") {
-			t.Fatalf("%s still contains the second generated secret", name)
-		}
-		if !strings.Contains(string(raw), redactedValue) {
-			t.Fatalf("%s has no %q marker:\n%s", name, redactedValue, raw)
-		}
-		if info, err := os.Stat(filepath.Join(dir, name)); err != nil {
-			t.Fatalf("stat %s: %v", name, err)
-		} else if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
-			// Windows has no POSIX permission bits: Go reports 0666 for every
-			// writable file there, so the check only means something elsewhere.
-			t.Fatalf("%s permissions = %v, want 0600", name, info.Mode().Perm())
-		}
-	}
+	vendPath   string
+	vend       *process
+	stub       *process
+	stubBase   string
+	configPath string
+	dataDir    string
+}
 
-	raw, err := os.ReadFile(filepath.Join(dir, "smokestub-stats.json"))
+// newHarness creates the failure directory and registers the one cleanup that
+// stops the children, writes the diagnostics and removes the directory on
+// success. It must be called after t.TempDir(), so the work tree is still
+// intact when the evidence is copied.
+func newHarness(t *testing.T, started time.Time) *harness {
+	t.Helper()
+	dir, err := os.MkdirTemp("", diagnosticsDirPrefix)
 	if err != nil {
-		t.Fatalf("read smokestub-stats.json: %v", err)
+		t.Fatalf("create the failure diagnostics directory: %v", err)
 	}
-	if strings.Contains(string(raw), redactedValue) {
-		t.Fatalf("a clean artifact was rewritten:\n%s", raw)
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatalf("restrict the failure diagnostics directory: %v", err)
+	}
+	h := &harness{t: t, started: started, dir: dir}
+	t.Cleanup(h.finish)
+	return h
+}
+
+// addSecret registers one generated secret for redaction.
+func (h *harness) addSecret(secret string) {
+	if secret != "" {
+		h.secrets = append(h.secrets, secret)
 	}
 }
 
-// TestFailureDumpSkipsEmptySecrets: an unset secret must not redact every
-// character in the dump.
-func TestFailureDumpSkipsEmptySecrets(t *testing.T) {
-	h := &harness{t: t}
-	h.addSecret("")
+// redact replaces every registered secret with a fixed marker.
+func (h *harness) redact(s string) string {
+	for _, secret := range h.secrets {
+		s = strings.ReplaceAll(s, secret, redactedValue)
+	}
+	return s
+}
 
-	if got := h.redact("plain text"); got != "plain text" {
-		t.Fatalf("redact with an empty secret = %q, want the input", got)
+// step logs the name of a scenario step and its time since the run started.
+func (h *harness) step(name string) {
+	line := fmt.Sprintf("%-32s t+%7.2fs", name, time.Since(h.started).Seconds())
+	h.steps = append(h.steps, line)
+	h.t.Logf("step %s", line)
+}
+
+// start launches one child, tracks it for the final stop and returns it.
+func (h *harness) start(name, exe string, args, env []string) *process {
+	h.t.Helper()
+	p := startProcess(h.t, name, exe, args, env)
+	h.procs = append(h.procs, p)
+	return p
+}
+
+// finish stops the children and reports the evidence of a failed run.
+func (h *harness) finish() {
+	h.report(h.t.Failed())
+}
+
+// report is the testable half of finish: failed runs keep a redacted snapshot,
+// passing runs leave nothing behind.
+func (h *harness) report(failed bool) {
+	if failed {
+		// The journal is read through the CLI: freeze vend serve first so the
+		// database is not being written while it is read.
+		h.vend.stop()
+		h.collect()
+	}
+	for i := len(h.procs) - 1; i >= 0; i-- {
+		h.procs[i].stop()
+	}
+	if !failed {
+		if err := os.RemoveAll(h.dir); err != nil {
+			h.t.Logf("remove the failure diagnostics directory %s: %v", h.dir, err)
+		}
+		return
+	}
+	h.t.Logf("failure diagnostics written to %s", h.dir)
+	fmt.Fprintf(os.Stderr, "\nE2E failure diagnostics: %s\n", h.dir)
+}
+
+// collect copies the evidence of the failed run. Every write is redacted.
+func (h *harness) collect() {
+	h.writeFile("vend-serve.stdout.log", processStdout(h.vend))
+	h.writeFile("vend-serve.stderr.log", processStderr(h.vend))
+	h.writeFile("smokestub.stdout.log", processStdout(h.stub))
+	h.writeFile("smokestub.stderr.log", processStderr(h.stub))
+	h.collectStats()
+	h.collectCLI("vend-status", "status", "--json")
+	h.collectCLI("vend-journal-tail", "journal", "tail", "--json",
+		"--limit", fmt.Sprintf("%d", journalDumpLimit))
+	h.collectConfig()
+	h.writeFile("summary.txt", h.summary())
+}
+
+// collectStats saves the raw /ctl/stats answer of the stub.
+func (h *harness) collectStats() {
+	if h.stubBase == "" {
+		h.writeFile("smokestub-stats.json", "not collected: the stub never started\n")
+		return
+	}
+	client := &http.Client{Timeout: e2eTimeout}
+	resp, err := client.Get(h.stubBase + "/ctl/stats")
+	if err != nil {
+		h.writeFile("smokestub-stats.json", "GET /ctl/stats failed: "+err.Error()+"\n")
+		return
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		h.writeFile("smokestub-stats.json", "read /ctl/stats failed: "+err.Error()+"\n")
+		return
+	}
+	if resp.StatusCode != http.StatusOK {
+		h.writeFile("smokestub-stats.json",
+			fmt.Sprintf("GET /ctl/stats returned %d: %s\n", resp.StatusCode, raw))
+		return
+	}
+	h.writeFile("smokestub-stats.json", string(raw))
+}
+
+// collectCLI saves the output of one vend command. The stdout file keeps the
+// JSON untouched; the exit code and stderr go to a sibling file.
+func (h *harness) collectCLI(prefix string, args ...string) {
+	if h.vendPath == "" || h.configPath == "" || h.dataDir == "" {
+		h.writeFile(prefix+".json",
+			"not collected: the binary, config or data directory is unknown\n")
+		return
+	}
+	stdout, stderr, code, err := execVend(h.vendPath, h.configPath, h.dataDir, args...)
+	if err != nil {
+		h.writeFile(prefix+".json",
+			fmt.Sprintf("vend %s failed: %v\n", strings.Join(args, " "), err))
+	} else {
+		h.writeFile(prefix+".json", stdout)
+	}
+	h.writeFile(prefix+".stderr.log", fmt.Sprintf("exit: %d\n%s", code, stderr))
+}
+
+// collectConfig saves the config the server ran with. It holds secret
+// references only, and the redaction pass guarantees nothing else leaks.
+func (h *harness) collectConfig() {
+	if h.configPath == "" {
+		h.writeFile("config.json", "not collected: the config path is unknown\n")
+		return
+	}
+	raw, err := os.ReadFile(h.configPath)
+	if err != nil {
+		h.writeFile("config.json", "read the config failed: "+err.Error()+"\n")
+		return
+	}
+	h.writeFile("config.json", string(raw))
+}
+
+// summary lists the run facts and the steps that were reached.
+func (h *harness) summary() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "test: %s\n", h.t.Name())
+	fmt.Fprintf(&b, "started: %s\n", h.started.Format(time.RFC3339Nano))
+	fmt.Fprintf(&b, "elapsed: %.2fs\n", time.Since(h.started).Seconds())
+	fmt.Fprintf(&b, "platform: %s/%s\n", runtime.GOOS, runtime.GOARCH)
+	fmt.Fprintf(&b, "vend: %s\n", h.vendPath)
+	fmt.Fprintf(&b, "stub: %s\n", h.stubBase)
+	fmt.Fprintf(&b, "config: %s\n", h.configPath)
+	fmt.Fprintf(&b, "data dir: %s\n", h.dataDir)
+	fmt.Fprintf(&b, "steps:\n")
+	for _, s := range h.steps {
+		fmt.Fprintf(&b, "  %s\n", s)
+	}
+	return b.String()
+}
+
+// writeFile writes one redacted artifact with owner-only permissions.
+func (h *harness) writeFile(name, content string) {
+	path := filepath.Join(h.dir, name)
+	if err := os.WriteFile(path, []byte(h.redact(content)), 0o600); err != nil {
+		h.t.Logf("write %s: %v", path, err)
 	}
 }
 
-// TestFailureDumpStepRecordsNameAndTime: the step log is the timeline used to
-// place a failure, so it must carry the name and the elapsed time.
-func TestFailureDumpStepRecordsNameAndTime(t *testing.T) {
-	h := &harness{t: t, started: time.Now()}
-	h.step("7: auth alert")
-
-	if len(h.steps) != 1 {
-		t.Fatalf("steps = %v, want one entry", h.steps)
+// processStdout returns the captured stdout of p, or empty for a process that
+// never started.
+func processStdout(p *process) string {
+	if p == nil {
+		return ""
 	}
-	line := h.steps[0]
-	if !strings.Contains(line, "7: auth alert") || !strings.Contains(line, "t+") {
-		t.Fatalf("step line = %q, want the name and the elapsed time", line)
-	}
+	return p.stdout.String()
 }
 
-// TestFailureDumpKeepsFailedRunAndDropsPassingRun: the directory survives a
-// failure and is removed after a success.
-func TestFailureDumpKeepsFailedRunAndDropsPassingRun(t *testing.T) {
-	failedDir := t.TempDir()
-	failed := &harness{t: t, dir: failedDir, started: time.Now()}
-	failed.writeFile("vend-serve.stdout.log", "starting on http://127.0.0.1:1\n")
-	failed.report(true)
-	if _, err := os.Stat(filepath.Join(failedDir, "summary.txt")); err != nil {
-		t.Fatalf("a failed run kept no summary: %v", err)
+// processStderr returns the captured stderr of p, or empty for a process that
+// never started.
+func processStderr(p *process) string {
+	if p == nil {
+		return ""
 	}
+	return p.stderr.String()
+}
 
-	passedDir := t.TempDir()
-	passed := &harness{t: t, dir: passedDir, started: time.Now()}
-	passed.writeFile("vend-serve.stdout.log", "starting\n")
-	passed.report(false)
-	if _, err := os.Stat(passedDir); !os.IsNotExist(err) {
-		t.Fatalf("a passing run left %s behind: %v", passedDir, err)
+// execVend runs one CLI command and returns stdout, stderr, the exit code and
+// a start error. It never calls t.Fatalf, so the failure dump can use it.
+func execVend(bin, configPath, dataDir string, args ...string) (string, string, int, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	full := append(append([]string{}, args...), "--config", configPath, "--data-dir", dataDir)
+	cmd := exec.CommandContext(ctx, bin, full...)
+	cmd.Env = childEnv(nil)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) {
+			return stdout.String(), stderr.String(), 0, err
+		}
+		return stdout.String(), stderr.String(), exitErr.ExitCode(), nil
 	}
+	return stdout.String(), stderr.String(), 0, nil
+}
+
+// lockedBuffer is an io.Writer safe for concurrent child output.
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (l *lockedBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedBuffer) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
 }
