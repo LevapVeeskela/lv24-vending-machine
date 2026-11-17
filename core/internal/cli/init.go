@@ -7,6 +7,19 @@ import (
 	"github.com/LevapVeeskela/lv24-vending-machine/core/internal/config"
 )
 
+// initNextSteps returns the copy-paste commands that continue after init: the
+// config check, the environment probe, an offline gate replay and the server.
+// Paths are spelled out so they work from any directory.
+func initNextSteps(cfgPath, dataDir string) []string {
+	return []string{
+		fmt.Sprintf("vend config validate --config %s", cfgPath),
+		fmt.Sprintf("vend doctor --config %s --data-dir %s", cfgPath, dataDir),
+		fmt.Sprintf("vend gate test --request request.json --fixture response.json --config %s --data-dir %s",
+			cfgPath, dataDir),
+		fmt.Sprintf("vend serve --config %s --data-dir %s", cfgPath, dataDir),
+	}
+}
+
 func (r *runner) cmdInit(args []string) int {
 	g, rest, gerr := splitGlobals(args)
 	if gerr != nil {
@@ -49,9 +62,11 @@ func (r *runner) cmdInit(args []string) int {
 		return r.fail(jsonOut, exitGeneral, codeGeneral, err.Error(),
 			"retry vend init", false, nil)
 	}
+	next := initNextSteps(cfgPath, dataDir)
 	if jsonOut {
-		r.printJSON(map[string]string{
+		r.printJSON(map[string]any{
 			"config": cfgPath, "dataDir": dataDir, "database": dbPath, "mode": cfg.Mode,
+			"nextSteps": next,
 		})
 		return exitOK
 	}
@@ -59,5 +74,11 @@ func (r *runner) cmdInit(args []string) int {
 	fmt.Fprintf(r.stdout, "data dir: %s\n", dataDir)
 	fmt.Fprintf(r.stdout, "database: %s\n", dbPath)
 	fmt.Fprintf(r.stdout, "mode: %s\n", cfg.Mode)
+	fmt.Fprintln(r.stdout, "")
+	fmt.Fprintln(r.stdout, "next steps:")
+	for i, step := range next {
+		fmt.Fprintf(r.stdout, "  %d. %s\n", i+1, step)
+	}
+	fmt.Fprintln(r.stdout, "  (replace request.json/response.json with your files; omit --fixture to call the provider)")
 	return exitOK
 }

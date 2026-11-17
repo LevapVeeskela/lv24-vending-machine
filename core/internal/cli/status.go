@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/LevapVeeskela/lv24-vending-machine/core/domain"
 	"github.com/LevapVeeskela/lv24-vending-machine/core/internal/app/shadow"
@@ -18,6 +19,42 @@ const shadowStatusName = "shadow-status.json"
 
 // statusPolicyWidth is how many policy hash characters the human view shows.
 const statusPolicyWidth = 12
+
+// statusView is the JSON shape of `vend status --json`. It mirrors
+// shadow.Status but keeps zero timestamps and the empty policy hash out of the
+// output: before the first `vend serve` there is no snapshot, and scripts must
+// not read "0001-01-01T00:00:00Z" as a real time.
+type statusView struct {
+	Version        string     `json:"version"`
+	PolicyHash     string     `json:"policyHash,omitempty"`
+	Events         int64      `json:"events"`
+	Labeled        int        `json:"labeled"`
+	LastLabelAt    *time.Time `json:"lastLabelAt,omitempty"`
+	LastCycleError string     `json:"lastCycleError,omitempty"`
+	UpdatedAt      *time.Time `json:"updatedAt,omitempty"`
+	LastSeq        int64      `json:"lastSeq,omitempty"`
+}
+
+// newStatusView converts a runner snapshot to its JSON view.
+func newStatusView(st shadow.Status) statusView {
+	v := statusView{
+		Version:        st.Version,
+		PolicyHash:     st.PolicyHash,
+		Events:         st.Events,
+		Labeled:        st.Labeled,
+		LastCycleError: st.LastCycleError,
+		LastSeq:        st.LastSeq,
+	}
+	if !st.LastLabelAt.IsZero() {
+		label := st.LastLabelAt.UTC()
+		v.LastLabelAt = &label
+	}
+	if !st.UpdatedAt.IsZero() {
+		updated := st.UpdatedAt.UTC()
+		v.UpdatedAt = &updated
+	}
+	return v
+}
 
 // cmdStatus prints the shadow gate snapshot: the journal counters plus the
 // last status file written by the runner.
@@ -76,7 +113,7 @@ func (r *runner) cmdStatus(args []string) int {
 	st.Labeled = labeled
 
 	if jsonOut {
-		r.printJSON(st)
+		r.printJSON(newStatusView(st))
 		return exitOK
 	}
 	policy := st.PolicyHash
@@ -114,7 +151,11 @@ func readShadowStatus(path string) (shadow.Status, error) {
 		}
 		return st, fmt.Errorf("read shadow status at %s: %v", path, err)
 	}
-	if err := json.Unmarshal(raw, &st); err != nil {
+	body := trimBOM(raw)
+	if len(body) == 0 && len(raw) > 0 {
+		return shadow.Status{}, fmt.Errorf("invalid shadow status at %s: file has a UTF-8 BOM but no JSON content", path)
+	}
+	if err := json.Unmarshal(body, &st); err != nil {
 		return shadow.Status{}, fmt.Errorf("invalid shadow status at %s: %v", path, firstLine(err))
 	}
 	return st, nil

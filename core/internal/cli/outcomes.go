@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -168,7 +169,8 @@ func (r *runner) cmdOutcomesLabel(args []string) int {
 }
 
 // readCandlesFile parses a candles JSON file strictly: unknown fields and
-// trailing data are rejected.
+// trailing data are rejected. A UTF-8 BOM (written by some Windows editors) is
+// accepted; a file with only a BOM gets an explicit error.
 func readCandlesFile(path string) ([]domain.Candle, int, error) {
 	var cs []domain.Candle
 	if err := statMissing(path); err != nil {
@@ -177,15 +179,21 @@ func readCandlesFile(path string) ([]domain.Candle, int, error) {
 		}
 		return nil, exitGeneral, err
 	}
-	f, err := os.Open(path)
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		if isNotFound(err) {
 			return nil, exitNotFound, fmt.Errorf("candles file not found at %s", path)
 		}
 		return nil, exitGeneral, err
 	}
-	defer func() { _ = f.Close() }()
-	dec := json.NewDecoder(f)
+	body := trimBOM(raw)
+	if len(body) == 0 {
+		if len(raw) > 0 {
+			return nil, exitUsage, fmt.Errorf("invalid candles JSON: file has a UTF-8 BOM but no JSON content")
+		}
+		return nil, exitUsage, fmt.Errorf("invalid candles JSON: file is empty")
+	}
+	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&cs); err != nil {
 		return nil, exitUsage, fmt.Errorf("invalid candles JSON: %v", firstLine(err))
