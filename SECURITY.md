@@ -14,8 +14,15 @@
 
 ## How to report
 
-Privately: `security@lv24.by` (or a GitHub Security Advisory in this
-repository). Do not open a public issue before the fix.
+Privately, through a GitHub Security Advisory in this repository:
+<https://github.com/LevapVeeskela/lv24-vending-machine/security/advisories/new>.
+Do not open a public issue before the fix.
+
+If you cannot use GitHub, write to the support mailbox `lv24by.help@mail.ru`
+with the subject `Security: lv24-vending-machine` and ask for a private
+channel. It is a shared support mailbox, so do not put the vulnerability
+details or any secrets in that first message. All project contacts are listed
+at <https://lv24.by/contacts>.
 
 In the report: version/commit, configuration (paper/live), reproduction steps,
 impact, logs without secrets.
