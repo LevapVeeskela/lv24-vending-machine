@@ -19,6 +19,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf16"
+	"unicode/utf8"
 
 	"github.com/LevapVeeskela/lv24-vending-machine/core/domain"
 	"github.com/LevapVeeskela/lv24-vending-machine/core/ports"
@@ -43,6 +45,9 @@ const (
 	maxBodyBytes = 8 << 10
 	// maxRetryAfterSeconds caps a provider-requested retry delay.
 	maxRetryAfterSeconds = 24 * 60 * 60
+	// maxMessageUnits is the Bot API per-message text limit in UTF-16 code
+	// units (an emoji outside the BMP counts as two).
+	maxMessageUnits = 4096
 )
 
 // Config holds the provider connection settings.
@@ -146,6 +151,10 @@ func (p *Provider) Descriptor() ports.Descriptor {
 //
 // A local rate limit admits at most one send per MinInterval; a rejected send
 // returns CodeRateLimit with the remaining delay and performs no network I/O.
+// Text longer than 4096 UTF-16 code units is split on line or word boundaries
+// (never inside a rune) and delivered as several messages under the single
+// local rate-limit reservation. parse_mode is not set, so text is delivered
+// literally and needs no escaping.
 func (p *Provider) Send(ctx context.Context, n ports.Notification) error {
 	if strings.TrimSpace(n.Text) == "" {
 		return domain.NewError(domain.CodeInvalidRequest,
@@ -162,9 +171,23 @@ func (p *Provider) Send(ctx context.Context, n ports.Notification) error {
 	if err != nil {
 		return err
 	}
+	parts := splitMessage(n.Text, maxMessageUnits)
+	for i, part := range parts {
+		if err := p.sendPart(ctx, token, part); err != nil {
+			if len(parts) == 1 {
+				return err
+			}
+			return fmt.Errorf("notify-telegram: part %d of %d: %w", i+1, len(parts), err)
+		}
+	}
+	return nil
+}
+
+// sendPart performs one sendMessage call.
+func (p *Provider) sendPart(ctx context.Context, token, text string) error {
 	payload, err := json.Marshal(sendMessage{
 		ChatID:                p.chatID,
-		Text:                  n.Text,
+		Text:                  text,
 		DisableWebPagePreview: true,
 	})
 	if err != nil {
@@ -197,10 +220,70 @@ func (p *Provider) Send(ctx context.Context, n ports.Notification) error {
 		e.Retryable = true
 		return e
 	}
-	return nil
+	return p.checkEnvelope(body)
 }
 
-// sendMessage is the Telegram sendMessage request body.
+// splitMessage cuts text into chunks of at most limit UTF-16 code units,
+// preferring a line break, then a space or tab, and only then a hard cut. Cuts
+// always land on a rune boundary, so UTF-8 and surrogate pairs stay intact.
+func splitMessage(text string, limit int) []string {
+	if limit <= 0 || messageUnits(text) <= limit {
+		return []string{text}
+	}
+	parts := make([]string, 0, messageUnits(text)/limit+1)
+	rest := text
+	for messageUnits(rest) > limit {
+		units := 0
+		cut := 0
+		lastNewline, lastSpace := 0, 0
+		for i := 0; i < len(rest); {
+			r, size := utf8.DecodeRuneInString(rest[i:])
+			width := utf16.RuneLen(r)
+			if width < 0 {
+				width = 1
+			}
+			if units+width > limit {
+				break
+			}
+			units += width
+			i += size
+			cut = i
+			switch r {
+			case '\n':
+				lastNewline = i
+			case ' ', '\t':
+				lastSpace = i
+			}
+		}
+		if lastNewline > 0 {
+			cut = lastNewline
+		} else if lastSpace > 0 {
+			cut = lastSpace
+		}
+		parts = append(parts, rest[:cut])
+		rest = rest[cut:]
+	}
+	if rest != "" {
+		parts = append(parts, rest)
+	}
+	return parts
+}
+
+// messageUnits counts UTF-16 code units, the unit of the Bot API 4096 limit.
+func messageUnits(s string) int {
+	n := 0
+	for _, r := range s {
+		width := utf16.RuneLen(r)
+		if width < 0 {
+			width = 1
+		}
+		n += width
+	}
+	return n
+}
+
+// sendMessage is the Telegram sendMessage request body. parse_mode is left
+// unset: the provider does not escape markup, so the text is delivered as-is.
 type sendMessage struct {
 	ChatID                string `json:"chat_id"`
 	Text                  string `json:"text"`
@@ -276,6 +359,9 @@ func (p *Provider) statusError(resp *http.Response, body []byte) error {
 	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
 		return domain.NewError(domain.CodeAuth,
 			"notify-telegram: bot token rejected")
+	case resp.StatusCode == http.StatusBadRequest:
+		return domain.NewError(domain.CodeInvalidRequest,
+			"notify-telegram: message rejected (400)")
 	case resp.StatusCode == http.StatusTooManyRequests:
 		e := domain.NewError(domain.CodeRateLimit, "notify-telegram: rate limited")
 		e.Retryable = true
@@ -292,6 +378,46 @@ func (p *Provider) statusError(resp *http.Response, body []byte) error {
 	default:
 		return domain.NewError(domain.CodeInvalidOutput,
 			fmt.Sprintf("notify-telegram: unexpected status %d", resp.StatusCode))
+	}
+}
+
+// apiEnvelope is the Bot API response envelope. A 200 with ok=false means the
+// message was not delivered, so it must not be reported as success.
+type apiEnvelope struct {
+	OK        bool `json:"ok"`
+	ErrorCode int  `json:"error_code"`
+}
+
+// checkEnvelope turns a 200 body into an error unless it carries ok=true.
+// error_code is mapped like the matching HTTP status (a 400 is a caller
+// invalid_request, a 429 a retryable rate_limit, 401/403 auth).
+func (p *Provider) checkEnvelope(body []byte) error {
+	var env apiEnvelope
+	if err := json.Unmarshal(body, &env); err != nil {
+		return domain.NewError(domain.CodeInvalidOutput,
+			"notify-telegram: invalid response JSON")
+	}
+	if env.OK {
+		return nil
+	}
+	switch env.ErrorCode {
+	case http.StatusBadRequest:
+		return domain.NewError(domain.CodeInvalidRequest,
+			"notify-telegram: message rejected (400)")
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return domain.NewError(domain.CodeAuth,
+			"notify-telegram: bot token rejected")
+	case http.StatusTooManyRequests:
+		e := domain.NewError(domain.CodeRateLimit, "notify-telegram: rate limited")
+		e.Retryable = true
+		if ra := retryAfter(body, "", p.nowUTC()); ra > 0 {
+			e.RetryAfter = ra
+			e.Message = fmt.Sprintf("notify-telegram: rate limited (retry after %s)", ra)
+		}
+		return e
+	default:
+		return domain.NewError(domain.CodeInvalidOutput,
+			fmt.Sprintf("notify-telegram: message not delivered (error_code %d)", env.ErrorCode))
 	}
 }
 
