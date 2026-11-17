@@ -98,6 +98,11 @@ insufficient data: <n> labeled, need 100
 - Гарантии доходности нет, инвестиционной рекомендацией это не является. См.
   [SECURITY.ru.md](SECURITY.ru.md).
 
+## Участие
+
+Вклад принимается на условиях Apache-2.0, CLA нет; проверки и жёсткие правила —
+в [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## Лицензия
 
 Код, провайдеры и SDK — **Apache-2.0** (см. [LICENSE](LICENSE) и

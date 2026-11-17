@@ -98,6 +98,11 @@ nothing about the next trade.
 - There is no guaranteed return and no investment recommendation. See
   [SECURITY.md](SECURITY.md).
 
+## Contributing
+
+Contributions are accepted under Apache-2.0 and there is no CLA; see
+[CONTRIBUTING.md](CONTRIBUTING.md) for the checks and the hard rules.
+
 ## License
 
 Code, providers and SDKs are **Apache-2.0** (see [LICENSE](LICENSE) and
