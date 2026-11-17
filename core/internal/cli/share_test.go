@@ -38,9 +38,19 @@ func initShareEnv(t *testing.T) (Env, *bytes.Buffer, *bytes.Buffer, string, stri
 	return env, stdout, stderr, cfgPath, dataDir
 }
 
-// seedShareReport writes 120 decisions over 7 days; 100 of them carry a
-// labeled outcome, which unlocks the comparison metrics.
-func seedShareReport(t *testing.T, env Env, dataDir string) {
+// shareSeed describes the synthetic journal behind a --share test.
+type shareSeed struct {
+	total      int
+	labeled    int
+	days       int
+	allowEvery int
+	withPairs  bool
+}
+
+// seedShareReportShape writes a journal with the requested verdict mix and
+// calibration coverage. 120 decisions over 7 days; 100 of them carry a
+// labeled outcome, which unlocks the comparison metrics by default.
+func seedShareReportShape(t *testing.T, env Env, dataDir string, s shareSeed) {
 	t.Helper()
 	now := time.Date(2026, 11, 10, 8, 0, 0, 0, time.UTC)
 	jr, closer, err := env.OpenJournal(config.DBPath(dataDir))
@@ -48,15 +58,31 @@ func seedShareReport(t *testing.T, env Env, dataDir string) {
 		t.Fatalf("open journal: %v", err)
 	}
 	defer func() { _ = closer.Close() }()
-	for i := 0; i < 120; i++ {
+	for i := 0; i < s.total; i++ {
 		sig := fmt.Sprintf("CANARYSIGNAL-%d", i)
 		dec := "CANARYDECISION-" + sig
-		ts := now.AddDate(0, 0, i%7)
+		ts := now.AddDate(0, 0, i%s.days)
 		verdict := domain.VerdictAllow
 		net := "0.01"
-		if i%2 == 1 {
+		if i%s.allowEvery != 0 {
 			verdict = domain.VerdictReject
 			net = "-0.01"
+		}
+		answers := map[string]domain.Answer{
+			"data_quality": {
+				Type:          domain.QuestionChoice,
+				Choice:        "ok",
+				Probabilities: map[string]float64{"ok": 1, "insufficient": 0},
+			},
+		}
+		if s.withPairs {
+			answers = map[string]domain.Answer{
+				"risk_check": {
+					Type:          domain.QuestionChoice,
+					Choice:        "pass",
+					Probabilities: map[string]float64{"pass": 0.6, "block": 0.4},
+				},
+			}
 		}
 		events := []domain.Event{
 			{
@@ -79,15 +105,9 @@ func seedShareReport(t *testing.T, env Env, dataDir string) {
 				Kind:       domain.EventDecisionResponse,
 				DecisionID: dec,
 				Payload: mustJSON(t, domain.DecisionResponse{
-					Answers: map[string]domain.Answer{
-						"risk_check": {
-							Type:          domain.QuestionChoice,
-							Choice:        "pass",
-							Probabilities: map[string]float64{"pass": 0.6, "block": 0.4},
-						},
-					},
-					Model: "CANARYMODEL",
-					Usage: domain.Usage{CostUSD: domain.MustParseDecimal("0.01"), LatencyMS: 120},
+					Answers: answers,
+					Model:   "CANARYMODEL",
+					Usage:   domain.Usage{CostUSD: domain.MustParseDecimal("0.01"), LatencyMS: 120},
 				}),
 			},
 			{
@@ -102,7 +122,7 @@ func seedShareReport(t *testing.T, env Env, dataDir string) {
 				}),
 			},
 		}
-		if i < 100 {
+		if i < s.labeled {
 			events = append(events, domain.Event{
 				Kind:       domain.EventOutcomeLabeled,
 				DecisionID: dec,
@@ -132,6 +152,15 @@ func seedShareReport(t *testing.T, env Env, dataDir string) {
 			}
 		}
 	}
+}
+
+// seedShareReport writes the baseline 120-decision journal: 100 labeled
+// outcomes over 7 days with calibration pairs for every labeled outcome.
+func seedShareReport(t *testing.T, env Env, dataDir string) {
+	t.Helper()
+	seedShareReportShape(t, env, dataDir, shareSeed{
+		total: 120, labeled: 100, days: 7, allowEvery: 2, withPairs: true,
+	})
 }
 
 // assertNoCanaries fails when any seeded secret-like string leaked.
@@ -164,6 +193,7 @@ func TestGateReportShare(t *testing.T) {
 		"- no outcome by deadline: 0",
 		"- source rejected: 0",
 		"ALLOW=60 REJECT=60 ABSTAIN=0",
+		"calibration pairs: 100",
 		"Brier score:",
 		"base rate:",
 		"AUC:",
@@ -255,5 +285,90 @@ func TestGateReportOutRequiresShare(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "--out requires --share") {
 		t.Fatalf("stderr misses the --out hint: %q", stderr.String())
+	}
+}
+
+// TestGateReportShareInsufficientCalibration: 100 labeled outcomes without a
+// probability pair must not publish Brier, AUC or a skill score.
+func TestGateReportShareInsufficientCalibration(t *testing.T) {
+	env, stdout, stderr, cfgPath, dataDir := initShareEnv(t)
+	seedShareReportShape(t, env, dataDir, shareSeed{
+		total: 120, labeled: 100, days: 7, allowEvery: 2, withPairs: false,
+	})
+
+	if code := runArgs(env, "gate", "report", "--share",
+		"--config", cfgPath, "--data-dir", dataDir); code != 0 {
+		t.Fatalf("gate report --share = %d, stderr=%s", code, stderr.String())
+	}
+	got := stdout.String()
+	for _, want := range []string{
+		"labeled outcomes: 100",
+		"- calibration pairs: 0",
+		"- metrics: insufficient (0 pairs, need 30)",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("share summary misses %q: %q", want, got)
+		}
+	}
+	for _, forbidden := range []string{"Brier score:", "- AUC:", "Brier skill score:", "base rate:"} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("share summary publishes %q without calibration pairs: %q", forbidden, got)
+		}
+	}
+	assertNoCanaries(t, "share stdout", got)
+}
+
+// TestGateReportShareGroupTooSmall: one ALLOW among 99 REJECT has enough
+// calibration pairs but no publishable group interval.
+func TestGateReportShareGroupTooSmall(t *testing.T) {
+	env, stdout, stderr, cfgPath, dataDir := initShareEnv(t)
+	seedShareReportShape(t, env, dataDir, shareSeed{
+		total: 100, labeled: 100, days: 7, allowEvery: 100, withPairs: true,
+	})
+
+	if code := runArgs(env, "gate", "report", "--share",
+		"--config", cfgPath, "--data-dir", dataDir); code != 0 {
+		t.Fatalf("gate report --share = %d, stderr=%s", code, stderr.String())
+	}
+	got := stdout.String()
+	for _, want := range []string{
+		"ALLOW=1 REJECT=99",
+		"- calibration pairs: 100",
+		"- Brier score:",
+		"insufficient group size",
+		"ALLOW=1, REJECT=99",
+		"need 30 per group",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("share summary misses %q: %q", want, got)
+		}
+	}
+	if strings.Contains(got, "95% CI") {
+		t.Fatalf("share summary prints a CI for one ALLOW: %q", got)
+	}
+	assertNoCanaries(t, "share stdout", got)
+}
+
+// TestGateReportShareNoComparisons still publishes the calibration-pair count
+// when the journal has too few labeled outcomes.
+func TestGateReportShareNoComparisons(t *testing.T) {
+	env, stdout, stderr, cfgPath, dataDir := initShareEnv(t)
+	seedSmallReport(t, env, dataDir)
+
+	if code := runArgs(env, "gate", "report", "--share",
+		"--config", cfgPath, "--data-dir", dataDir); code != 0 {
+		t.Fatalf("gate report --share = %d, stderr=%s", code, stderr.String())
+	}
+	got := stdout.String()
+	for _, want := range []string{
+		"- calibration pairs: 0",
+		"- insufficient data: 2 labeled outcomes, need 100",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("share summary misses %q: %q", want, got)
+		}
+	}
+	if strings.Contains(got, "Brier score:") {
+		t.Fatalf("share summary publishes metrics without comparisons: %q", got)
 	}
 }

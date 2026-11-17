@@ -36,6 +36,15 @@ const (
 	// MinBootstrapDays is the smallest number of distinct UTC entry days
 	// that yields a trustworthy 95% bootstrap interval.
 	MinBootstrapDays = 5
+	// MinCalibrationPairs is the smallest number of (predicted probability,
+	// observed fact) pairs that makes Brier/ECE/AUC/BSS/reliability
+	// trustworthy. Below it the report keeps the computed numbers but marks
+	// them insufficient and prints n/a.
+	MinCalibrationPairs = 30
+	// MinGroupSize is the smallest number of observations in each comparison
+	// group required for the bootstrap interval. One ALLOW among many REJECT
+	// would otherwise produce a zero-width "significant" interval.
+	MinGroupSize = 30
 	// avgScale is the decimal scale of every averaged money value.
 	avgScale = 12
 	// dayLayout is the UTC key used to resample bootstrap days.
@@ -639,6 +648,7 @@ func (b *Builder) compare(labeled []labeledOutcome, decisions map[string]decisio
 	}
 	comp.AUC = auc(global)
 	comp.CalibrationCount = len(global)
+	comp.CalibrationSufficient = comp.CalibrationCount >= MinCalibrationPairs
 	comp.ECE = fillReliability(comp.Reliability, global)
 	b.days = len(days)
 	comp.Difference = b.difference(
@@ -654,13 +664,14 @@ func (b *Builder) compare(labeled []labeledOutcome, decisions map[string]decisio
 	for _, name := range names {
 		acc := byModel[name]
 		comp.ByModel = append(comp.ByModel, domain.ModelBreakdown{
-			Model:        name,
-			Count:        acc.count,
-			Brier:        brier(acc.points),
-			ECE:          fillReliability(makeBuckets(), acc.points),
-			NetReturnSum: acc.net,
-			CostUSD:      acc.cost,
-			AvgNetReturn: average(acc.net, acc.count),
+			Model:            name,
+			Count:            acc.count,
+			Brier:            brier(acc.points),
+			ECE:              fillReliability(makeBuckets(), acc.points),
+			CalibrationCount: len(acc.points),
+			NetReturnSum:     acc.net,
+			CostUSD:          acc.cost,
+			AvgNetReturn:     average(acc.net, acc.count),
 		})
 	}
 	return comp
@@ -679,9 +690,11 @@ func dayAggFor(days map[string]*dayAgg, o domain.Outcome) *dayAgg {
 
 // difference bootstraps the ALLOW-REJECT mean difference by resampling
 // whole UTC entry days with replacement. It returns nil when either group
-// is empty or no draw carried both groups.
+// is empty or no draw carried both groups, and also when either group has
+// fewer than MinGroupSize observations: an interval built from a single
+// observation is not evidence of a significant difference.
 func (b *Builder) difference(allow, reject *groupAcc, days map[string]*dayAgg) *domain.DifferenceStats {
-	if allow.count == 0 || reject.count == 0 || len(days) == 0 {
+	if allow.count < MinGroupSize || reject.count < MinGroupSize || len(days) == 0 {
 		return nil
 	}
 	keys := make([]string, 0, len(days))

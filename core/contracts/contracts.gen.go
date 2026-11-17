@@ -1002,6 +1002,10 @@ type ModelBreakdown struct {
 	// Brier corresponds to the JSON schema field "brier".
 	Brier float64 `json:"brier"`
 
+	// Labeled outcomes of this model with a recorded pass probability. Brier and ece
+	// need at least 30 pairs to be meaningful.
+	CalibrationCount *int `json:"calibrationCount,omitempty,omitzero"`
+
 	// CostUSD corresponds to the JSON schema field "costUsd".
 	CostUSD Decimal `json:"costUsd"`
 
@@ -1052,6 +1056,9 @@ func (j *ModelBreakdown) UnmarshalJSON(value []byte) error {
 	}
 	if 0 > plain.Brier {
 		return fmt.Errorf("field %s: must be >= %v", "brier", 0)
+	}
+	if plain.CalibrationCount != nil && 0 > *plain.CalibrationCount {
+		return fmt.Errorf("field %s: must be >= %v", "calibrationCount", 0)
 	}
 	if 0 > plain.Count {
 		return fmt.Errorf("field %s: must be >= %v", "count", 0)
@@ -1697,6 +1704,11 @@ type ReportComparisons struct {
 
 	// CalibrationCount corresponds to the JSON schema field "calibrationCount".
 	CalibrationCount *int `json:"calibrationCount,omitempty,omitzero"`
+
+	// Whether calibrationCount reached the minimum that makes brier, ece, auc,
+	// brierSkillScore and reliability trustworthy. When false those fields are not
+	// meaningful and the CLI prints n/a.
+	CalibrationSufficient *bool `json:"calibrationSufficient,omitempty,omitzero"`
 
 	// ConstantBrier corresponds to the JSON schema field "constantBrier".
 	ConstantBrier *float64 `json:"constantBrier,omitempty,omitzero"`

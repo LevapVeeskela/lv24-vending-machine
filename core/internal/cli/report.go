@@ -48,6 +48,8 @@ func (r *runner) cmdGateReport(args []string) int {
 	includeBackfill := fs.Bool("include-backfill", false, "count backfilled outcomes in the comparison")
 	share := fs.Bool("share", false, "print a sanitized markdown summary instead of the full report")
 	shareOut := fs.String("out", "", "write the --share markdown to FILE (0600)")
+	allowBrokenChain := fs.Bool("allow-broken-chain", false,
+		"report even when the journal hash chain is broken")
 	if err := fs.Parse(rest); err != nil {
 		return exitUsage
 	}
@@ -94,6 +96,22 @@ func (r *runner) cmdGateReport(args []string) int {
 			"check the database file is a valid sqlite database", false, nil)
 	}
 	defer func() { _ = closer.Close() }()
+	// A report is only evidence when the journal behind it is intact. The
+	// opt-in flag keeps the pre-A1 behavior for an operator who needs the
+	// numbers from a damaged database.
+	if !*allowBrokenChain {
+		res, verr := jr.Verify(ctx)
+		if verr != nil {
+			return r.fail(jsonOut, exitGeneral, codeGeneral, verr.Error(),
+				"check the database file is a valid sqlite database", false, nil)
+		}
+		if !res.OK {
+			return r.fail(jsonOut, exitGeneral, codeGeneral,
+				fmt.Sprintf("journal chain broken at seq %d: %s", res.BrokenSeq, res.Reason),
+				"restore the database from backup; pass --allow-broken-chain to report anyway",
+				false, map[string]any{"seq": res.BrokenSeq, "reason": res.Reason})
+		}
+	}
 	b, err := report.New(jr, ports.Deps{Clock: r.clock, NewID: r.newID}, report.Config{
 		PolicyHash:      *policy,
 		IncludeBackfill: *includeBackfill,
@@ -195,38 +213,65 @@ func printReportHuman(w io.Writer, rep domain.Report, days int, win reportWindow
 	} else if allow, reject := c.Groups["ALLOW"], c.Groups["REJECT"]; allow.Count > 0 && reject.Count > 0 {
 		mean := allow.AvgNetReturn.Sub(reject.AvgNetReturn)
 		fmt.Fprintf(w, "difference ALLOW-REJECT: mean=%s\n", mean.String())
-		fmt.Fprintf(w, "insufficient days for a 95%% interval (%d days, need %d)\n",
-			days, report.MinBootstrapDays)
+		switch {
+		case allow.Count < report.MinGroupSize || reject.Count < report.MinGroupSize:
+			fmt.Fprintf(w, "insufficient group size (ALLOW=%d, REJECT=%d, need %d per group)\n",
+				allow.Count, reject.Count, report.MinGroupSize)
+		case days < report.MinBootstrapDays:
+			fmt.Fprintf(w, "insufficient days for a 95%% interval (%d days, need %d)\n",
+				days, report.MinBootstrapDays)
+		default:
+			fmt.Fprintf(w, "insufficient data for a 95%% interval\n")
+		}
 	} else {
 		fmt.Fprintf(w, "difference ALLOW-REJECT: insufficient data\n")
 	}
-	fmt.Fprintf(w, "brier: %.6f\n", c.Brier)
-	fmt.Fprintf(w, "base rate: %.6f\n", c.BaseRate)
-	fmt.Fprintf(w, "constant brier: %.6f\n", c.ConstantBrier)
-	// A degenerate base rate makes the constant forecast perfect, so the
-	// skill score is undefined rather than zero.
-	if c.BaseRate <= 0 || c.BaseRate >= 1 {
+	// Calibration metrics describe a probability sample; without enough
+	// pairs they are n/a, never zero. AUC additionally needs both observed
+	// classes and BSS a non-degenerate base rate.
+	if !c.CalibrationSufficient {
+		fmt.Fprintf(w, "calibration pairs: %d (need %d)\n", c.CalibrationCount, report.MinCalibrationPairs)
+		fmt.Fprintf(w, "brier: n/a\n")
+		fmt.Fprintf(w, "base rate: n/a\n")
+		fmt.Fprintf(w, "constant brier: n/a\n")
 		fmt.Fprintf(w, "bss: n/a\n")
+		fmt.Fprintf(w, "auc: n/a\n")
+		fmt.Fprintf(w, "ece: n/a\n")
+		fmt.Fprintf(w, "reliability: n/a\n")
 	} else {
-		fmt.Fprintf(w, "bss: %.6f\n", c.BrierSkillScore)
-	}
-	fmt.Fprintf(w, "auc: %.6f\n", c.AUC)
-	fmt.Fprintf(w, "ece: %.6f\n", c.ECE)
-	fmt.Fprintf(w, "calibration pairs: %d\n", c.CalibrationCount)
-	fmt.Fprintf(w, "reliability:\n")
-	for _, b := range c.Reliability {
-		fmt.Fprintf(w, "  [%.1f-%.1f): n=%d mean=%.4f observed=%.4f\n",
-			b.LowerBound, b.LowerBound+0.1, b.Count, b.MeanPredicted, b.ObservedRate)
+		fmt.Fprintf(w, "calibration pairs: %d\n", c.CalibrationCount)
+		fmt.Fprintf(w, "brier: %.6f\n", c.Brier)
+		fmt.Fprintf(w, "base rate: %.6f\n", c.BaseRate)
+		fmt.Fprintf(w, "constant brier: %.6f\n", c.ConstantBrier)
+		// A degenerate base rate makes the constant forecast perfect, so the
+		// skill score and the AUC are undefined rather than zero.
+		if c.BaseRate <= 0 || c.BaseRate >= 1 {
+			fmt.Fprintf(w, "bss: n/a\n")
+			fmt.Fprintf(w, "auc: n/a\n")
+		} else {
+			fmt.Fprintf(w, "bss: %.6f\n", c.BrierSkillScore)
+			fmt.Fprintf(w, "auc: %.6f\n", c.AUC)
+		}
+		fmt.Fprintf(w, "ece: %.6f\n", c.ECE)
+		fmt.Fprintf(w, "reliability:\n")
+		for _, b := range c.Reliability {
+			fmt.Fprintf(w, "  [%.1f-%.1f): n=%d mean=%.4f observed=%.4f\n",
+				b.LowerBound, b.LowerBound+0.1, b.Count, b.MeanPredicted, b.ObservedRate)
+		}
 	}
 	fmt.Fprintf(w, "by model:\n")
 	for _, m := range c.ByModel {
-		if m.Count < minModelLabeled {
+		switch {
+		case m.Count < minModelLabeled:
 			fmt.Fprintf(w, "  model %s: insufficient data (%d labeled)\n", m.Model, m.Count)
-			continue
+		case m.CalibrationCount < report.MinCalibrationPairs:
+			fmt.Fprintf(w, "  model %s: n=%d insufficient calibration (%d pairs, need %d)\n",
+				m.Model, m.Count, m.CalibrationCount, report.MinCalibrationPairs)
+		default:
+			fmt.Fprintf(w, "  %s: n=%d brier=%.6f ece=%.6f net=%s avg=%s cost=%s USD\n",
+				m.Model, m.Count, m.Brier, m.ECE, m.NetReturnSum.String(),
+				m.AvgNetReturn.String(), m.CostUSD.String())
 		}
-		fmt.Fprintf(w, "  %s: n=%d brier=%.6f ece=%.6f net=%s avg=%s cost=%s USD\n",
-			m.Model, m.Count, m.Brier, m.ECE, m.NetReturnSum.String(),
-			m.AvgNetReturn.String(), m.CostUSD.String())
 	}
 }
 
@@ -335,19 +380,44 @@ func shareMarkdown(rep domain.Report, ver string, win reportWindow) string {
 	if rep.Sufficient && rep.Comparisons != nil {
 		c := rep.Comparisons
 		fmt.Fprintf(&b, "## Metrics\n\n")
-		fmt.Fprintf(&b, "- Brier score: %.4f\n", c.Brier)
-		fmt.Fprintf(&b, "- base rate: %.4f\n", c.BaseRate)
-		fmt.Fprintf(&b, "- AUC: %.4f\n", c.AUC)
-		fmt.Fprintf(&b, "- Brier skill score: %.4f\n", c.BrierSkillScore)
+		fmt.Fprintf(&b, "- calibration pairs: %d\n", c.CalibrationCount)
+		if !c.CalibrationSufficient {
+			fmt.Fprintf(&b, "- metrics: insufficient (%d pairs, need %d)\n",
+				c.CalibrationCount, report.MinCalibrationPairs)
+		} else {
+			fmt.Fprintf(&b, "- Brier score: %.4f\n", c.Brier)
+			fmt.Fprintf(&b, "- base rate: %.4f\n", c.BaseRate)
+			// One observed class leaves the AUC undefined; a degenerate base
+			// rate makes the constant forecast perfect and the skill score
+			// undefined.
+			if c.BaseRate <= 0 || c.BaseRate >= 1 {
+				fmt.Fprintf(&b, "- AUC: n/a\n")
+				fmt.Fprintf(&b, "- Brier skill score: n/a\n")
+			} else {
+				fmt.Fprintf(&b, "- AUC: %.4f\n", c.AUC)
+				fmt.Fprintf(&b, "- Brier skill score: %.4f\n", c.BrierSkillScore)
+			}
+		}
 		if d := c.Difference; d != nil {
 			fmt.Fprintf(&b, "- ALLOW vs REJECT mean difference: %s\n", d.Mean.String())
-			fmt.Fprintf(&b, "- 95%% CI: [%s, %s] (%s)\n\n",
+			fmt.Fprintf(&b, "- 95%% CI: [%s, %s] (%s)\n",
 				d.Low.String(), d.High.String(), zeroWording(d.ContainsZero))
+		} else if allow, reject := c.Groups["ALLOW"], c.Groups["REJECT"]; allow.Count > 0 && reject.Count > 0 {
+			if allow.Count < report.MinGroupSize || reject.Count < report.MinGroupSize {
+				fmt.Fprintf(&b, "- ALLOW vs REJECT mean difference: insufficient group size "+
+					"(ALLOW=%d, REJECT=%d, need %d per group)\n",
+					allow.Count, reject.Count, report.MinGroupSize)
+			} else {
+				fmt.Fprintf(&b, "- ALLOW vs REJECT mean difference: insufficient days "+
+					"for a 95%% interval (need %d)\n", report.MinBootstrapDays)
+			}
 		} else {
-			fmt.Fprintf(&b, "- ALLOW vs REJECT mean difference: insufficient data\n\n")
+			fmt.Fprintf(&b, "- ALLOW vs REJECT mean difference: insufficient data\n")
 		}
+		fmt.Fprintf(&b, "\n")
 	} else {
 		fmt.Fprintf(&b, "## Metrics\n\n")
+		fmt.Fprintf(&b, "- calibration pairs: 0\n")
 		fmt.Fprintf(&b, "- insufficient data: %d labeled outcomes, need %d\n\n",
 			rep.LabeledCount, report.DefaultMinLabeled)
 	}
