@@ -1,5 +1,7 @@
 # Quickstart
 
+[Русская версия](quickstart.ru.md)
+
 Two paths to a working shadow gate:
 
 - **Path A (15 minutes, with a decision key):** the loopback gate answers real
@@ -17,8 +19,9 @@ For the multi-day run towards G1 (≥ 7 days, ≥ 100 labels) see
 
 Get `vend` first: a prebuilt binary from the release page or a source build — see
 [install](install.md). The release is **not published** in this repository
-state, so the source build is the working path today. The commands below use
-`./vend` from the repository root (use `vend` if it is on `PATH`).
+state, so the source build is the working path today. The bash commands below
+use `./vend` from the repository root (use `vend` if it is on `PATH`); on
+Windows build `vend.exe` and run `.\vend.exe`, as shown in step 1.
 
 ## Path A — 15 minutes with a decision key
 
@@ -30,10 +33,19 @@ go build -o vend ./core/cmd/vend
 ./vend version
 ```
 
+Windows PowerShell — the same commands with `vend.exe`:
+
+```powershell
+go build -o vend.exe ./core/cmd/vend
+.\vend.exe init
+.\vend.exe version
+```
+
 If you installed the binary in step 0, skip the `go build` line. `init` writes
-the JSON config, creates the SQLite journal and prints both paths. On Windows
-the artifact is the literal file `vend` (no extension), so run `.\vend`; build
-with `-o vend.exe` if you prefer.
+the JSON config, creates the SQLite journal, prints both paths and the next
+commands to run (`config validate`, `doctor`, `gate test`, `serve`) with the
+resolved `--config`/`--data-dir`. On Windows use the `vend.exe` form above; an
+extensionless `vend` is not the supported way to run the build from PowerShell.
 
 ### 2. Point the config at your provider
 
@@ -206,11 +218,16 @@ signal arrived, and they are excluded from report comparisons unless
 ./vend gate report
 ```
 
-The report is journal-only and needs no network. Below 100 labeled outcomes it
-prints counters plus `insufficient data`; at 100 and above it adds group
-returns, a bootstrap confidence interval (needs at least 5 distinct entry days),
-Brier score, Brier skill score, AUC, ECE, the reliability curve and a per-model
-breakdown (from 30 labels per model).
+The report is journal-only and needs no network. It first verifies the journal
+hash chain: a broken chain exits non-zero with the sequence number.
+`--allow-broken-chain` still prints the report (recovery only, not for normal
+use). Below 100 labeled outcomes it prints counters plus `insufficient data`.
+From 100 labels it adds group returns and the bootstrap confidence interval; the
+interval also requires at least 30 outcomes in each group and at least 5 distinct
+entry days. Model quality (Brier, Brier skill score, AUC, ECE, reliability curve)
+is computed only with at least 30 calibration pairs: below that each metric is
+`n/a` and the line is `calibration pairs: N (need 30)`. The per-model breakdown
+starts at 30 labels per model.
 
 Useful variants:
 
@@ -220,13 +237,20 @@ Useful variants:
 ./vend gate report --include-backfill        # include late samples in comparisons
 ./vend gate report --share                   # sanitized markdown summary
 ./vend gate report --share --out summary.md  # same, written with mode 0600
+./vend gate report --allow-broken-chain      # recovery only: report despite a broken chain
 ```
 
-`--share` prints aggregate counts, model quality metrics, assumptions and the
-entry-lag median/p95 (as a fraction of one bar) with the shifted-entry count
-only: no symbols, venues, prices, state, paths or identifiers. The summary has
-`days` (the acceptance-time window) and `active days` (distinct UTC dates with
-at least one `gate.request`). Publish it manually. `--share` cannot be combined
+`--out` and `--save-raw` refuse to overwrite an existing file without `--force`
+and refuse a path inside the data directory; the error names the reason and the
+flag. `vending.db` and the config are never overwritten.
+
+`--share` prints aggregate counts, model quality metrics when available,
+assumptions and the entry-lag median/p95 (as a fraction of one bar) with the
+shifted-entry count. It also includes the aggregate ALLOW-vs-REJECT mean return
+difference and its 95% interval. It contains no symbols, venues, prices,
+position sizes, state, paths, identifiers or individual returns. The summary has
+`days` (the acceptance-time window) and `active days` (distinct UTC dates with at
+least one `gate.request`). Publish it manually. `--share` cannot be combined
 with `--json`; `--out` requires `--share`.
 
 ### 9. Status and integrity
@@ -238,7 +262,13 @@ with `--json`; `--out` requires `--share`.
 
 `status` shows the version, event count, labeled count, last label time, the
 policy hash prefix and the last cycle error. `journal verify` recomputes the
-chain; a broken chain is an error with the sequence number.
+chain; a broken chain is an error with the sequence number. Before the first
+`serve`, `status --json` omits empty `policyHash`, `lastLabelAt`,
+`lastCycleError`, `updatedAt` and `lastSeq` instead of printing
+`"0001-01-01T00:00:00Z"` or an empty string.
+
+`vend help`, `vend help <command>`, `--help` and `-h` print help and exit 0; an
+unknown command or help topic exits 2.
 
 ## Path B — offline, no key
 
@@ -255,11 +285,19 @@ go build -o vend ./core/cmd/vend
 ./vend gate report
 ```
 
+On Windows build `vend.exe` and use `.\vend.exe` with the same arguments.
+
 The fixture is a synthetic cloud answer checked against the gate question set
 exactly like a live response: option keys, probability ranges, unit sums,
 argmax choice and recomputed confidence all have to match. `gate test` writes
 the same journal events as a live evaluation, so the offline path is a safe way
 to validate the wiring.
+
+Repeating the same request with the same `signalId` is a replay: the verdict is
+printed with `replayed: true`, the provider is not called again and no second
+`gate.request` is written. A different `--fixture` for an already journaled
+`signalId` is an error, not a silent replay: the command exits non-zero with
+`fixture differs from journaled decision; change signalId or use another --data-dir`.
 
 `gate report` after one request prints, among other lines:
 
@@ -293,6 +331,9 @@ unlabeled and are counted as `unlabelable`.
 - The same `signalId` with a **different** body is a conflict: HTTP 409
   `{"code":"conflict",...}`. Use a new `signalId` for a new signal.
 - Concurrent duplicates of the same body share one provider call.
+- `gate test` marks a repeat of a journaled `signalId` with `replayed: true`; a
+  different `--fixture` for that id exits non-zero instead of replaying the old
+  verdict.
 - `signalId` is required; an empty value is rejected.
 
 The body fingerprint is the canonical JSON of the request, so field order and
@@ -322,7 +363,9 @@ The data directory holds `vending.db` (journal) and `shadow-status.json`.
 | `signalId already used with a different request body` (409) | send a new `signalId` or the identical body |
 | `insufficient data: N labeled, need 100` | not an error; keep the runner running |
 | `--share cannot be combined with --json` / `--out requires --share` | fix the flags (exit 2) |
-| `journal chain broken at seq N` | restore the journal from backup; it is append-only |
+| `invalid --kind "x"` (exit 2) | the hint lists the allowed event kinds; use one of them |
+| `output file already exists` (exit ≠0) | pass `--force` to replace it; a path inside the data directory is always refused |
+| `journal chain broken at seq N` | the journal is damaged; `gate report` and `journal verify` exit non-zero. Restore it from backup; `gate report --allow-broken-chain` is for recovery only |
 
 `vend doctor` checks the config, data directory, database, providers, secret
 presence and the current gate policy hash without making network calls.

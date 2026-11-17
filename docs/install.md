@@ -1,5 +1,7 @@
 # Install `vend`
 
+[Русская версия](install.ru.md)
+
 Two paths to a working `vend`:
 
 1. **Prebuilt binary** from the GitHub release page (fastest, once the release
@@ -27,7 +29,8 @@ Two paths to a working `vend`:
 Open the releases list:
 
 - <https://github.com/LevapVeeskela/lv24-vending-machine/releases> — the
-  releases list; the `0.1.0-m1` pre-release is published here.
+  releases list; the `0.1.0-m1` pre-release appears here after the owner
+  publishes it.
 - <https://github.com/LevapVeeskela/lv24-vending-machine/releases/latest> —
   appears only after a stable release and does not point at a pre-release.
 
@@ -119,6 +122,13 @@ Then create the config and journal:
 ./vend doctor
 ```
 
+Windows PowerShell:
+
+```powershell
+.\vend.exe init
+.\vend.exe doctor
+```
+
 `init` prints the config and data paths; `doctor` checks them offline. Run
 `init` before `doctor`: without a config `doctor` fails the config, database,
 journal, providers and policy checks and exits 1. Continue with
@@ -192,7 +202,7 @@ go build -o vend ./core/cmd/vend
 # vend <version>
 ```
 
-On Windows build `-o vend.exe` and run `.\vend.exe`.
+On Windows build with `-o vend.exe` and run `.\vend.exe`.
 
 Notes:
 
@@ -200,7 +210,8 @@ Notes:
   and tools modules.
 - The build downloads Go modules only; it does not publish anything and does not
   need the release tool.
-- The version string of a source build is `dev` unless it was stamped with
+- A source build prints the `version` value from `core/cmd/vend/main.go`, which
+  is `0.1.0-m1` in this tree. `tools/release` stamps the same value with
   `-ldflags "-X main.version=<version>"`.
 
 ## Verify the install

@@ -1,5 +1,7 @@
 # Установка `vend`
 
+[English version](install.md)
+
 Два пути до рабочего `vend`:
 
 1. **Готовый бинарник** со страницы релизов GitHub (быстрее, когда релиз
@@ -27,7 +29,7 @@
 Откройте список релизов:
 
 - <https://github.com/LevapVeeskela/lv24-vending-machine/releases> — список
-  релизов; пре-релиз `0.1.0-m1` публикуется здесь.
+  релизов; пре-релиз `0.1.0-m1` появится здесь после публикации владельцем.
 - <https://github.com/LevapVeeskela/lv24-vending-machine/releases/latest> —
   появится только после стабильного выпуска и на пре-релиз не ведёт.
 
@@ -119,6 +121,13 @@ Rename-Item .\vend_windows_amd64.exe vend.exe
 ./vend doctor
 ```
 
+Windows PowerShell:
+
+```powershell
+.\vend.exe init
+.\vend.exe doctor
+```
+
 `init` печатает пути конфига и данных, `doctor` проверяет их без сети. Сначала
 запускайте `init`, потом `doctor`: без конфига `doctor` не проходит проверки
 конфига, БД, журнала, провайдеров и policy и возвращает 1. Дальше —
@@ -202,8 +211,9 @@ go build -o vend ./core/cmd/vend
   провайдеров и tools.
 - Сборка скачивает только Go-модули; ничего не публикует и не требует
   релизного инструмента.
-- Версия сборки из исходников — `dev`, если не передать
-  `-ldflags "-X main.version=<version>"`.
+- Версия сборки из исходников — значение `version` из
+  `core/cmd/vend/main.go`, в этом дереве `0.1.0-m1`. `tools/release`
+  подставляет то же значение через `-ldflags "-X main.version=<version>"`.
 
 ## Проверка установки
 

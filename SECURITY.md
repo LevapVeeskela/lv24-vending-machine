@@ -2,15 +2,27 @@
 
 [Русская версия](SECURITY.ru.md)
 
+## Scope: the M1 shadow gate
+
+M1 is a local shadow gate. It evaluates a signal, asks a decision provider for a
+second opinion and writes the verdict to a hash-chained SQLite journal. It has
+**no order execution path, no OMS, no live trading, no kill switch, no approval
+queue, no WASM runtime and no desktop or mobile client**. A report about those
+features does not describe this release.
+
 ## What counts as a vulnerability
 
-- bypassing `RiskGate`, executing an order without checks, raising limits without approval;
-- leaking API keys, tokens, private keys or personal data;
-- bypassing live-unlock, the kill switch or the approval queue;
-- tampering with market data/fills in a way that affects decisions;
-- prompt injection that leads to an action with money;
-- remote code execution through a provider pack, a WASM strategy or the API;
-- substitution of release updates/artifacts.
+- bypassing authentication on `POST /v1/gate`, or exposing the API beyond
+  loopback;
+- leaking API keys, tokens or secrets through the config, the journal, the logs,
+  a report, `--save-raw`, an error message or crash output;
+- tampering with the journal or its hash chain, or making `journal verify` or
+  `gate report` accept a broken chain;
+- manipulating the market-data or decision-provider responses used by the gate,
+  including prompt injection that changes a verdict;
+- bypassing request validation or the `signalId` idempotency rules so that a
+  replayed or conflicting signal gets a verdict that does not match the journal;
+- substitution of release updates or artifacts.
 
 ## How to report
 
@@ -24,8 +36,8 @@ channel. It is a shared support mailbox, so do not put the vulnerability
 details or any secrets in that first message. All project contacts are listed
 at <https://lv24.by/contacts>.
 
-In the report: version/commit, configuration (paper/live), reproduction steps,
-impact, logs without secrets.
+In the report: version/commit, configuration (mode and providers), reproduction
+steps, impact, logs without secrets.
 
 ## What we do
 
@@ -35,17 +47,21 @@ impact, logs without secrets.
 
 ## Scope
 
-In scope: the code in this repository, release artifacts, contracts, provider
-packs, the WASM runtime, the desktop shell, the mobile app.
+In scope: the Go core and CLI (`vend`), the loopback HTTP API, the SQLite
+journal, the provider adapters (`decision-drex`, `marketdata-binance`,
+`notify-telegram`), the contracts and the release artifacts.
 
-Out of scope: third-party exchanges/brokers, their APIs and policies;
-LLM/decision-provider models; the user's infrastructure.
+Out of scope: execution, OMS, `RiskGate`, kill switch and the approval queue
+(not implemented in M1); desktop, web and mobile clients (not part of M1);
+third-party exchanges and brokers, their APIs and policies; LLM/decision-provider
+models; the user's infrastructure.
 
 ## Rules for contributors
 
 - No secrets in code, tests, fixtures or git history.
 - Money — `Decimal` only, no `float`.
-- Any path to an exchange — only through `OrderIntent → RiskGate → OMS`.
+- M1 has no path to an exchange. Any future execution must go through
+  `OrderIntent → Evaluate → Reserve → OMS`; that path does not exist yet.
 - AGPL/GPL dependencies in the core and mobile are forbidden (see
   `docs/adr/0007`).
 - Tests do not call real exchanges and do not use real keys.

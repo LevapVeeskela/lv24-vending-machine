@@ -53,12 +53,13 @@ Application Support` на macOS): `vending.db` и `shadow-status.json` в M1; `r
 [release-checklist](../release-checklist.md).
 
 ```bash
+vend help [COMMAND]
 vend version [--json]
 vend init [--config FILE] [--data-dir DIR] [--force] [--json]
 vend config path|get KEY|validate [--config FILE] [--data-dir DIR] [--json]
 vend doctor [--live] [--symbol SYMBOL] [--save-raw FILE] [--config FILE] [--data-dir DIR] [--json]
-vend gate test --request FILE [--fixture FILE] [--save-raw FILE] [--config FILE] [--data-dir DIR] [--json]
-vend gate report [--policy HASH] [--include-backfill] [--share [--out FILE]] [--json] [--config FILE] [--data-dir DIR]
+vend gate test --request FILE [--fixture FILE] [--save-raw FILE] [--force] [--config FILE] [--data-dir DIR] [--json]
+vend gate report [--policy HASH] [--include-backfill] [--share [--out FILE [--force]]] [--allow-broken-chain] [--json] [--config FILE] [--data-dir DIR]
 vend serve [--addr 127.0.0.1:8420] [--config FILE] [--data-dir DIR]
 vend outcomes label [--candles FILE] [--json] [--config FILE] [--data-dir DIR]
 vend signals estimate [--days N] [--json] [--config FILE] [--data-dir DIR]
@@ -68,10 +69,25 @@ vend journal tail [--kind KIND] [--limit N] [--json] [--data-dir DIR]
 vend journal verify [--json] [--data-dir DIR]
 ```
 
+`vend help`, `vend help <command>`, `vend --help`, `vend -h`, `vend <command> --help`
+и `vend <command> -h` печатают справку в stdout и возвращают 0; неизвестная тема
+справки — код 2 со списком команд. Вызов без команды печатает usage в stderr и
+возвращает 2. Справка перечисляет те же команды и флаги, что и код.
+
+`vend init` создаёт конфиг и пустой журнал, печатает пути, режим и блок
+`next steps:` из четырёх команд: `vend config validate`, `vend doctor`,
+`vend gate test` и `vend serve` — с подставленными `--config`/`--data-dir`.
+`--json` добавляет к прежним полям аддитивное `nextSteps` (массив строк с теми же
+командами); существующие поля не менялись.
+
 Глобальные флаги `--config FILE`, `--data-dir DIR`, `--json` принимаются в любом
 месте аргументов (`--flag value` или `--flag=value`, одинарный или двойной дефис);
 `--` прекращает их разбор. Приоритет путей: флаг > `VENDING_CONFIG_FILE` /
-`VENDING_DATA_DIR` > ОС-default. Конфиг — JSON
+`VENDING_DATA_DIR` > ОС-default. Файловые выводы `--out` и `--save-raw` не
+перезаписывают существующий файл без `--force` и не пишут внутрь каталога данных
+(там `vending.db` и `shadow-status.json`): команда возвращает ошибку с причиной и
+подсказкой про `--force`, а `vending.db` и конфиг не перезаписываются никогда.
+Конфиг — JSON
 (`apiVersion: "vending.lv24/v1"`, режим `shadow|paper|sandbox`; `live`
 отклоняется валидацией):
 
@@ -165,8 +181,13 @@ API (локальный, loopback):
 
 `gate test --fixture` проигрывает записанный ответ decision offline;
 `--save-raw` пишет сырое тело вендора атомарно (0600) и завершается ошибкой при
-идемпотентном повторе (сырого тела нет). С `--json` печатается только объект
-вердикта.
+идемпотентном повторе (сырого тела нет); существующий файл заменяется только с
+`--force`. Повтор с тем же `signalId` — replay: вывод помечается
+`replayed: true`, провайдер не вызывается, новых событий нет. Если `--fixture` не
+совпадает с записанным `decision.response`, команда завершается ненулевым кодом с
+сообщением `fixture differs from journaled decision; change signalId or use
+another --data-dir`; одинаковый fixture — replay с кодом 0. С `--json` печатается
+объект вердикта.
 
 `doctor` без сети проверяет конфиг, каталог данных (запись), БД, целостность
 журнала, реестр провайдеров, наличие секрета (без значения) и policy hash.
@@ -234,32 +255,39 @@ usage.latencyMs), блок арены при наличии `arena.decision`. С
 горизонт, round-trip fee, price source, equal size/no slippage/no funding,
 `entryLagMedian`/`entryLagP95` (доля одного бара и миллисекунды) и
 `entryShifted` (число сдвинутых входов); lag считается только по исходам, где
-поле `entryLagMs` записано. Меньше 100 размеченных — `insufficient data`,
-сравнений НЕТ. При ≥ 100: суммы и средние net
-по группам all/ALLOW/REJECT/ABSTAIN, bootstrap-разница ALLOW−REJECT (95 % CI,
-2000 прогонов, seed 42; интервал считается только при ≥ 5 различных UTC-днях
-входа, иначе печатается точечная средняя и `insufficient days`), Brier, base
-rate, constant Brier, Brier skill score,
-AUC, ECE, 10-бакетная кривая надёжности, разбивка по моделям (от 30 меток на
-модель). `bss: n/a`, если base rate 0 или 1: константный прогноз идеален,
-skill score не определён. Флаги: `--policy <64-hex>` — метки и сравнения только
-для выбранной политики (счётчики вердиктов остаются по всему журналу, число
-решений других политик печатается отдельно);
-`--include-backfill` — включить поздние метки в сравнение (по умолчанию они
-только считаются). `--share` печатает обезличенную markdown-сводку: версию,
-префикс policy (8 hex), число решений, `days` и `active days` по времени приёма
-`gate.request` (UTC; `days` — включительный интервал от первой до последней
-даты, `active days` — число разных дат), число меток, число ожидающих
-разметки, просроченных без исхода и отклонённых источником (`awaiting
-labeling`, `no outcome by deadline`, `source rejected`), счётчики
-вердиктов, метрики или `insufficient data`, допущения с entry lag median/p95 (в
-долях бара и в секундах) и
-entry shifted, ссылку на GitHub Discussions; без символов/площадок/цен/state/
-путей/идентификаторов и сумм доходности. `--out FILE` пишет её с правами 0600;
-`--share` несовместим с `--json`, `--out` требует `--share`. В `--json` те же
-числа окна отдаются необязательными полями `days` и `activeDays`; существующие
-поля не менялись. Деньги — только
-Decimal (строки); float — только вероятности/метрики.
+поле `entryLagMs` записано. Перед отчётом проверяется hash-chain журнала: разрыв
+даёт exit ≠ 0 с номером seq и причиной; `--allow-broken-chain` продолжает отчёт
+по прежнему поведению. Меньше 100 размеченных — `insufficient data`, сравнений
+НЕТ. При ≥ 100: суммы и средние net по группам all/ALLOW/REJECT/ABSTAIN,
+bootstrap-разница ALLOW−REJECT (95 % CI, 2000 прогонов, seed 42; интервал
+считается только при ≥ 30 наблюдений в каждой группе и ≥ 5 различных UTC-днях
+входа, иначе печатается точечная средняя и `insufficient group size` или
+`insufficient days`), Brier, base rate, constant Brier, Brier skill score, AUC,
+ECE, 10-бакетная кривая надёжности, разбивка по моделям (от 30 меток и ≥ 30
+калибровочных пар на модель). При < 30 калибровочных парах human и `--share`
+печатают `calibration pairs: N (need 30)`, а `brier`, `base rate`,
+`constant brier`, `bss`, `auc`, `ece` и `reliability` — `n/a`; нулей нет.
+`bss: n/a` также при base rate 0 или 1 (константный прогноз идеален, skill score
+не определён), `auc: n/a` при одном наблюдаемом классе. Флаги:
+`--policy <64-hex>` — метки и сравнения только для выбранной политики (счётчики
+вердиктов остаются по всему журналу, число решений других политик печатается
+отдельно); `--include-backfill` — включить поздние метки в сравнение (по
+умолчанию они только считаются). `--share` печатает обезличенную
+markdown-сводку: версию, префикс policy (8 hex), число решений, `days` и
+`active days` по времени приёма `gate.request` (UTC; `days` — включительный
+интервал от первой до последней даты, `active days` — число разных дат), число
+меток, число ожидающих разметки, просроченных без исхода и отклонённых
+источником (`awaiting labeling`, `no outcome by deadline`, `source rejected`),
+счётчики вердиктов, метрики или `insufficient data`, допущения с entry lag
+median/p95 (в долях бара и в секундах) и entry shifted, ссылку на GitHub
+Discussions. В сводке нет символов, площадок, цен, размеров позиций, state,
+путей, идентификаторов и отдельных доходностей; агрегированная разница средней
+доходности ALLOW и REJECT с её 95 % интервалом включена, когда метрик достаточно.
+`--out FILE` пишет её с правами 0600, отказывается перезаписывать существующий
+файл без `--force` и писать внутрь каталога данных. `--share` несовместим с
+`--json`, `--out` требует `--share`. В `--json` те же числа окна отдаются
+необязательными полями `days` и `activeDays`; существующие поля не менялись.
+Деньги — только Decimal (строки); float — только вероятности/метрики.
 
 `vend status`: снимок `shadow-status.json` (версия, policyHash, последняя
 ошибка цикла, updatedAt, lastSeq) плюс пересчёт событий и меток по журналу.
@@ -268,7 +296,10 @@ Decimal (строки); float — только вероятности/метри
 обнуляет и не сдвигает значение. Без запущенного
 раннера `policy: none`, `last label: never`. `--json` отдаёт
 поля `version`, `policyHash`, `events`, `labeled`, `lastLabelAt`,
-`lastCycleError`, `updatedAt`, `lastSeq`.
+`lastCycleError`, `updatedAt`, `lastSeq`. До первого `serve` (`shadow-status.json`
+ещё нет) `policyHash`, `lastLabelAt`, `lastCycleError`, `updatedAt` и `lastSeq`
+опускаются как пустые, а не отдаются в виде `"0001-01-01T00:00:00Z"` или пустой
+строки; `events` и `labeled` по-прежнему считаются по журналу.
 
 Хэши журнала: все `hash`, `prevHash`, `policyHash`, `candlesHash` — 64 строчных hex БЕЗ
 префикса `sha256:`. Правило цепочки:
@@ -375,8 +406,9 @@ windows/amd64, linux/amd64+arm64, darwin/amd64+arm64 в `dist/` и пишет
 
 ### 2.1 Онбординг
 
-Реализованы `vend version` и `vend doctor` (§2.0); интерактивный init,
-шаблоны, `update` и `completion` — цель.
+Реализованы `vend init` (неинтерактивный, с defaults из §2.0; печатает next
+steps), `vend version` и `vend doctor` (§2.0); интерактивный init, шаблоны,
+`update` и `completion` — цель.
 
 ```bash
 vend init                       # интерактивно: режим, биржа, ключи, агенты
@@ -509,13 +541,15 @@ vend backtest walkforward grid-btc --windows 6 --train 0.7
 `vend journal tail [--kind KIND] [--limit N] [--json]` только читает журнал.
 Он печатает последние N событий (1–1000, по умолчанию 20) в порядке возрастания
 `seq`, при `--kind` — только события с точным именем вида (`gate.request`,
-`gate.verdict`, `notify.sent`, `outcome.labeled`, …). Человеческий вывод — строка
+`decision.response`, `decision.model_changed`, `gate.verdict`, `outcome.labeled`,
+`outcome.unlabelable`, `notify.sent`, `arena.decision`). Человеческий вывод — строка
 `seq ts kind decisionId` без payload: в payload бывают цены и состояние
 пользователя; отсутствующий `decisionId` печатается как `-`. `--json` отдаёт
 массив объектов `{seq, ts, kind, decisionId, payload}`, payload — как в журнале.
-Пустой журнал и неизвестный `kind` дают пустой вывод и код 0; неверный `--limit`
-— код 2 (usage). Цепочку команда не проверяет (для этого `journal verify`) и
-ничего не пишет.
+Пустой журнал даёт пустой вывод и код 0. Неизвестный `--kind` — код 2, сообщение
+`invalid --kind "..."` и список допустимых видов в тексте и в
+`details.allowed`; неверный `--limit` — код 2 (usage). Цепочку команда не
+проверяет (для этого `journal verify`) и ничего не пишет.
 
 Цель:
 
@@ -562,6 +596,10 @@ switch, рестарте демона и изменении ключей.
 | 7 | Отказ риск-гейта |
 | 8 | Таймаут |
 | 9 | Требуется подтверждение (approval) |
+
+Справка (`--help`, `-h`, `help`, `help <cmd>`, `<cmd> --help`) возвращает 0;
+неизвестная команда или тема справки — 2. HTTP 409 `conflict` в CLI даёт exit 4 и
+`code: conflict` (без двойного префикса `vend: conflict:`).
 
 Ошибки — структурированные: `{code, message, hint, docsUrl, retryable, details}`.
 `hint` обязателен: CLI должен говорить, что делать дальше.
