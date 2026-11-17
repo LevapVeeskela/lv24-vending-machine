@@ -36,8 +36,8 @@ is missing but `python3` exists, use `python3` for the client tests.
 ## Hard rules
 
 - **No secrets** in code, config, the journal, logs, tests or commits. Secrets
-  are referenced as `conn/<id>/<field>` and live in the OS keychain or
-  `VENDING_SECRET_*` environment variables.
+  are referenced as `conn/<id>/<field>` and are read from `VENDING_SECRET_*`
+  environment variables; OS keychain support is planned and not implemented.
 - **Money is never `float64`.** Use `Decimal`; at boundaries pass strings.
 - **No AGPL/GPL code** may be copied or linked; see
   [ADR-0007](docs/adr/0007-license-and-stores.md).
