@@ -9,6 +9,8 @@ import (
 	"context"
 	"database/sql"
 	"embed"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -20,7 +22,7 @@ import (
 	"github.com/LevapVeeskela/lv24-vending-machine/core/domain"
 	"github.com/LevapVeeskela/lv24-vending-machine/core/internal/journal"
 	"github.com/LevapVeeskela/lv24-vending-machine/core/ports"
-	_ "modernc.org/sqlite"
+	"modernc.org/sqlite"
 )
 
 //go:embed migrations/*.sql
@@ -32,10 +34,23 @@ var migrations = []struct {
 	file    string
 }{
 	{version: 1, file: "migrations/001_v1.sql"},
+	{version: 2, file: "migrations/002_signal_id.sql"},
 }
 
 // latestVersion is the newest schema version.
-const latestVersion = 1
+const latestVersion = 2
+
+// The connection setup is retried while another process holds the database
+// lock; the whole window is one second, far below the 10 s busy timeout used
+// for ordinary statements.
+const (
+	openAttempts   = 50
+	openRetryDelay = 20 * time.Millisecond
+)
+
+// sqliteBusy is the primary SQLITE_BUSY result code; extended codes carry it
+// in the low byte.
+const sqliteBusy = 5
 
 var _ ports.Journal = (*Store)(nil)
 
@@ -77,8 +92,11 @@ func Open(ctx context.Context, path string, opts ...Option) (*Store, error) {
 		}
 	}
 	dsn := "file:" + filepath.ToSlash(path) +
-		"?_pragma=journal_mode(WAL)" +
-		"&_pragma=busy_timeout(10000)" +
+		// busy_timeout must be set before journal_mode: switching to WAL
+		// takes a database lock, and a second process opening the same file
+		// at the same time must wait for it instead of failing.
+		"?_pragma=busy_timeout(10000)" +
+		"&_pragma=journal_mode(WAL)" +
 		"&_pragma=synchronous(FULL)" +
 		"&_pragma=foreign_keys(1)"
 	db, err := sql.Open("sqlite", dsn)
@@ -86,33 +104,27 @@ func Open(ctx context.Context, path string, opts ...Option) (*Store, error) {
 		return nil, fmt.Errorf("cannot open the journal database at %s: %w", path, err)
 	}
 	db.SetMaxOpenConns(1)
-	if err := db.PingContext(ctx); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("cannot use the journal database at %s: %w", path, err)
+	// Two processes may open one database at the same time. Switching a fresh
+	// file to WAL takes a lock that SQLite does not route through
+	// busy_timeout, so the loser of that race sees SQLITE_BUSY: retry the
+	// setup briefly instead of failing the second process.
+	var setupErr error
+retry:
+	for attempt := 0; attempt < openAttempts; attempt++ {
+		setupErr = setupConnection(ctx, db, path)
+		if setupErr == nil || !isBusy(setupErr) {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			setupErr = ctx.Err()
+			break retry
+		case <-time.After(openRetryDelay):
+		}
 	}
-	// Belt and suspenders: the _pragma DSN parameters above are honored by
-	// modernc.org/sqlite, but enforce the mandatory settings explicitly
-	// so a platform-specific DSN quirk cannot silently disable them.
-	if _, err := db.ExecContext(ctx, "PRAGMA journal_mode=WAL"); err != nil {
+	if setupErr != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("journal store: enable WAL: %w", err)
-	}
-	if _, err := db.ExecContext(ctx, "PRAGMA busy_timeout=10000"); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("journal store: set busy_timeout: %w", err)
-	}
-	if _, err := db.ExecContext(ctx, "PRAGMA synchronous=FULL"); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("journal store: set synchronous: %w", err)
-	}
-	var syncMode string
-	if err := db.QueryRowContext(ctx, "PRAGMA synchronous").Scan(&syncMode); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("journal store: read synchronous: %w", err)
-	}
-	if syncMode != "2" && !strings.EqualFold(syncMode, "FULL") {
-		_ = db.Close()
-		return nil, fmt.Errorf("journal store: synchronous is %q, want FULL", syncMode)
+		return nil, setupErr
 	}
 	if err := migrate(ctx, db); err != nil {
 		_ = db.Close()
@@ -158,13 +170,70 @@ func ensureConstraints(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
-// migrate applies pending embedded migrations in order. Each migration
-// runs in its own transaction, then PRAGMA user_version is advanced.
-// The DDL is idempotent, so databases created before migrations existed
-// (table present, user_version 0) open cleanly and end at latestVersion.
+// setupConnection pings the database and enforces the mandatory pragmas.
+func setupConnection(ctx context.Context, db *sql.DB, path string) error {
+	if err := db.PingContext(ctx); err != nil {
+		return fmt.Errorf("cannot use the journal database at %s: %w", path, err)
+	}
+	// Belt and suspenders: the _pragma DSN parameters above are honored by
+	// modernc.org/sqlite, but enforce the mandatory settings explicitly
+	// so a platform-specific DSN quirk cannot silently disable them.
+	if _, err := db.ExecContext(ctx, "PRAGMA journal_mode=WAL"); err != nil {
+		return fmt.Errorf("journal store: enable WAL: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, "PRAGMA busy_timeout=10000"); err != nil {
+		return fmt.Errorf("journal store: set busy_timeout: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, "PRAGMA synchronous=FULL"); err != nil {
+		return fmt.Errorf("journal store: set synchronous: %w", err)
+	}
+	var syncMode string
+	if err := db.QueryRowContext(ctx, "PRAGMA synchronous").Scan(&syncMode); err != nil {
+		return fmt.Errorf("journal store: read synchronous: %w", err)
+	}
+	if syncMode != "2" && !strings.EqualFold(syncMode, "FULL") {
+		return fmt.Errorf("journal store: synchronous is %q, want FULL", syncMode)
+	}
+	return nil
+}
+
+// isBusy reports whether err is SQLite's BUSY result, which clears once the
+// other process finishes with the database.
+func isBusy(err error) bool {
+	var se *sqlite.Error
+	if !errors.As(err, &se) || se == nil {
+		return false
+	}
+	return se.Code()&0xff == sqliteBusy
+}
+
+// migrate applies pending embedded migrations in one immediate transaction.
+//
+// BEGIN IMMEDIATE takes the write lock before the version is read, so two
+// processes opening one database at the same time serialize here instead of
+// both applying the same ALTER TABLE. DDL and the user_version bump commit
+// together: an interrupted migration cannot leave a half-applied schema
+// behind a stale version, and the DDL stays idempotent because the version
+// only advances on success.
 func migrate(ctx context.Context, db *sql.DB) error {
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("journal store: conn: %w", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return fmt.Errorf("journal store: begin migration: %w", err)
+	}
+	finished := false
+	defer func() {
+		if !finished {
+			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+		}
+	}()
+
 	var version int
-	if err := db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
+	if err := conn.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		return fmt.Errorf("journal store: read user_version: %w", err)
 	}
 	for _, m := range migrations {
@@ -175,22 +244,18 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		if err != nil {
 			return fmt.Errorf("journal store: read migration %s: %w", m.file, err)
 		}
-		tx, err := db.BeginTx(ctx, nil)
-		if err != nil {
-			return fmt.Errorf("journal store: begin migration %d: %w", m.version, err)
-		}
-		if _, err := tx.ExecContext(ctx, string(sqlBytes)); err != nil {
-			_ = tx.Rollback()
+		if _, err := conn.ExecContext(ctx, string(sqlBytes)); err != nil {
 			return fmt.Errorf("journal store: apply migration %d: %w", m.version, err)
-		}
-		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("journal store: commit migration %d: %w", m.version, err)
-		}
-		if _, err := db.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version=%d", m.version)); err != nil {
-			return fmt.Errorf("journal store: set user_version %d: %w", m.version, err)
 		}
 		version = m.version
 	}
+	if _, err := conn.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version=%d", version)); err != nil {
+		return fmt.Errorf("journal store: set user_version %d: %w", version, err)
+	}
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+		return fmt.Errorf("journal store: commit migrations: %w", err)
+	}
+	finished = true
 	return nil
 }
 
@@ -214,6 +279,10 @@ func (s *Store) now() time.Time {
 // Hash, and returns the stored event. The payload is canonicalized before
 // sealing and the exact canonical bytes are stored; a payload that fails
 // canonicalization is rejected and no row is written.
+//
+// A gate.request also records its signalId in the signal_id column, which
+// carries the UNIQUE partial index. A duplicate signal id is reported as a
+// domain.CodeConflict and writes nothing.
 func (s *Store) Append(ctx context.Context, ev domain.Event) (domain.Event, error) {
 	canon, err := journal.CanonicalizePayload(ev.Payload)
 	if err != nil {
@@ -230,9 +299,11 @@ func (s *Store) Append(ctx context.Context, ev domain.Event) (domain.Event, erro
 	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
 		return domain.Event{}, fmt.Errorf("journal store: begin: %w", err)
 	}
-	committed := false
+	// finished marks the manual transaction as committed or rolled back so
+	// the deferred cleanup does not touch it again.
+	finished := false
 	defer func() {
-		if !committed {
+		if !finished {
 			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
 		}
 	}()
@@ -266,10 +337,12 @@ func (s *Store) Append(ctx context.Context, ev domain.Event) (domain.Event, erro
 	if err != nil {
 		return domain.Event{}, fmt.Errorf("journal store: seal: %w", err)
 	}
+	signalID := signalIDOf(sealed.Kind, sealed.Payload)
 	if _, err := conn.ExecContext(ctx,
 		`INSERT INTO events (seq, event_id, kind, ts, schema_version, payload,
-			code_version, prev_hash, hash, run_id, decision_id, policy_hash, snapshot_hash)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			code_version, prev_hash, hash, run_id, decision_id, policy_hash,
+			snapshot_hash, signal_id)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		sealed.Seq,
 		sealed.EventID,
 		sealed.Kind,
@@ -283,14 +356,63 @@ func (s *Store) Append(ctx context.Context, ev domain.Event) (domain.Event, erro
 		nullStr(sealed.DecisionID),
 		nullStr(sealed.PolicyHash),
 		nullStr(sealed.SnapshotHash),
+		nullStr(signalID),
 	); err != nil {
+		// Roll back before reading the table: the failed insert may only have
+		// hit the UNIQUE(signal_id) index because another process recorded
+		// the same signal id first. The caller needs a typed conflict so it
+		// can replay the winner instead of failing on a raw driver error.
+		_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+		finished = true
+		if signalID != "" {
+			if recorded, qerr := signalRecorded(ctx, conn, signalID); qerr == nil && recorded {
+				return domain.Event{}, domain.WrapError(domain.CodeConflict,
+					fmt.Sprintf("journal store: signalId %q is already recorded", signalID), err)
+			}
+		}
 		return domain.Event{}, fmt.Errorf("journal store: insert seq %d: %w", sealed.Seq, err)
 	}
 	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
 		return domain.Event{}, fmt.Errorf("journal store: commit seq %d: %w", sealed.Seq, err)
 	}
-	committed = true
+	finished = true
 	return sealed, nil
+}
+
+// signalIDOf returns the signal id recorded in the signal_id column: the
+// payload field of a gate.request, empty for every other kind.
+//
+// The column backs the UNIQUE index that makes one signal id resolve to one
+// recorded request even when independent processes race. The hash chain does
+// not cover the column, so it is derived from the sealed payload instead of
+// adding an envelope field that older records would not have.
+func signalIDOf(kind string, payload []byte) string {
+	if kind != domain.EventGateRequest {
+		return ""
+	}
+	var v struct {
+		SignalID string `json:"signalId"`
+	}
+	if err := json.Unmarshal(payload, &v); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(v.SignalID)
+}
+
+// signalRecorded reports whether a gate.request with signalID is stored.
+func signalRecorded(ctx context.Context, conn *sql.Conn, signalID string) (bool, error) {
+	var one int
+	err := conn.QueryRowContext(ctx,
+		`SELECT 1 FROM events WHERE kind = ? AND signal_id = ? LIMIT 1`,
+		domain.EventGateRequest, signalID).Scan(&one)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return false, nil
+	case err != nil:
+		return false, err
+	default:
+		return true, nil
+	}
 }
 
 // Query lists events with Seq > from, optionally filtered by kind, in

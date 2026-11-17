@@ -10,6 +10,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"strings"
@@ -22,8 +23,18 @@ import (
 	"github.com/LevapVeeskela/lv24-vending-machine/core/ports"
 )
 
-// defaultTimeout bounds one provider call including its retries.
-const defaultTimeout = 20 * time.Second
+// The decision vendor documents up to 60 s of thinking time before it answers,
+// so one attempt gets that budget. The call budget is separate: resilience
+// retries fast failures (429/503) but a completed attempt timeout is final,
+// so the ceiling is three attempts plus the room for provider-requested
+// retry-after waits (resilience caps one wait at 30 s).
+const (
+	// providerAttemptTimeout is the per-attempt budget, also passed to the
+	// provider as DecisionRequest.Timeout.
+	providerAttemptTimeout = 60 * time.Second
+	// retryAfterBudget reserves room for two capped retry-after waits.
+	retryAfterBudget = 60 * time.Second
+)
 
 // arenaMaxParallel caps the concurrent arena background calls.
 const arenaMaxParallel = 2
@@ -48,7 +59,7 @@ type Config struct {
 	Policy domain.GatePolicy
 	// CodeVersion is stamped on every appended event envelope.
 	CodeVersion string
-	// Timeout bounds the provider call including retries; <=0 means defaultTimeout.
+	// Timeout bounds one provider attempt; <=0 means providerAttemptTimeout.
 	Timeout time.Duration
 	// Arena is the optional cross-model comparison provider.
 	Arena *ArenaConfig
@@ -74,6 +85,11 @@ type Result struct {
 	Reused bool
 	// Response is the provider answer; nil on replay, failure or exit.
 	Response *domain.DecisionResponse
+	// Journaled is the decision.response recorded for this signal, when the
+	// journal has one. It is set on an idempotent replay so a caller can
+	// compare its own input with the answer the verdict was computed from;
+	// Response stays nil because no provider was called.
+	Journaled *domain.DecisionResponse
 	// ProviderErr carries the provider failure; the ABSTAIN verdict is still written.
 	ProviderErr error
 }
@@ -84,7 +100,8 @@ type Flow struct {
 	provider ports.Decision
 	deps     ports.Deps
 	cfg      Config
-	timeout  time.Duration
+	// attemptTimeout bounds one decision attempt (DecisionRequest.Timeout).
+	attemptTimeout time.Duration
 
 	mu       sync.Mutex
 	inflight map[string]*inflightCall
@@ -109,6 +126,39 @@ type inflightCall struct {
 // errSignalBodyConflict marks a reused signal id sent with another body.
 func errSignalBodyConflict() error {
 	return domain.NewError(domain.CodeConflict, "gateflow: signalId already used with a different request body")
+}
+
+// errSignalInProgress marks a signal id whose gate.request is journaled by
+// another process but whose verdict is not there yet. The caller retries; the
+// provider is not called a second time.
+func errSignalInProgress(signalID string) error {
+	return domain.NewError(domain.CodeConflict, fmt.Sprintf(
+		"gateflow: signalId %q is being evaluated by another process; retry once its verdict is recorded", signalID))
+}
+
+// attemptTimeoutError marks a completed attempt timeout as final: the vendor's
+// thinking budget is already spent, so a retry would only multiply the wait.
+// The wrapper hides the error code from domain.IsRetryable and is unwrapped
+// before the verdict is computed.
+type attemptTimeoutError struct{ err error }
+
+func (e attemptTimeoutError) Error() string { return e.err.Error() }
+
+// finalTimeout stops the retry loop after a timeout.
+func finalTimeout(err error) error {
+	if domain.CodeOf(err) == domain.CodeTimeout {
+		return attemptTimeoutError{err: err}
+	}
+	return err
+}
+
+// unwrapFinalTimeout restores the typed timeout error after the retry loop.
+func unwrapFinalTimeout(err error) error {
+	var at attemptTimeoutError
+	if errors.As(err, &at) {
+		return at.err
+	}
+	return err
 }
 
 // requestFingerprint returns the sha256 of the canonical JSON encoding of req.
@@ -161,12 +211,21 @@ func New(jr ports.Journal, provider ports.Decision, deps ports.Deps, cfg Config)
 			return nil, fmt.Errorf("gateflow: empty arena model")
 		}
 	}
-	timeout := cfg.Timeout
-	if timeout <= 0 {
-		timeout = defaultTimeout
+	attempt := cfg.Timeout
+	if attempt <= 0 {
+		attempt = providerAttemptTimeout
 	}
-	return &Flow{jr: jr, provider: provider, deps: deps, cfg: cfg, timeout: timeout,
+	return &Flow{jr: jr, provider: provider, deps: deps, cfg: cfg, attemptTimeout: attempt,
 		inflight: make(map[string]*inflightCall), arenaSem: make(chan struct{}, arenaMaxParallel)}, nil
+}
+
+// callBudget bounds one decision including its retries.
+//
+// Retries exist for fast failures (429/503 with a retry-after wait); a
+// completed attempt timeout is final (see finalTimeout), so a hanging
+// provider costs one attempt, not the whole budget.
+func (f *Flow) callBudget() time.Duration {
+	return 3*f.attemptTimeout + retryAfterBudget
 }
 
 // Wait blocks until every detached arena call has finished.
@@ -239,6 +298,8 @@ type scanState struct {
 	present map[string]bool
 	// storedRaw is the recorded decision.response payload, if any.
 	storedRaw []byte
+	// verdictRaw is the recorded gate.verdict payload, if any.
+	verdictRaw []byte
 	// lastByKey tracks the newest actual model per non-empty requested model.
 	lastByKey map[string]modelMark
 	// lastBare tracks the newest actual model of responses with no
@@ -260,8 +321,15 @@ func (f *Flow) scan(ctx context.Context, decisionID string) (scanState, error) {
 	err := f.jr.Walk(ctx, 0, "", func(ev domain.Event) error {
 		if ev.DecisionID == decisionID {
 			s.present[ev.Kind] = true
-			if ev.Kind == domain.EventDecisionResponse && s.storedRaw == nil {
-				s.storedRaw = append([]byte(nil), ev.Payload...)
+			switch ev.Kind {
+			case domain.EventDecisionResponse:
+				if s.storedRaw == nil {
+					s.storedRaw = append([]byte(nil), ev.Payload...)
+				}
+			case domain.EventGateVerdict:
+				if s.verdictRaw == nil {
+					s.verdictRaw = append([]byte(nil), ev.Payload...)
+				}
 			}
 		}
 		if ev.Kind != domain.EventDecisionResponse || ev.DecisionID == decisionID {
@@ -300,6 +368,30 @@ func (s scanState) previousModelOf(requested string) string {
 		best = m
 	}
 	return best.model
+}
+
+// response decodes the recorded decision.response; nil when there is none.
+func (s scanState) response() (*domain.DecisionResponse, error) {
+	if len(s.storedRaw) == 0 {
+		return nil, nil
+	}
+	var stored domain.DecisionResponse
+	if err := json.Unmarshal(s.storedRaw, &stored); err != nil {
+		return nil, fmt.Errorf("gateflow: decode recorded response: %w", err)
+	}
+	return &stored, nil
+}
+
+// verdict decodes the recorded gate.verdict; nil when there is none.
+func (s scanState) verdict() (*domain.GateVerdict, error) {
+	if len(s.verdictRaw) == 0 {
+		return nil, nil
+	}
+	var v domain.GateVerdict
+	if err := json.Unmarshal(s.verdictRaw, &v); err != nil {
+		return nil, fmt.Errorf("gateflow: decode replayed verdict: %w", err)
+	}
+	return &v, nil
 }
 
 // composeState copies the numeric request state and adds routing context.
@@ -391,18 +483,29 @@ func (f *Flow) Evaluate(ctx context.Context, req domain.GateRequest) (Result, er
 	return res, err
 }
 
-// evaluate runs one gate request; it assumes no duplicate is in flight.
-func (f *Flow) evaluate(ctx context.Context, req domain.GateRequest, fp [sha256.Size]byte, raw []byte) (Result, error) {
+// findRequest returns the decision id and the recorded payload of the
+// gate.request carrying signalID, or an empty decision id when the signal has
+// not been journaled yet.
+func (f *Flow) findRequest(ctx context.Context, signalID string) (string, []byte, error) {
 	decisionID := ""
-	var storedRequest []byte
+	var stored []byte
 	if err := f.jr.Walk(ctx, 0, domain.EventGateRequest, func(ev domain.Event) error {
 		sig, ok := signalOf(ev.Payload)
-		if ok && sig == req.SignalID {
+		if ok && sig == signalID {
 			decisionID = ev.DecisionID
-			storedRequest = append([]byte(nil), ev.Payload...)
+			stored = append([]byte(nil), ev.Payload...)
 		}
 		return nil
 	}); err != nil {
+		return "", nil, err
+	}
+	return decisionID, stored, nil
+}
+
+// evaluate runs one gate request; it assumes no duplicate is in flight.
+func (f *Flow) evaluate(ctx context.Context, req domain.GateRequest, fp [sha256.Size]byte, raw []byte) (Result, error) {
+	decisionID, storedRequest, err := f.findRequest(ctx, req.SignalID)
+	if err != nil {
 		return Result{}, err
 	}
 	if decisionID == "" {
@@ -410,50 +513,120 @@ func (f *Flow) evaluate(ctx context.Context, req domain.GateRequest, fp [sha256.
 		if decisionID == "" {
 			return Result{}, fmt.Errorf("gateflow: NewID returned an empty decision id")
 		}
-		return f.complete(ctx, req, decisionID, raw)
+		// Nothing is recorded under a fresh id: complete appends the
+		// gate.request before it calls the provider, and no scan is needed.
+		return f.complete(ctx, req, decisionID, raw, fp, nil)
 	}
 	// The signal id is already recorded: only the identical body may reuse it.
 	if err := sameRequestAs(storedRequest, fp); err != nil {
 		return Result{}, err
 	}
-	var verdict *domain.GateVerdict
-	if err := f.jr.Walk(ctx, 0, domain.EventGateVerdict, func(ev domain.Event) error {
-		if ev.DecisionID != decisionID {
-			return nil
-		}
-		var v domain.GateVerdict
-		if err := json.Unmarshal(ev.Payload, &v); err != nil {
-			return fmt.Errorf("gateflow: decode replayed verdict: %w", err)
-		}
-		vCopy := v
-		verdict = &vCopy
-		return nil
-	}); err != nil {
+	sc, err := f.scan(ctx, decisionID)
+	if err != nil {
+		return Result{}, err
+	}
+	verdict, err := sc.verdict()
+	if err != nil {
 		return Result{}, err
 	}
 	if verdict != nil {
-		return Result{SignalID: req.SignalID, Verdict: *verdict, Reused: true}, nil
+		journaled, err := sc.response()
+		if err != nil {
+			return Result{}, err
+		}
+		return Result{SignalID: req.SignalID, Verdict: *verdict, Reused: true, Journaled: journaled}, nil
 	}
 	// The request exists but the verdict does not (crash between
 	// appends): continue with the same decision id and append only
 	// the missing events, never a second gate.request.
-	return f.complete(ctx, req, decisionID, raw)
+	return f.complete(ctx, req, decisionID, raw, fp, &sc)
+}
+
+// resolveSignalRace handles a lost UNIQUE(signal_id) race: another process or
+// connection journaled this signal id first.
+//
+// The provider must not be called again. When the winner already recorded its
+// verdict the loser replays it; otherwise the caller gets a CodeConflict with
+// a retry hint, because the winner is still evaluating. A winner that used a
+// different request body is the usual body conflict.
+func (f *Flow) resolveSignalRace(ctx context.Context, req domain.GateRequest, fp [sha256.Size]byte, cause error) (Result, error) {
+	decisionID, storedRequest, err := f.findRequest(ctx, req.SignalID)
+	if err != nil {
+		return Result{}, err
+	}
+	if decisionID == "" {
+		// The unique index fired but the winning row is not visible; report
+		// the conflict rather than guessing at a verdict.
+		return Result{}, domain.WrapError(domain.CodeConflict,
+			fmt.Sprintf("gateflow: signalId %q is already recorded", req.SignalID), cause)
+	}
+	if err := sameRequestAs(storedRequest, fp); err != nil {
+		return Result{}, err
+	}
+	sc, err := f.scan(ctx, decisionID)
+	if err != nil {
+		return Result{}, err
+	}
+	verdict, err := sc.verdict()
+	if err != nil {
+		return Result{}, err
+	}
+	if verdict == nil {
+		return Result{}, errSignalInProgress(req.SignalID)
+	}
+	journaled, err := sc.response()
+	if err != nil {
+		return Result{}, err
+	}
+	return Result{SignalID: req.SignalID, Verdict: *verdict, Reused: true, Journaled: journaled}, nil
 }
 
 // complete evaluates req and appends the events missing for decisionID.
+//
+// The gate.request is appended before the provider call: it is the
+// cross-process idempotency marker, so a concurrent process with the same
+// signal id loses the UNIQUE race instead of paying for a second answer.
 //
 // Timestamps are split by phase: a fresh decision stamps gate.request with
 // its admission time, and every event produced by the decision (response,
 // model change, verdict) carries decidedAt. A crash retry never rewrites
 // gate.request, so its original admission time survives.
-func (f *Flow) complete(ctx context.Context, req domain.GateRequest, decisionID string, reqRaw []byte) (Result, error) {
-	sc, err := f.scan(ctx, decisionID)
-	if err != nil {
-		return Result{}, err
+//
+// prior carries a scan the caller already made for decisionID; nil means this
+// call scans (a fresh decision still needs the scan for the model-change
+// check).
+func (f *Flow) complete(ctx context.Context, req domain.GateRequest, decisionID string, reqRaw []byte, fp [sha256.Size]byte, prior *scanState) (Result, error) {
+	sc := scanState{}
+	if prior != nil {
+		sc = *prior
+	} else {
+		var err error
+		sc, err = f.scan(ctx, decisionID)
+		if err != nil {
+			return Result{}, err
+		}
 	}
-	var admittedAt time.Time
+
+	// Journal appends use a detached context: a client disconnect after
+	// the provider answered must not lose the recorded verdict.
+	appendCtx := context.WithoutCancel(ctx)
+
 	if !sc.present[domain.EventGateRequest] {
-		admittedAt = f.deps.Now()
+		admittedAt := f.deps.Now()
+		if len(reqRaw) == 0 {
+			var err error
+			reqRaw, err = json.Marshal(req)
+			if err != nil {
+				return Result{}, fmt.Errorf("gateflow: encode gate request: %w", err)
+			}
+		}
+		if err := f.appendOne(appendCtx, domain.EventGateRequest, decisionID, "", reqRaw, admittedAt); err != nil {
+			if domain.CodeOf(err) != domain.CodeConflict {
+				return Result{}, err
+			}
+			return f.resolveSignalRace(ctx, req, fp, err)
+		}
+		sc.present[domain.EventGateRequest] = true
 	}
 
 	var outcome domain.DecisionOutcome
@@ -461,14 +634,13 @@ func (f *Flow) complete(ctx context.Context, req domain.GateRequest, decisionID 
 	var providerErr error
 	if req.IntentKind != domain.IntentExit {
 		if len(sc.storedRaw) > 0 {
-			var stored domain.DecisionResponse
-			if err := json.Unmarshal(sc.storedRaw, &stored); err != nil {
-				return Result{}, fmt.Errorf("gateflow: decode recorded response: %w", err)
-			}
 			// A response is already recorded (crash after its append):
 			// replay it instead of calling the provider again.
-			rCopy := stored
-			resp = &rCopy
+			stored, err := sc.response()
+			if err != nil {
+				return Result{}, err
+			}
+			resp = stored
 			outcome = domain.DecisionOutcome{Response: resp}
 		} else {
 			if f.provider == nil {
@@ -478,19 +650,24 @@ func (f *Flow) complete(ctx context.Context, req domain.GateRequest, decisionID 
 				Model:     f.cfg.Model,
 				State:     composeState(req),
 				Questions: gate.Questions(),
-				Timeout:   f.timeout,
+				Timeout:   f.attemptTimeout,
 			}
-			callCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), f.timeout)
+			callCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), f.callBudget())
 			callErr := resilience.Do(callCtx, resilience.DefaultPolicy(), func(cctx context.Context) error {
-				r, err := f.provider.Decide(cctx, decReq)
+				// Each attempt gets its own deadline: the outer budget also
+				// covers retry-after waits.
+				attemptCtx, cancelAttempt := context.WithTimeout(cctx, f.attemptTimeout)
+				defer cancelAttempt()
+				r, err := f.provider.Decide(attemptCtx, decReq)
 				if err != nil {
-					return err
+					return finalTimeout(err)
 				}
 				rCopy := r
 				resp = &rCopy
 				return nil
 			})
 			cancel()
+			callErr = unwrapFinalTimeout(callErr)
 			if callErr != nil {
 				outcome = domain.DecisionOutcome{Err: callErr}
 				providerErr = callErr
@@ -507,21 +684,7 @@ func (f *Flow) complete(ctx context.Context, req domain.GateRequest, decisionID 
 	decidedAt := f.deps.Now()
 	verdict.DecidedAt = decidedAt
 
-	// Journal appends use a detached context: a client disconnect after
-	// the provider answered must not lose the recorded verdict.
-	appendCtx := context.WithoutCancel(ctx)
 	present := sc.present
-	if !present[domain.EventGateRequest] {
-		if len(reqRaw) == 0 {
-			reqRaw, err = json.Marshal(req)
-			if err != nil {
-				return Result{}, fmt.Errorf("gateflow: encode gate request: %w", err)
-			}
-		}
-		if err := f.appendOne(appendCtx, domain.EventGateRequest, decisionID, "", reqRaw, admittedAt); err != nil {
-			return Result{}, err
-		}
-	}
 	if resp != nil {
 		if !present[domain.EventDecisionResponse] {
 			raw, err := json.Marshal(resp)
