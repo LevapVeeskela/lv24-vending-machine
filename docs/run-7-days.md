@@ -220,19 +220,21 @@ Only an anonymized summary:
 vend gate report --share
 ```
 
-It contains no symbols, venues, prices, paths or identifiers; it is published
-manually. Criterion G1 is checked by the `active days` and `labeled outcomes`
-lines.
+It contains no symbols, venues, prices, position sizes, paths or identifiers;
+the aggregate ALLOW-vs-REJECT mean return difference and its 95% interval are
+included. It is published manually. Criterion G1 is checked by the `active days`
+and `labeled outcomes` lines.
 
 **Do not send:** the config, keys or environment variables, `vending.db` (the
 journal), `shadow-status.json` with paths, screenshots with keys.
 
 ## 6. What has not been verified on this machine
 
-The check was performed on Windows 11. **Linux, macOS and `tmux` have not been
-verified on this machine**: the commands for them come from the OS
-documentation and require a separate check by the owner. A real seven-day run
-with live Drex, Binance and Telegram has not been performed either — only the
-rehearsal against `tools/smokestub`. The signal frequency was measured once
+The commands and the runner-cycle measurement in this document were checked on
+Windows 11. On Linux, only `version`, `init` and `doctor` were run on
+`vend_linux_amd64` under WSL Ubuntu; the seven-day run, service supervision and
+`tmux` have not been verified there. macOS was not run at all. A real seven-day
+run with live Drex, Binance and Telegram has not been performed either — only
+the rehearsal against `tools/smokestub`. The signal frequency was measured once
 over one week (section 4); a full week of operation was not repeated and its
 stability is unknown.

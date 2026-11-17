@@ -191,8 +191,13 @@ vend serve --addr 127.0.0.1:8420
 curl -sS -X POST http://127.0.0.1:8420/v1/gate \
   -H "Authorization: Bearer $VENDING_SECRET_CONN_LOCAL_APITOKEN" \
   -H "Content-Type: application/json" \
-  --data '{"signalId":"smoke-1m-1","instrument":{"venue":"binance","symbol":"BTCUSDT"},"side":"buy","intentKind":"entry","timeframe":"1m","ts":"<now UTC RFC3339>","price":"100000","source":"smoke"}'
+  --data '{"signalId":"smoke-1m-1","instrument":{"venue":"binance","symbol":"BTCUSDT"},"side":"buy","intentKind":"entry","timeframe":"1m","ts":"<now UTC RFC3339>","price":"100000","source":"smoke","state":{"rsi14":62.5}}'
 ```
+
+`state` обязателен и должен быть JSON-объектом конечных чисел; без него API
+отвечает `400 invalid gate request: state must be an object`. Форма совпадает с
+[`contracts/examples/gate-request.json`](../contracts/examples/gate-request.json),
+где также есть `atrPct`.
 
 В PowerShell 5.1 вызывайте `curl.exe`; токен — `$env:VENDING_SECRET_CONN_LOCAL_APITOKEN`.
 Ответ `gate.verdict` означает, что сигнал принят и попал в журнал; метка
@@ -266,9 +271,14 @@ insufficient data: <n> labeled, need 100
   `outcome.unlabelable` с причиной `source_rejected`.
 - `decision cost` — сумма `usage.costUsd` уникальных решений;
   `latency p50/p95` — по `usage.latencyMs`.
-- `insufficient data` до 100 меток — **норма**, а не ошибка. Сравнения
+- `insufficient data` до 100 меток — **норма**, а не ошибка. Перед отчётом
+  проверяется hash-chain: разрыв даёт ненулевой код и номер seq, а
+  `--allow-broken-chain` нужен только для восстановления. Сравнения
   (группы, bootstrap CI, Brier/BSS/AUC/ECE, разбивка по моделям) появятся
-  только от 100 меток; BSS печатается как `bss: n/a`, если base rate 0 или 1.
+  только от 100 меток. Качеству модели нужно ≥ 30 калибровочных пар: ниже
+  порога Brier/ECE/AUC/BSS/reliability — `n/a`, а отчёт печатает
+  `calibration pairs: N (need 30)`. Bootstrap-интервалу нужно ещё ≥ 30 исходов
+  в каждой группе и 5 различных дней входа; BSS — `n/a`, если base rate 0 или 1.
 - Сравнения смешивают только последнюю пару `(horizonBars, feeBps)`; метки с
   другой парой не подмешиваются (в `--json` это `otherLabelParams`).
 
@@ -294,8 +304,10 @@ vend gate report --share
 `source rejected`), счётчики вердиктов, метрики или `insufficient data`,
 допущения (горизонт, round-trip fee, entry lag median/p95 в долях бара и в
 секундах, entry shifted, equal size/no slippage/no funding) и ссылку на GitHub
-Discussions. В ней нет символов, площадок, цен, state, путей, идентификаторов
-и сумм доходности. Файл через `--out <file>` пишется с правами 0600.
+Discussions. Она также включает агрегированную разницу средней доходности
+ALLOW и REJECT с её 95% интервалом. В ней нет символов, площадок, цен,
+размеров позиций, state, путей, идентификаторов и отдельных доходностей. Файл
+через `--out <file>` пишется с правами 0600.
 
 ## Шаг 5. Что отправить на ревью
 

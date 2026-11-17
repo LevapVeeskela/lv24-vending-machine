@@ -35,6 +35,15 @@ go build -o vend ./core/cmd/vend
 ./vend gate report
 ```
 
+On Windows build `vend.exe` and call `.\vend.exe`:
+
+```powershell
+go build -o vend.exe ./core/cmd/vend
+.\vend.exe init
+.\vend.exe gate test --request contracts/examples/gate-request.json --fixture core/cmd/vend/testdata/decision-response.json
+.\vend.exe gate report
+```
+
 `init` creates the config and the SQLite journal; `gate test` replays a
 recorded decision response through the same flow as a live call; `gate report`
 prints the counters. The full paths:
@@ -52,9 +61,10 @@ prints the counters. The full paths:
 
 ## What you get
 
-`vend gate report` prints counters and, once there are enough labels, model
-quality and return comparisons. Before 100 labels it says so instead of
-inventing a result:
+`vend gate report` prints counters and, once there are enough labels, return
+comparisons. Model quality is reported only with at least 30 calibration pairs;
+below that every metric is `n/a`, not zero. Before 100 labels the report says so
+instead of inventing a result:
 
 ```text
 verdicts: ALLOW=<n> REJECT=<n> ABSTAIN=<n> SKIP=<n>
@@ -65,9 +75,10 @@ insufficient data: <n> labeled, need 100
 ```
 
 `vend gate report --share` prints the same picture as a sanitized Markdown
-summary: aggregate counts, metrics when available, assumptions, and no symbols,
-venues, prices, data paths or signal/decision ids. It is meant to be posted
-manually.
+summary: aggregate counts, metrics when available, assumptions, and the
+aggregate ALLOW-vs-REJECT mean return difference with its 95% interval. It
+contains no symbols, venues, prices, position sizes, data paths, state or
+signal/decision ids. It is meant to be posted manually.
 
 The report describes what the filter would have done with the signals it saw.
 It is not a profit forecast and not investment advice; a positive sample says
@@ -84,10 +95,11 @@ nothing about the next trade.
   accepted by the config but have no OMS behind them yet.
 - **Not done yet:** release publication, TradingView webhook adapter,
   desktop/web/mobile clients, paper/live execution, two-way Telegram bot.
-- **Verified environment.** Only the offline end-to-end rehearsal against the
-  local stub has been exercised, on Windows 11. The live path with real
-  decision, candle and Telegram providers has not been exercised on any
-  platform yet; Linux and macOS builds exist but have not been run.
+- **Verified environment.** The offline end-to-end rehearsal against the local
+  stub was run on Windows 11. On Linux, `vend_linux_amd64` was checked under WSL
+  Ubuntu with `version`, `init` and `doctor`; the rest of the Linux path was not
+  run. macOS was not run at all. The live path with real decision, candle and
+  Telegram providers has not been exercised on any platform yet.
 
 ## Security
 
@@ -108,9 +120,10 @@ Contributions are accepted under Apache-2.0 and there is no CLA; see
 ## License
 
 Code, providers and SDKs are **Apache-2.0** (see [LICENSE](LICENSE) and
-[NOTICE](NOTICE)); documentation is CC-BY-4.0. A commercial mobile app can be
-distributed through the App Store, Google Play and RuStore — Apache-2.0 allows
-it. AGPL/GPL dependencies are forbidden in the core and the mobile build; see
+[NOTICE](NOTICE)); documentation is CC-BY-4.0 (see
+[LICENSE-docs](LICENSE-docs)). A commercial mobile app can be distributed
+through the App Store, Google Play and RuStore — Apache-2.0 allows it.
+AGPL/GPL dependencies are forbidden in the core and the mobile build; see
 [ADR-0007](docs/adr/0007-license-and-stores.md) and
 [ADR-0012](docs/adr/0012-license-apache-2.md).
 
