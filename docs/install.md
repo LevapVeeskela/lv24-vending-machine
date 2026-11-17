@@ -12,6 +12,12 @@ Two paths to a working `vend`:
 > when the owner publishes the pre-release; until then use path 2. The binaries
 > are unsigned — read [Unsigned binaries](#unsigned-binaries) before running
 > one.
+>
+> **What was verified.** The Windows PowerShell path below was walked end to
+> end on the `0.1.0-m1` files from `dist/`: checksum, `version`, `init`, the
+> offline path from quickstart and `doctor`. The Linux and macOS commands were
+> **not** run when this document was written; treat them as unverified until
+> someone repeats the walkthrough on those systems.
 
 ## Path 1 — prebuilt binary (after publication)
 
@@ -112,10 +118,14 @@ Then create the config and journal:
 ./vend doctor
 ```
 
-`init` prints the config and data paths; `doctor` checks them offline. Continue
-with [quickstart](quickstart.md) (or the 15 minute live check in
-[runbook-live-smoke.md](runbook-live-smoke.md)). For the multi-day G1 run
-(≥ 7 days, ≥ 100 labels) see [run-7-days.md](run-7-days.md).
+`init` prints the config and data paths; `doctor` checks them offline. Run
+`init` before `doctor`: without a config `doctor` fails the config, database,
+journal, providers and policy checks and exits 1. Continue with
+[quickstart](quickstart.md) (or the 15 minute live check in
+[runbook-live-smoke.md](runbook-live-smoke.md)). The offline Path B in
+quickstart starts with the same `init`; skip that line when you have just run
+`init` here — a second run exits 4 with `config already exists`. For the
+multi-day G1 run (≥ 7 days, ≥ 100 labels) see [run-7-days.md](run-7-days.md).
 
 ## Unsigned binaries
 
@@ -196,8 +206,8 @@ Notes:
 
 ```bash
 ./vend version          # prints the version
-./vend doctor           # offline: config, data dir, database, journal, providers, secret presence, policy hash
 ./vend init             # writes config + journal on first use
+./vend doctor           # offline: config, data dir, database, journal, providers, secret presence, policy hash
 ```
 
 `doctor` exits 0 when every offline check passes and 1 when one fails. Network
