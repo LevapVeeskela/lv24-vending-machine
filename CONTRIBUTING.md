@@ -37,6 +37,13 @@ Set `VEND_E2E_BIN` to a prebuilt `vend` (absolute, or relative to the repository
 root) to run that file instead of building one; the release checklist uses it on
 the `dist/` artifact before tagging.
 
+When a rehearsal step fails, the test keeps its evidence in a directory under
+the system temp (`vend-e2e-failure-*`) and prints the path: the `vend serve`
+stdout and stderr, the stub `/ctl/stats` answer, `vend status --json`, the last
+200 `vend journal tail --json` events and the config. Every file is passed
+through a redaction filter, so the generated provider tokens never reach it. A
+passing run removes the directory.
+
 ## Hard rules
 
 - **No secrets** in code, config, the journal, logs, tests or commits. Secrets

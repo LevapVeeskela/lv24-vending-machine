@@ -15,9 +15,10 @@ Two paths to a working `vend`:
 >
 > **What was verified.** The Windows PowerShell path below was walked end to
 > end on the `0.1.0-m1` files from `dist/`: checksum, `version`, `init`, the
-> offline path from quickstart and `doctor`. The Linux and macOS commands were
-> **not** run when this document was written; treat them as unverified until
-> someone repeats the walkthrough on those systems.
+> offline path from quickstart and `doctor`. A separate check ran `version`,
+> `init` and `doctor` on `vend_linux_amd64` under WSL Ubuntu; the rest of the
+> Linux path and all macOS commands were **not** run, so treat them as
+> unverified until someone repeats the walkthrough on those systems.
 
 ## Path 1 — prebuilt binary (after publication)
 
