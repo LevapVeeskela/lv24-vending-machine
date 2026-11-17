@@ -47,6 +47,8 @@ prints the counters. The full paths:
   `doctor --live`, one manual 1m signal and one label.
 - [Seven days of operation](docs/run-7-days.md) — the multi-day shadow run and
   the G1 criterion.
+- [Troubleshooting](docs/troubleshooting.md) — the first-run messages, their
+  causes and what to do.
 
 ## What you get
 

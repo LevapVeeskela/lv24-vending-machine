@@ -546,13 +546,16 @@ func TestInvalidRequestRejectedBeforeIO(t *testing.T) {
 		"venue":     func(r *domain.GateRequest) { r.Instrument.Venue = "" },
 		"symbol":    func(r *domain.GateRequest) { r.Instrument.Symbol = "" },
 		"timeframe": func(r *domain.GateRequest) { r.Timeframe = "" },
-		"source":    func(r *domain.GateRequest) { r.Source = "" },
-		"side":      func(r *domain.GateRequest) { r.Side = "hold" },
-		"intent":    func(r *domain.GateRequest) { r.IntentKind = "amend" },
-		"ts":        func(r *domain.GateRequest) { r.TS = time.Time{} },
-		"price":     func(r *domain.GateRequest) { r.Price = domain.MustParseDecimal("0") },
-		"state":     func(r *domain.GateRequest) { r.State = map[string]float64{"x": math.Inf(1)} },
-		"stateNil":  func(r *domain.GateRequest) { r.State = nil },
+		// An upper-case unit or a monthly bar cannot be labeled later.
+		"timeframeCase":  func(r *domain.GateRequest) { r.Timeframe = "4H" },
+		"timeframeMonth": func(r *domain.GateRequest) { r.Timeframe = "1M" },
+		"source":         func(r *domain.GateRequest) { r.Source = "" },
+		"side":           func(r *domain.GateRequest) { r.Side = "hold" },
+		"intent":         func(r *domain.GateRequest) { r.IntentKind = "amend" },
+		"ts":             func(r *domain.GateRequest) { r.TS = time.Time{} },
+		"price":          func(r *domain.GateRequest) { r.Price = domain.MustParseDecimal("0") },
+		"state":          func(r *domain.GateRequest) { r.State = map[string]float64{"x": math.Inf(1)} },
+		"stateNil":       func(r *domain.GateRequest) { r.State = nil },
 	}
 	_ = bad
 	for name, mut := range cases {

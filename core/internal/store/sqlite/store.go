@@ -83,12 +83,12 @@ func Open(ctx context.Context, path string, opts ...Option) (*Store, error) {
 		"&_pragma=foreign_keys(1)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
-		return nil, fmt.Errorf("journal store: open %s: %w", path, err)
+		return nil, fmt.Errorf("cannot open the journal database at %s: %w", path, err)
 	}
 	db.SetMaxOpenConns(1)
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("journal store: ping %s: %w", path, err)
+		return nil, fmt.Errorf("cannot use the journal database at %s: %w", path, err)
 	}
 	// Belt and suspenders: the _pragma DSN parameters above are honored by
 	// modernc.org/sqlite, but enforce the mandatory settings explicitly

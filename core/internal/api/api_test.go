@@ -376,8 +376,12 @@ func TestFlowErrorMapping(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("invalid_request: status = %d, want 400", rec.Code)
 	}
-	if got := decodeErr(t, rec)["code"]; got != "bad_request" {
+	env := decodeErr(t, rec)
+	if got := env["code"]; got != "bad_request" {
 		t.Fatalf("invalid_request: code = %v", got)
+	}
+	if got := env["message"]; got != "invalid gate request: bad signal" {
+		t.Fatalf("invalid_request: message = %v", got)
 	}
 	rec = doGate(t, mk(domain.NewError(domain.CodeUnavailable, "store is down")),
 		http.MethodPost, validRequest, "application/json", "Bearer "+testToken)
@@ -386,6 +390,22 @@ func TestFlowErrorMapping(t *testing.T) {
 	}
 	if got := decodeErr(t, rec)["code"]; got != "internal" {
 		t.Fatalf("unavailable: code = %v", got)
+	}
+}
+
+func TestInvalidGateMessageDropsInternalPrefix(t *testing.T) {
+	h := newTestHandler(t, &fakeEvaluator{
+		fn: func(_ context.Context, _ domain.GateRequest) (gateflow.Result, error) {
+			return gateflow.Result{}, domain.NewError(domain.CodeInvalidRequest,
+				"gateflow: state must be an object")
+		},
+	}, Config{})
+	rec := doGate(t, h, http.MethodPost, validRequest, "application/json", "Bearer "+testToken)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	if got := decodeErr(t, rec)["message"]; got != "invalid gate request: state must be an object" {
+		t.Fatalf("message = %v", got)
 	}
 }
 

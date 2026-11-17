@@ -15,7 +15,7 @@ import (
 // carry their own copy.
 func ParseTimeframe(raw string) (time.Duration, error) {
 	bad := func() (time.Duration, error) {
-		return 0, fmt.Errorf("unsupported timeframe %q (want a positive amount followed by m, h, d or w)", raw)
+		return 0, fmt.Errorf("unsupported timeframe %q (want a positive amount followed by a lowercase m, h, d or w, e.g. \"4h\")", raw)
 	}
 	s := strings.TrimSpace(raw)
 	i := 0

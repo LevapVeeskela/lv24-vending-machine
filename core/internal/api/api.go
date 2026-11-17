@@ -272,7 +272,7 @@ func (h *Handler) serveGate(w *statusRecorder, r *http.Request) {
 		}
 		if domain.CodeOf(err) == domain.CodeInvalidRequest {
 			writeError(w, http.StatusBadRequest, "bad_request",
-				"invalid gate request", "fix the request fields and retry", false)
+				invalidGateMessage(err), "fix the request fields and retry", false)
 			return
 		}
 		h.logger.Error("gate evaluate error",
@@ -296,6 +296,19 @@ func (h *Handler) serveGate(w *statusRecorder, r *http.Request) {
 		SignalID: signalID,
 		Verdict:  res.Verdict,
 	})
+}
+
+// invalidGateMessage adds the validation reason to the generic 400 message.
+// The internal "gateflow:" prefix is dropped; request state and secrets are
+// never part of a validation error.
+func invalidGateMessage(err error) string {
+	var de *domain.Error
+	if errors.As(err, &de) && de != nil {
+		if msg := strings.TrimPrefix(de.Message, "gateflow: "); msg != "" {
+			return "invalid gate request: " + msg
+		}
+	}
+	return "invalid gate request"
 }
 
 // authorized compares the bearer token by SHA-256 digest in constant time.

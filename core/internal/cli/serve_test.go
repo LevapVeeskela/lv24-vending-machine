@@ -49,6 +49,30 @@ func TestServeInvalidAddr(t *testing.T) {
 	}
 }
 
+func TestServeBusyPortMessage(t *testing.T) {
+	env, _, stderr, cfgPath, dataDir := initTestEnv(t)
+	env.Getenv = func(string) string { return "test-token" }
+	env.NewRegistry = liveRegistry(t, okDecision(), okCandles(), nil)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = ln.Close() }()
+	addr := ln.Addr().String()
+
+	if code := runArgs(env, "serve", "--addr", addr, "--config", cfgPath, "--data-dir", dataDir); code != exitGeneral {
+		t.Fatalf("serve busy port = %d, want %d, stderr=%s", code, exitGeneral, stderr.String())
+	}
+	got := stderr.String()
+	if !strings.Contains(got, "starting on http://"+addr) {
+		t.Fatalf("stderr misses the startup line: %q", got)
+	}
+	if !strings.Contains(got, "check the address is free and retry") {
+		t.Fatalf("stderr misses the busy-port hint: %q", got)
+	}
+}
+
 // staticCandles is a candle provider with no data; Scan returns no signals.
 type staticCandles struct{}
 

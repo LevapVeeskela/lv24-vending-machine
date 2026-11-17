@@ -220,7 +220,10 @@ func TestDoctorLiveFailures(t *testing.T) {
 	}
 	got := stdout.String()
 	for _, want := range []string{
-		"decision: auth", "save_raw: unavailable", "candles: timeout", "telegram: unavailable",
+		"decision: auth (check the provider secret and quota)",
+		"save_raw: unavailable",
+		"candles: timeout (check the network/provider and retry)",
+		"telegram: unavailable (check the provider URL and network, then retry)",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("stdout misses %q: %q", want, got)

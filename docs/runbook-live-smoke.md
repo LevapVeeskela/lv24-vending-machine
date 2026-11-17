@@ -186,7 +186,7 @@ What matters in these values:
 vend serve --addr 127.0.0.1:8420
 ```
 
-`listening on http://127.0.0.1:8420` appears on stderr. Do not close the
+`starting on http://127.0.0.1:8420` appears on stderr. Do not close the
 process: the runner works inside `serve`. The first cycle runs immediately,
 then every 30 seconds.
 
@@ -452,6 +452,9 @@ uses these counters.
 | `verdicts: ABSTAIN=<n>` | the provider failed; the cause code is in `gate.verdict` (`provider_auth`, `provider_unavailable`, `invalid_output`, `provider_misconfigured`) |
 | `lastCycleError` is not empty | the cycle keeps running; the error repeats every interval — include the text in the report |
 | `journal chain broken at seq N` | the journal is damaged; do not continue, save the file and report |
+
+The broader first-run table, with the actual messages and exit codes, is in
+[troubleshooting](troubleshooting.md).
 
 Recent notifications without stopping `serve`:
 

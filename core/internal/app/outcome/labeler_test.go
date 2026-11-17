@@ -812,6 +812,9 @@ func TestCandlesHashRepresentationIndependent(t *testing.T) {
 	}
 }
 
+// TestUnsupportedTimeframeRecordedOnce: a journaled signal whose timeframe
+// cannot be parsed is written off with one outcome.unlabelable event and is
+// never looked at again.
 func TestUnsupportedTimeframeFailed(t *testing.T) {
 	for _, tf := range []string{"", "1M", "xyz", "h", "0h", "1H", "1.5h"} {
 		jr := &memJournal{}
@@ -826,11 +829,24 @@ func TestUnsupportedTimeframeFailed(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Run() with timeframe %q = %v, want isolated failure", tf, err)
 		}
-		if sum != (Summary{Failed: 1}) {
-			t.Fatalf("summary with timeframe %q = %+v, want {Failed:1}", tf, sum)
+		if sum != (Summary{}) {
+			t.Fatalf("summary with timeframe %q = %+v, want an empty summary", tf, sum)
 		}
-		if n := jr.count(); n != 1 {
-			t.Fatalf("events = %d, want 1 (no outcome event on bad timeframe)", n)
+		if n := jr.count(); n != 2 {
+			t.Fatalf("events = %d, want 2 (request + one outcome.unlabelable)", n)
+		}
+		var got domain.OutcomeUnlabelable
+		_ = jr.Walk(context.Background(), 0, domain.EventOutcomeUnlabelable, func(ev domain.Event) error {
+			return json.Unmarshal(ev.Payload, &got)
+		})
+		if got.SignalID != "sig-badtf" || got.Reason != "unsupported_timeframe" {
+			t.Fatalf("unlabelable with timeframe %q = %+v, want reason unsupported_timeframe", tf, got)
+		}
+		if _, err := lb.Run(context.Background()); err != nil {
+			t.Fatalf("second Run() = %v", err)
+		}
+		if n := jr.count(); n != 2 {
+			t.Fatalf("events after the second run = %d, want 2 (recorded once)", n)
 		}
 	}
 }

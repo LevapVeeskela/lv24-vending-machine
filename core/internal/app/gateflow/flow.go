@@ -191,6 +191,11 @@ func validateRequest(req domain.GateRequest) error {
 	if strings.TrimSpace(req.Timeframe) == "" {
 		return invalid("timeframe must not be empty")
 	}
+	// A timeframe the labeler cannot parse would be accepted, answered and
+	// then never labeled. Reject it here so the caller learns at once.
+	if _, err := domain.ParseTimeframe(req.Timeframe); err != nil {
+		return invalid(err.Error())
+	}
 	if strings.TrimSpace(req.Source) == "" {
 		return invalid("source must not be empty")
 	}

@@ -326,3 +326,6 @@ The data directory holds `vending.db` (journal) and `shadow-status.json`.
 
 `vend doctor` checks the config, data directory, database, providers, secret
 presence and the current gate policy hash without making network calls.
+
+The full first-run table, with the actual messages and exit codes, is in
+[troubleshooting](troubleshooting.md).

@@ -22,7 +22,7 @@ go -C providers/marketdata-binance test ./...
 go -C providers/notify-telegram test ./...
 go -C tools test ./...
 VEND_E2E=1 go -C tools test -count=1 ./e2e/...                 # end-to-end rehearsal
-python -m unittest discover -s examples/clients/python -p "test_*.py"
+python -m unittest discover -s examples -p "test_*.py"
 go build all
 ```
 
@@ -31,7 +31,7 @@ directory, starts both on free loopback ports and stops them by exact PID. In
 PowerShell set the variable first:
 `$env:VEND_E2E='1'; go -C tools test -count=1 ./e2e/...`. Without `VEND_E2E=1`
 the package is skipped, so an ordinary `go test ./...` stays fast. If `python`
-is missing but `python3` exists, use `python3` for the client tests.
+is missing but `python3` exists, use `python3` for the client and example tests.
 
 ## Hard rules
 

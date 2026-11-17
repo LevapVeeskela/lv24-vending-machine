@@ -1,57 +1,77 @@
-# Рецепт: Freqtrade → shadow-гейт
+# Recipe: Freqtrade → shadow gate
 
-Как подключить Freqtrade к локальному shadow-гейту LV24: стратегия остаётся
-прежней, а на входе в сделку она отправляет один `GateRequest` в `vend serve`
-и **не ждёт ответа**. Вердикт пишется в журнал для последующей разметки и
-отчёта; на саму сделку он в M1 не влияет.
+[Русская версия](freqtrade.ru.md)
 
-> Пример написан с нуля под публичный интерфейс `IStrategy`. Код Freqtrade
-> (GPL-3.0) в этот репозиторий не копируется и не вендорится: мы только
-> импортируем его классы и реализуем собственный хук `confirm_trade_entry`.
+How to connect Freqtrade to the local LV24 shadow gate: the strategy stays as
+it is, and on entry it sends one `GateRequest` to `vend serve` and **does not
+wait for the answer**. The verdict is written to the journal for later
+labeling and reporting; in M1 it does not affect the trade itself.
 
-## Что понадобится
+> The example is written from scratch against the public `IStrategy`
+> interface. Freqtrade code (GPL-3.0) is not copied or vendored into this
+> repository: we only import its classes and implement our own
+> `confirm_trade_entry` hook.
 
-- Go-ядро с локальным API: `vend` из этого репозитория.
-- Python 3.10+ и установленный Freqtrade (его зависимости — на стороне
-  пользователя).
-- Клиент [`examples/clients/python/vend_gate.py`](../../examples/clients/python/vend_gate.py)
-  — только стандартная библиотека Python.
+## What you need
 
-## 1. Поднять гейт
+- The Go core with the local API: `vend` from this repository.
+- Python 3.10+ and an installed Freqtrade (its dependencies are the user's
+  responsibility).
+- The client
+  [`examples/clients/python/vend_gate.py`](../../examples/clients/python/vend_gate.py)
+  — Python standard library only.
 
-Токен обязателен, сервер слушает только loopback:
+## 1. Start the gate
+
+The token is required and the server listens on loopback only:
 
 ```bash
 go build -o vend ./core/cmd/vend
 VENDING_SECRET_CONN_LOCAL_APITOKEN=<token> ./vend serve   # 127.0.0.1:8420
 ```
 
-Проверка живости (без авторизации):
+Liveness check (no authorization):
 
 ```bash
 curl -s http://127.0.0.1:8420/healthz
 # {"status":"ok","mode":"shadow","version":"..."}
 ```
 
-Тот же токен положите в окружение процесса Freqtrade, например
-`VEND_GATE_TOKEN`. В конфиг стратегии и в репозиторий токен не попадает.
+Put the same token into the Freqtrade process environment, for example
+`VEND_GATE_TOKEN`. The token never goes into the strategy config or the
+repository.
 
-## 2. Положить клиент рядом со стратегией
+## 2. Put the client next to the strategy
 
-Скопируйте `vend_gate.py` в каталог `user_data/strategies/` (или добавьте его
-путь в `sys.path`) и создайте файл стратегии, например
-`user_data/strategies/vend_shadow_gate.py`.
+Copy `vend_gate.py` and `vend_shadow_gate.py` from `examples/freqtrade/` into
+`user_data/strategies/` (or add both paths to `sys.path`).
 
-## 3. Минимальная стратегия
+## 3. Minimal strategy
 
-Сигнал намеренно простой: две скользящие средние. Важна не логика входа, а
-хук `confirm_trade_entry`.
+The ready file is
+[`examples/freqtrade/vend_shadow_gate.py`](../../examples/freqtrade/vend_shadow_gate.py).
+It is shown in full below; the test
+`examples/freqtrade/test_vend_shadow_gate.py` compares this block with the
+file and fails on any difference.
 
+The example was checked against minimal `IStrategy` and `DataFrame` interface
+stubs written in the test; the author has not run it with real Freqtrade.
+
+<!-- vend-example: examples/freqtrade/vend_shadow_gate.py -->
 ```python
 """Freqtrade strategy that reports entries to the local LV24 shadow gate.
 
-Written from scratch for the public IStrategy interface; no Freqtrade
-source is vendored here.
+Written from scratch for the public IStrategy interface; no Freqtrade source
+is vendored here. The gate is advisory in M1: ``confirm_trade_entry`` always
+returns True, and a missing, slow or failing gate never blocks a trade.
+
+Environment:
+    VEND_GATE_TOKEN  bearer token of the local gate; without it the strategy
+                     runs normally and sends nothing.
+    VEND_GATE_URL    gate origin, default ``http://127.0.0.1:8420``.
+
+Copy this file and ``vend_gate.py`` into your Freqtrade
+``user_data/strategies/`` directory. See ``docs/recipes/freqtrade.md``.
 """
 
 import os
@@ -66,6 +86,9 @@ from pandas import DataFrame
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from vend_gate import VendGate  # noqa: E402
 
+DEFAULT_GATE_URL = "http://127.0.0.1:8420"
+GATE_TIMEOUT_SECONDS = 2.0
+
 
 class VendShadowGate(IStrategy):
     timeframe = "1h"
@@ -75,12 +98,29 @@ class VendShadowGate(IStrategy):
     process_only_new_candles = True
     use_exit_signal = False
 
-    # Один клиент на процесс. Bearer-токен живёт только в памяти.
-    gate = VendGate(
-        base_url="http://127.0.0.1:8420",
-        token=os.environ["VEND_GATE_TOKEN"],
-        timeout=2.0,
-    )
+    def _gate(self) -> VendGate | None:
+        """Return the cached client, or None when reporting is not configured.
+
+        The token is read from the environment on first use and kept in
+        memory only. A missing token or an invalid URL disables reporting
+        instead of breaking the strategy.
+        """
+        client = getattr(self, "_vend_gate", None)
+        if client is not None:
+            return client
+        token = os.environ.get("VEND_GATE_TOKEN", "").strip()
+        if not token:
+            return None
+        try:
+            client = VendGate(
+                base_url=os.environ.get("VEND_GATE_URL", DEFAULT_GATE_URL),
+                token=token,
+                timeout=GATE_TIMEOUT_SECONDS,
+            )
+        except ValueError:
+            return None
+        self._vend_gate = client
+        return client
 
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         dataframe["ma_fast"] = dataframe["close"].rolling(12).mean()
@@ -108,40 +148,46 @@ class VendShadowGate(IStrategy):
         **kwargs,
     ) -> bool:
         payload = {
-            # Уникальный id на каждую попытку входа: повтор с тем же id и
-            # другим телом гейт отклонит.
+            # Unique per entry attempt: reusing an id with another body is a
+            # conflict on the gate side.
             "signalId": f"freqtrade-{uuid.uuid4().hex}",
-            # pair передаётся как есть; ядро канонизирует BTC/USDT, BTC-USDT,
-            # BTCUSDT и BTCUSDT:USDT в BTCUSDT.
+            # pair is sent exactly as Freqtrade gives it; the core
+            # canonicalises BTC/USDT, BTC-USDT, BTCUSDT and BTCUSDT:USDT.
             "instrument": {"venue": "freqtrade", "symbol": pair},
             "side": "buy" if side == "long" else "sell",
             "intentKind": "entry",
             "timeframe": self.timeframe,
-            # ts — момент сигнала, UTC.
+            # ts is the moment the signal became known, in UTC.
             "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            # Деньги на границе — строкой, не float.
+            # Money on the wire is a decimal string, not a float.
             "price": f"{float(rate):.8f}",
             "source": "freqtrade:VendShadowGate",
             "state": {},
         }
-        # Fire-and-forget: отправка в фоновом потоке, ответ не ждём.
-        self.gate.send(payload)
-        # Shadow: вход разрешён всегда, вердикт гейта только журналируется.
+        client = self._gate()
+        if client is not None:
+            try:
+                # Fire-and-forget: the answer is not awaited.
+                client.send(payload)
+            except Exception:  # noqa: BLE001 - the gate must never block a trade
+                pass
+        # Shadow mode: entries are always allowed; the verdict is journaled.
         return True
 ```
+<!-- /vend-example -->
 
-Если нужен реальный venue биржи, подставьте его в `instrument.venue`
-(например, из `self.config["exchange"]["name"]`), но не меняйте `pair`:
-символ передаётся ровно в том виде, в каком его даёт Freqtrade.
+If you need the real exchange venue, put it into `instrument.venue` (for
+example, from `self.config["exchange"]["name"]`), but do not change `pair`:
+the symbol is sent exactly as Freqtrade provides it.
 
-`state` — произвольные конечные числа (индикаторы) для контекста решения.
-Пустой объект допустим, `null` — нет.
+`state` holds arbitrary finite numbers (indicators) for decision context. An
+empty object is allowed; `null` is not.
 
-### Символы
+### Symbols
 
-Ядро сравнивает инструменты в канонической форме: trim, верхний регистр,
-удаление разделителей `-`, `_`, `/` и отбрасывание фьючерсного суффикса после
-первого `:`. Поэтому все варианты ниже — один и тот же рынок `BTCUSDT`:
+The core compares instruments in canonical form: trim, upper case, remove the
+`-`, `_` and `/` separators, and drop the futures suffix after the first `:`.
+So all the variants below are the same `BTCUSDT` market:
 
 ```text
 BTC/USDT      → BTCUSDT
@@ -150,27 +196,28 @@ BTCUSDT       → BTCUSDT
 BTCUSDT:USDT  → BTCUSDT
 ```
 
-Ничего не нормализуйте в стратегии: передавайте `pair` как есть, включая
-двоеточие у фьючерсов. Пример фьючерсного инструмента CCXT:
+Do not normalize anything in the strategy: pass `pair` as it is, including
+the colon of a futures pair. An example of a CCXT futures instrument:
 
 ```python
 "instrument": {"venue": "binancefutures", "symbol": "BTC/USDT:USDT"},
 ```
 
-`venue` — просто метка площадки в запросе; канонизация касается только
-`symbol`.
+`venue` is just a venue label in the request; canonicalisation applies to
+`symbol` only.
 
-Исходы фьючерсных пар считаются по спотовым свечам Binance: funding и разница
-цен между фьючерсом и спотом не учитываются.
+Outcomes of futures pairs are computed from Binance spot candles: funding and
+the futures/spot price difference are not taken into account.
 
-Если пары нет на Binance Spot (делистинг, экзотический контракт), запрос свечей
-отклоняется как `invalid_request`. Разметчик повторяет его не дольше 24 часов
-после закрытия окна, затем пишет `outcome.unlabelable` с причиной
-`source_rejected`, и сигнал остаётся без исхода. В отчёте такие сигналы видны
-строкой `source rejected: N` (в `--share` — `- source rejected: N`) и не
-теряются среди ожидающих разметки.
+If the pair is not on Binance Spot (delisting, an exotic contract), the candle
+request is rejected as `invalid_request`. The labeler retries it for no longer
+than 24 hours after the window closes, then writes `outcome.unlabelable` with
+the reason `source_rejected`, and the signal stays without an outcome. In the
+report such signals are visible as the line `source rejected: N` (in `--share`
+— `- source rejected: N`) and are not lost among the signals awaiting
+labeling.
 
-## 4. Запуск и проверка
+## 4. Run and check
 
 ```bash
 freqtrade trade --strategy VendShadowGate --dry-run
@@ -178,23 +225,32 @@ vend gate report
 vend journal verify
 ```
 
-- `vend gate report` показывает накопленные вердикты и разметку исходов.
-- `vend journal verify` проверяет целостность журнала.
-- Если гейт выключен, занят или отвечает дольше таймаута, клиент молча
-  теряет вызов: торговля продолжается, в журнале просто не будет записи.
+- `vend gate report` shows the accumulated verdicts and outcome labeling.
+- `vend journal verify` checks the integrity of the journal.
+- If the gate is off, busy, or answers longer than the timeout, the client
+  silently drops the call: trading continues, there is simply no record in
+  the journal.
 
-## 5. Ограничения M1
+## 5. M1 limitations
 
-- Гейт **не блокирует** входы: `confirm_trade_entry` всегда возвращает `True`.
-- Гейт не отправляет ордера и не знает о размере позиции; это теневой режим.
-- Клиент не ретраит запросы. Уникальный `signalId` — ответственность стратегии.
-- Один вызов — один HTTP POST на `127.0.0.1:8420`; сеть наружу не используется.
-- Живые ключи биржи для этого рецепта не нужны: достаточно `--dry-run`.
+- The gate **does not block** entries: `confirm_trade_entry` always returns
+  `True`.
+- The gate does not send orders and does not know the position size; this is
+  shadow mode.
+- The client does not retry requests. A unique `signalId` is the strategy's
+  responsibility.
+- One call is one HTTP POST to `127.0.0.1:8420`; no external network is used.
+- Live exchange keys are not needed for this recipe: `--dry-run` is enough.
+- Supported timeframes are a positive amount followed by a lowercase `m`, `h`,
+  `d` or `w` (`5m`, `1h`, `4h`, `1d`, `1w`). The gate answers HTTP 400 to
+  anything else, including Freqtrade's monthly `1M`: such a signal could not be
+  labeled.
 
-## 6. Что дальше
+## 6. What comes next
 
-Когда тень наберёт статистику, следующим шагом станет `paper`-режим, где
-вердикт `REJECT` уже влияет на вход. Это отдельное изменение контракта и
-поведения — см. [спецификацию риска](../spec/06-risk-execution.md) и
-[ADR-0008](../adr/0008-wedge-first-scope.md); до него менять `return True`
-на вердикт гейта нельзя.
+When the shadow run has enough statistics, the next step is `paper` mode,
+where a `REJECT` verdict already affects the entry. That is a separate
+contract and behavior change — see the
+[risk specification](../spec/06-risk-execution.md) and
+[ADR-0008](../adr/0008-wedge-first-scope.md); until then, do not replace
+`return True` with the gate verdict.

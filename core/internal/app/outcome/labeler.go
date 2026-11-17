@@ -409,7 +409,15 @@ func (l *Labeler) wait(req domain.GateRequest, interval time.Duration, msg, reas
 func (l *Labeler) labelOne(ctx context.Context, ev domain.Event, req domain.GateRequest, verdicts map[string]time.Time, now time.Time) (labelResult, error) {
 	interval, err := domain.ParseTimeframe(req.Timeframe)
 	if err != nil {
-		return l.fail(req, 0, err)
+		// The gate rejects such requests now; a signal journaled before that
+		// check can never be labeled, so it is recorded once instead of being
+		// retried forever as "awaiting labeling".
+		l.warnOnce(req.SignalID, req.Instrument.Symbol, "outcome: label failed", err.Error())
+		if aerr := l.appendUnlabelable(ctx, req, ev.DecisionID, now, "unsupported_timeframe"); aerr != nil {
+			return resultFailed, aerr
+		}
+		l.resetRetry(req.SignalID)
+		return resultTimedOut, nil
 	}
 	// receivedAt is when the gate accepted the signal, not when the signal
 	// claims to have fired: the difference decides whether the signal is a
