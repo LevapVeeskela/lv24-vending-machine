@@ -133,3 +133,45 @@ func TestStatusMissingDB(t *testing.T) {
 			code, exitNotFound, stderr.String())
 	}
 }
+
+func TestStatusJSONBeforeServeOmitsZeroValues(t *testing.T) {
+	env, stdout, stderr, _, dataDir := initTestEnv(t)
+	if code := runArgs(env, "status", "--json", "--data-dir", dataDir); code != exitOK {
+		t.Fatalf("status --json before serve = %d, stdout=%s stderr=%s",
+			code, stdout.String(), stderr.String())
+	}
+	out := stdout.String()
+	for _, forbidden := range []string{"0001-01-01", `"policyHash"`, `"updatedAt"`, `"lastLabelAt"`} {
+		if strings.Contains(out, forbidden) {
+			t.Fatalf("status JSON before serve contains %s: %s", forbidden, out)
+		}
+	}
+	var got map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("decode status JSON %q: %v", out, err)
+	}
+	if got["version"] != "0.1.0-m0-test" || got["events"] != float64(0) || got["labeled"] != float64(0) {
+		t.Fatalf("status JSON header = %v", got)
+	}
+}
+
+func TestStatusJSONBOM(t *testing.T) {
+	env, stdout, stderr, _, dataDir := initTestEnv(t)
+	body := `{"version":"0.1.0-m1","policyHash":"abcdef0123456789",` +
+		`"lastLabelAt":"2026-11-10T07:00:00Z","updatedAt":"2026-11-10T07:00:00Z"}`
+	path := filepath.Join(dataDir, shadowStatusName)
+	if err := os.WriteFile(path, append([]byte("\xef\xbb\xbf"), body...), 0o600); err != nil {
+		t.Fatalf("write BOM status: %v", err)
+	}
+	if code := runArgs(env, "status", "--json", "--data-dir", dataDir); code != exitOK {
+		t.Fatalf("status --json with BOM = %d, stdout=%s stderr=%s",
+			code, stdout.String(), stderr.String())
+	}
+	var got shadow.Status
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("decode status JSON %q: %v", stdout.String(), err)
+	}
+	if got.PolicyHash != "abcdef0123456789" || got.UpdatedAt.IsZero() {
+		t.Fatalf("BOM status = %+v, want policy and updatedAt", got)
+	}
+}

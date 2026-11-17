@@ -213,3 +213,40 @@ func TestOutcomesLabelMissingProvider(t *testing.T) {
 		t.Fatalf("outcomes label without provider = %d, want 6, stderr=%s", code, stderr.String())
 	}
 }
+
+func TestReadCandlesFileBOM(t *testing.T) {
+	dir := t.TempDir()
+	body := `[{"symbol":"BTCUSDT","interval":"1h",` +
+		`"openTime":"2026-11-10T06:00:00Z","closeTime":"2026-11-10T07:00:00Z",` +
+		`"open":"100","high":"110","low":"90","close":"105","volume":"1000"}]`
+
+	bomPath := filepath.Join(dir, "bom.json")
+	if err := os.WriteFile(bomPath, append([]byte("\xef\xbb\xbf"), body...), 0o644); err != nil {
+		t.Fatalf("write BOM candles: %v", err)
+	}
+	cs, code, err := readCandlesFile(bomPath)
+	if code != exitOK || err != nil {
+		t.Fatalf("read BOM candles = code %d, err %v", code, err)
+	}
+	if len(cs) != 1 || cs[0].Symbol != "BTCUSDT" {
+		t.Fatalf("BOM candles = %+v, want one BTCUSDT candle", cs)
+	}
+
+	onlyBOM := filepath.Join(dir, "bom-only.json")
+	if err := os.WriteFile(onlyBOM, []byte("\xef\xbb\xbf"), 0o644); err != nil {
+		t.Fatalf("write BOM-only file: %v", err)
+	}
+	if _, code, err := readCandlesFile(onlyBOM); code != exitUsage || err == nil ||
+		!strings.Contains(err.Error(), "BOM") {
+		t.Fatalf("BOM-only file = code %d, err %v, want a usage error naming the BOM", code, err)
+	}
+
+	empty := filepath.Join(dir, "empty.json")
+	if err := os.WriteFile(empty, nil, 0o644); err != nil {
+		t.Fatalf("write empty file: %v", err)
+	}
+	if _, code, err := readCandlesFile(empty); code != exitUsage || err == nil ||
+		!strings.Contains(err.Error(), "empty") {
+		t.Fatalf("empty file = code %d, err %v, want a usage error naming the empty file", code, err)
+	}
+}
