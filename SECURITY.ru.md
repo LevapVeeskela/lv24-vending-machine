@@ -14,8 +14,14 @@
 
 ## Как сообщить
 
-Приватно: `security@lv24.by` (или GitHub Security Advisory в этом репозитории).
+Приватно, через GitHub Security Advisory в этом репозитории:
+<https://github.com/LevapVeeskela/lv24-vending-machine/security/advisories/new>.
 Не открывайте публичный issue до исправления.
+
+Если GitHub вам недоступен, напишите в поддержку на `lv24by.help@mail.ru` с
+темой `Security: lv24-vending-machine` и попросите приватный канал. Это общий
+ящик поддержки, поэтому в первом письме не приводите детали уязвимости и
+секреты. Все контакты проекта — на <https://lv24.by/contacts>.
 
 В сообщении: версия/коммит, конфигурация (paper/live), шаги воспроизведения,
 влияние, логи без секретов.
