@@ -1,46 +1,50 @@
-# Runbook: живая проверка shadow-гейта (15 минут)
+# Runbook: live check of the shadow gate (15 minutes)
 
-Цель: владелец на своей машине проверяет, что `vend` реально ходит в Drex и
-Binance, размечает исходы и пишет отчёт. Ордера не отправляются, деньги не
-двигаются: M1 работает только в `shadow`.
+[Русская версия](runbook-live-smoke.ru.md)
 
-Проверка занимает 15 минут, из них ~6 минут — ожидание разметки одного ручного
-запроса с таймфреймом `1m`. Всё, что нужно отправить на ревью, перечислено в
-конце; секреты, конфиг и журнал отправлять не нужно.
+Goal: the owner, on their own machine, checks that `vend` really talks to Drex
+and Binance, labels outcomes and writes a report. No orders are sent, no money
+moves: M1 runs only in `shadow`.
 
-## Предусловия
+The check takes 15 minutes, of which ~6 minutes are waiting for one manual
+request with the `1m` timeframe to be labeled. Everything that should be sent
+for review is listed at the end; secrets, the config and the journal are not to
+be sent.
 
-- `vend` установлен и `vend version` печатает версию
-  ([install.ru.md](install.ru.md)).
-- `vend init` уже выполнен; известны пути конфига и данных
-  (`vend config path`, каталог данных — рядом с `vending.db`).
-- В окружении есть ключ decision-провайдера и токен локального API:
+## Prerequisites
+
+- `vend` is installed and `vend version` prints a version
+  ([install.md](install.md)).
+- `vend init` has been run; the config and data paths are known
+  (`vend config path`, the data directory is next to `vending.db`).
+- The environment has a decision-provider key and a local API token:
 
   ```bash
   export VENDING_SECRET_CONN_DREX_APIKEY='<token>'
   export VENDING_SECRET_CONN_LOCAL_APITOKEN='<token>'
   ```
 
-  PowerShell: `$env:VENDING_SECRET_CONN_DREX_APIKEY = '<token>'` и так же для
-  `VENDING_SECRET_CONN_LOCAL_APITOKEN`. Значения — разные случайные строки.
-- Секреты не попадают в файлы, скриншоты и переписку.
+  PowerShell: `$env:VENDING_SECRET_CONN_DREX_APIKEY = '<token>'` and likewise
+  for `VENDING_SECRET_CONN_LOCAL_APITOKEN`. The values are different random
+  strings.
+- Secrets never get into files, screenshots or messages.
 
-## Шаг 0. Синхронизируйте системные часы
+## Step 0. Synchronize the system clock
 
-Время вердикта и приёма сигнала задаёт окно разметки, а расписание
-уведомлений и `entryLagMs` считаются по UTC. Сбитые часы сдвигают метку и
-алерты, поэтому сначала синхронизируйте время:
+The verdict time and the signal receipt time define the labeling window, while
+the notification schedule and `entryLagMs` are computed in UTC. A wrong clock
+shifts the label and the alerts, so synchronize the time first:
 
-- Windows: `w32tm /resync` (или «Параметры → Время и язык → Дата и время →
-  Синхронизировать сейчас»).
-- Linux: `sudo timedatectl set-ntp true`, проверить `timedatectl`.
-- macOS: «Системные настройки → Основные → Дата и время → Установить дату и
-  время автоматически».
+- Windows: `w32tm /resync` (or Settings → Time & language → Date & time →
+  Sync now).
+- Linux: `sudo timedatectl set-ntp true`, then check `timedatectl`.
+- macOS: System Settings → General → Date & Time → Set date and time
+  automatically.
 
-## Шаг 1. Живые пробы doctor (5 минут)
+## Step 1. Live doctor probes (5 minutes)
 
-Сначала офлайн-проверка, затем живые вызовы. Сохраните вывод сразу: этот же
-файл пойдёт на ревью, второй платный вызов в шаге 5 не нужен.
+First the offline check, then the live calls. Save the output immediately: this
+same file goes to review, and step 5 does not need a second paid call.
 
 Linux / macOS:
 
@@ -49,61 +53,66 @@ vend doctor 2>&1 | tee doctor.txt
 vend doctor --live --symbol BTCUSDT --save-raw <file> 2>&1 | tee -a doctor.txt
 ```
 
-Windows PowerShell (`tee` нет; `*>` перезаписывает, `*>>` дописывает):
+Windows PowerShell (no `tee`; `*>` overwrites, `*>>` appends):
 
 ```powershell
 .\vend.exe doctor *> doctor.txt
 .\vend.exe doctor --live --symbol BTCUSDT --save-raw <file> *>> doctor.txt
 ```
 
-`--live` делает три опциональные сетевые пробы, каждая с дедлайном 20 секунд:
+`--live` performs three optional network probes, each with a 20 second
+deadline:
 
-| Проба | Что делает | Успех |
+| Probe | What it does | Success |
 |---|---|---|
-| `decision` | один вызов decision-провайдера с фиксированным синтетическим state и набором вопросов гейта; ответ проходит через `gate.Evaluate` | `decision: ok verdict=<ALLOW\|REJECT\|ABSTAIN> code=<код> cost=<decimal> USD` |
-| `candles` | две закрытые свечи `1h` по `--symbol` (по умолчанию `BTCUSDT`) у marketdata-провайдера | `candles: ok` |
-| `telegram` | одно тестовое сообщение, только если `notify.telegram.enabled` | `telegram: ok` |
+| `decision` | one decision-provider call with a fixed synthetic state and the gate question set; the answer goes through `gate.Evaluate` | `decision: ok verdict=<ALLOW\|REJECT\|ABSTAIN> code=<code> cost=<decimal> USD` |
+| `candles` | two closed `1h` candles for `--symbol` (default `BTCUSDT`) from the marketdata provider | `candles: ok` |
+| `telegram` | one test message, only when `notify.telegram.enabled` | `telegram: ok` |
 
-`ABSTAIN` с кодом `invalid_output` — это **FAIL** пробы `decision`: ответ не
-прошёл проверку вопросов гейта. Остальные вердикты (`ALLOW`, `REJECT`,
-`ABSTAIN` с кодом `low_confidence`/`insufficient_data` и т. п.) означают, что
-живой вызов и политика отработали, и проба успешна. Пример успешной строки:
+`ABSTAIN` with the code `invalid_output` is a **FAIL** of the `decision` probe:
+the answer did not pass the gate question check. The other verdicts (`ALLOW`,
+`REJECT`, `ABSTAIN` with `low_confidence`/`insufficient_data` and so on) mean
+the live call and the policy worked, and the probe succeeded. Example of a
+successful line:
 `decision: ok verdict=ALLOW code=allow cost=0.0001 USD`.
 
-`--save-raw <file>` пишет сырой ответ decision-провайдера атомарно с правами
-0600 и печатает `save_raw: ok`. Файл может содержать служебные данные вендора:
-не коммитить и не пересылать.
+`--save-raw <file>` writes the raw decision-provider answer atomically with
+permissions 0600 and prints `save_raw: ok`. The file may contain vendor service
+data: do not commit or forward it.
 
-`--symbol` и `--save-raw` требуют `--live`; без него команда завершается кодом 2.
+`--symbol` and `--save-raw` require `--live`; without it the command exits with
+code 2.
 
-### Что означают коды
+### What the codes mean
 
-Строка `decision` печатает `ok verdict=... code=... cost=... USD` либо короткий
-код ошибки; остальные пробы печатают `ok` либо короткий код ошибки:
+The `decision` line prints `ok verdict=... code=... cost=... USD` or a short
+error code; the other probes print `ok` or a short error code:
 
-| Код | Значение | Что делать |
+| Code | Meaning | What to do |
 |---|---|---|
-| `ok` | проба прошла | — |
-| `auth` | нет или неверный ключ, либо исчерпана квота | проверить `secretRef` и `VENDING_SECRET_*`, баланс/квоту провайдера |
-| `payment_required` | провайдер требует оплату или квоту | пополнить/включить квоту у провайдера |
-| `rate_limit` | троттлинг | подождать и повторить позже |
-| `invalid_request` | провайдер отклонил запрос: модель, профиль, URL | сверить `providers.decision.*` с `vend config validate` |
-| `invalid_output` | ответ не соответствует контракту | повторить; если повторяется — сообщить с `--save-raw` |
-| `unavailable` | временная недоступность или сеть | повторить через несколько минут |
-| `timeout` | не уложились в 20 секунд | проверить сеть/провайдера, повторить |
-| `ip_banned` | IP забанен провайдером | не ретраить; сменить сеть/провайдера |
-| `region_unavailable` | регион недоступен | использовать доступный регион/провайдера |
-| `unknown` | не классифицировано, печатается как `unavailable` | повторить и сообщить |
+| `ok` | the probe passed | — |
+| `auth` | missing or wrong key, or the quota is exhausted | check `secretRef` and `VENDING_SECRET_*`, the provider balance/quota |
+| `payment_required` | the provider requires payment or quota | top up/enable the quota at the provider |
+| `rate_limit` | throttling | wait and retry later |
+| `invalid_request` | the provider rejected the request: model, profile, URL | compare `providers.decision.*` with `vend config validate` |
+| `invalid_output` | the answer does not match the contract | retry; if it repeats, report with `--save-raw` |
+| `unavailable` | temporary unavailability or network | retry in a few minutes |
+| `timeout` | did not finish within 20 seconds | check the network/provider, retry |
+| `ip_banned` | the IP is banned by the provider | do not retry; change the network/provider |
+| `region_unavailable` | the region is unavailable | use an available region/provider |
+| `unknown` | not classified, printed as `unavailable` | retry and report |
 
-Если `config` невалиден, живые пробы возвращают `invalid_request`; если реестр
-провайдеров не собрался — `unavailable`. Любая FAIL-проба даёт код возврата 1.
-`--json` печатает `{"ok":bool,"checks":[{name,ok,detail,live?}]}` — удобно
-приложить к отчёту.
+If `config` is invalid, the live probes return `invalid_request`; if the
+provider registry did not assemble, they return `unavailable`. Any FAIL probe
+gives exit code 1. `--json` prints
+`{"ok":bool,"checks":[{name,ok,detail,live?}]}` — convenient to attach to the
+report.
 
-## Шаг 2. Конфиг на проверку (2 минуты)
+## Step 2. Config for the check (2 minutes)
 
-В конфиге (`vend config path`) включите trend и короткий горизонт. Фрагмент —
-только изменяемые ключи, остальное оставьте как создал `init`:
+In the config (`vend config path`) enable trend and a short horizon. The
+fragment below lists only the keys to change; leave the rest as `init` created
+it:
 
 ```json
 {
@@ -146,44 +155,46 @@ Windows PowerShell (`tee` нет; `*>` перезаписывает, `*>>` до�
 }
 ```
 
-Проверка без сети и ключей:
+Check without network and keys:
 
 ```bash
 vend config validate
 ```
 
-Что важно в этих значениях:
+What matters in these values:
 
-- Ручной запрос из шага 3 идёт с `timeframe: 1m`. При `horizonBars: 3` это
-  горизонт 3 минуты: разметчик ждёт `(3 + 1) × 1m` = 4 минуты после вердикта,
-  поэтому метка появляется через 5–6 минут с учётом цикла 30 секунд.
-- `timeframe: 5m` у trend — отдельное расписание: скан идёт через 2 секунды
-  после закрытия каждого 5m-бара, а не по таймеру разметки.
-- `labelIntervalSec: 30` — цикл разметки, уведомлений и статус-файла; на
-  расписание trend он не влияет.
-- `feeBps: 10` — за одну сторону; `netReturn` вычитает 20 bps round-trip.
-- `sides: ["buy"]` — только покупки; trend выдаёт вход на пересечении EMA
-  fast/slow на закрытом баре.
-- `venue: "binance"` — площадка инструмента в сигналах; значение проверяется
-  валидацией.
-- Telegram можно включить (`enabled: true`, `chatId`, `secretRef`), тогда
-  `doctor --live` дополнительно отправит одно тестовое сообщение. Для быстрой
-  проверки гейта он не обязателен.
+- The manual request from step 3 uses `timeframe: 1m`. With `horizonBars: 3`
+  the horizon is 3 minutes: the labeler waits `(3 + 1) × 1m` = 4 minutes after
+  the verdict, so the label appears in 5–6 minutes including the 30 second
+  cycle.
+- `timeframe: 5m` for trend is a separate schedule: the scan runs 2 seconds
+  after each 5m bar closes, not on the labeling timer.
+- `labelIntervalSec: 30` — the labeling, notification and status-file cycle;
+  it does not affect the trend schedule.
+- `feeBps: 10` — per side; `netReturn` subtracts 20 bps round-trip.
+- `sides: ["buy"]` — buys only; trend emits an entry at the EMA fast/slow
+  crossing on a closed bar.
+- `venue: "binance"` — the instrument venue in the signals; the value is
+  checked by validation.
+- Telegram can be enabled (`enabled: true`, `chatId`, `secretRef`); then
+  `doctor --live` also sends one test message. It is not required for the quick
+  gate check.
 
-## Шаг 3. Запустить shadow-цикл (6 минут ожидания)
+## Step 3. Start the shadow cycle (6 minutes of waiting)
 
 ```bash
 vend serve --addr 127.0.0.1:8420
 ```
 
-В stderr появится `listening on http://127.0.0.1:8420`. Процесс не закрывать:
-раннер работает внутри `serve`. Первый цикл выполняется сразу, далее каждые
-30 секунд.
+`listening on http://127.0.0.1:8420` appears on stderr. Do not close the
+process: the runner works inside `serve`. The first cycle runs immediately,
+then every 30 seconds.
 
-Сразу после запуска отправьте один ручной запрос с `timeframe: "1m"` — это
-обязательный шаг проверки. Trend на 5m может не дать пересечения на спокойном
-рынке, а ручной 1m-запрос гарантирует метку за 5–6 минут. Пример (подставьте
-свой токен через переменную окружения и текущее UTC-время):
+Right after the start, send one manual request with `timeframe: "1m"` — this is
+a mandatory step of the check. Trend on 5m may not produce a crossing in a calm
+market, while a manual 1m request guarantees a label in 5–6 minutes. Example
+(substitute your token through the environment variable and the current UTC
+time):
 
 ```bash
 curl -sS -X POST http://127.0.0.1:8420/v1/gate \
@@ -192,11 +203,12 @@ curl -sS -X POST http://127.0.0.1:8420/v1/gate \
   --data '{"signalId":"smoke-1m-1","instrument":{"venue":"binance","symbol":"BTCUSDT"},"side":"buy","intentKind":"entry","timeframe":"1m","ts":"<now UTC RFC3339>","price":"100000","source":"smoke"}'
 ```
 
-В PowerShell 5.1 вызывайте `curl.exe`; токен — `$env:VENDING_SECRET_CONN_LOCAL_APITOKEN`.
-Ответ `gate.verdict` означает, что сигнал принят и попал в журнал; метка
-появится сама, повторять запрос не нужно.
+In PowerShell 5.1 use `curl.exe`; the token is
+`$env:VENDING_SECRET_CONN_LOCAL_APITOKEN`. The `gate.verdict` response means
+the signal was accepted and written to the journal; the label appears by
+itself, there is no need to repeat the request.
 
-## Шаг 4. Что смотреть после 5–6 минут
+## Step 4. What to look at after 5–6 minutes
 
 ### `vend status --json`
 
@@ -204,26 +216,28 @@ curl -sS -X POST http://127.0.0.1:8420/v1/gate \
 vend status --json
 ```
 
-Поля: `version`, `policyHash`, `events`, `labeled`, `lastLabelAt`,
-`lastCycleError`, `updatedAt`, `lastSeq`. `lastLabelAt`, `lastCycleError` и
-`lastSeq` опускаются, когда пусты.
+Fields: `version`, `policyHash`, `events`, `labeled`, `lastLabelAt`,
+`lastCycleError`, `updatedAt`, `lastSeq`. `lastLabelAt`, `lastCycleError` and
+`lastSeq` are omitted when empty.
 
-Ожидаемо:
+Expected:
 
-- `events` > 0 — в журнале есть `gate.request`, `decision.response`,
-  `gate.verdict` (по 3 события на сигнал, плюс метки и уведомления);
-- `labeled` ≥ 1 — метка ручного 1m-запроса: горизонт 3 бара плюс один
-  запасной = 4 минуты после вердикта, плюс цикл 30 секунд. Если метки нет через
-  8 минут, см. «Если что-то не так»;
-- `lastLabelAt` — время последней метки; после шага 3 оно не должно быть пустым;
-- `policyHash` — 64 hex, тот же, что печатает `vend doctor`;
-- `lastCycleError` пустой; если там текст — цикл упал, см. «Если что-то не так»;
-- `updatedAt` не старше `labelIntervalSec` + несколько секунд.
+- `events` > 0 — the journal has `gate.request`, `decision.response`,
+  `gate.verdict` (3 events per signal, plus labels and notifications);
+- `labeled` ≥ 1 — the label of the manual 1m request: the horizon of 3 bars
+  plus one spare = 4 minutes after the verdict, plus the 30 second cycle. If
+  there is no label after 8 minutes, see "If something is wrong";
+- `lastLabelAt` — the time of the last label; after step 3 it must not be
+  empty;
+- `policyHash` — 64 hex, the same as `vend doctor` prints;
+- `lastCycleError` empty; if there is text, the cycle failed, see "If something
+  is wrong";
+- `updatedAt` no older than `labelIntervalSec` plus a few seconds.
 
-Без единого запуска `serve` статус-файла нет: `events`/`labeled` считаются по
-журналу, `policy: none`, `last label: never`. После остановки файл остаётся,
-поэтому `updatedAt` перестаёт обновляться; свежесть проверяйте при работающем
-`serve`.
+Without a single `serve` run there is no status file: `events`/`labeled` are
+counted from the journal, `policy: none`, `last label: never`. After a stop the
+file remains, so `updatedAt` stops being updated; check freshness while `serve`
+runs.
 
 ### `vend gate report`
 
@@ -231,7 +245,7 @@ vend status --json
 vend gate report
 ```
 
-После 5–6 минут ожидаемо:
+After 5–6 minutes expected:
 
 ```text
 assumptions: horizon=3 bars, fees=20 bps round-trip, price source=marketdata-binance, equal size, no slippage, no funding
@@ -249,35 +263,38 @@ latency p50/p95: <n>ms/<n>ms
 insufficient data: <n> labeled, need 100
 ```
 
-- `verdicts` считает уникальные решения по последнему вердикту на `decisionId`;
-  `gate.request`/`decision.response`/`gate.verdict` в журнале — по событию на
-  сигнал, поэтому `events` в статусе больше суммы вердиктов.
-- `window` — `days` по времени приёма `gate.request` (UTC), а не по `ts` из
-  тела сигнала; `active` — число разных UTC-дат с хотя бы одним запросом.
-- `labeled` — число меток, привязанных к решениям выбранной политики;
-  `backfill` — поздние сигналы (по умолчанию только считаются, не сравниваются).
-- `awaiting labeling` — entry-сигналы без метки и без `outcome.unlabelable`;
-  `no outcome by deadline` — сигналы, для которых после 7 суток так и не
-  нашлось честного окна и записан `outcome.unlabelable` с причиной `timeout`;
-  `source rejected` — сигналы, для которых источник отклонил запрос как
-  `invalid_request` (например, пары нет на Binance Spot) и записан
-  `outcome.unlabelable` с причиной `source_rejected`.
-- `decision cost` — сумма `usage.costUsd` уникальных решений;
-  `latency p50/p95` — по `usage.latencyMs`.
-- `insufficient data` до 100 меток — **норма**, а не ошибка. Сравнения
-  (группы, bootstrap CI, Brier/BSS/AUC/ECE, разбивка по моделям) появятся
-  только от 100 меток; BSS печатается как `bss: n/a`, если base rate 0 или 1.
-- Сравнения смешивают только последнюю пару `(horizonBars, feeBps)`; метки с
-  другой парой не подмешиваются (в `--json` это `otherLabelParams`).
+- `verdicts` counts unique decisions by the latest verdict per `decisionId`;
+  the journal has one `gate.request`/`decision.response`/`gate.verdict` per
+  signal, so `events` in the status is larger than the sum of verdicts.
+- `window` — `days` by the `gate.request` receipt time (UTC), not by the `ts`
+  from the signal body; `active` — the number of distinct UTC dates with at
+  least one request.
+- `labeled` — the number of labels attached to decisions of the selected
+  policy; `backfill` — late signals (by default only counted, not compared).
+- `awaiting labeling` — entry signals without a label and without
+  `outcome.unlabelable`; `no outcome by deadline` — signals for which no honest
+  window was found after 7 days and an `outcome.unlabelable` with reason
+  `timeout` was written; `source rejected` — signals for which the source
+  rejected the request as `invalid_request` (for example, the pair is not on
+  Binance Spot) and an `outcome.unlabelable` with reason `source_rejected` was
+  written.
+- `decision cost` — the sum of `usage.costUsd` of unique decisions;
+  `latency p50/p95` — by `usage.latencyMs`.
+- `insufficient data` below 100 labels is **normal**, not an error. Comparisons
+  (groups, bootstrap CI, Brier/BSS/AUC/ECE, per-model breakdown) appear only
+  from 100 labels; BSS is printed as `bss: n/a` when the base rate is 0 or 1.
+- Comparisons mix only the latest `(horizonBars, feeBps)` pair; labels with
+  another pair are not mixed in (in `--json` this is `otherLabelParams`).
 
-`entryLagMedian`, `entryLagP95` (в долях одного бара) и `entryShifted` входят в
-допущения отчёта и печатаются в `--share`; в человекочитаемом `gate report` их
-нет. `entryLagMs` — задержка от открытия входного бара до момента, когда сигнал
-стал доступен (время вердикта, иначе время приёма). Вход сдвигается на
-следующий бар, если бар открылся раньше момента доступности больше чем на
-`min(10% интервала, 30 секунд)`; без запасного бара сигнал ждёт следующего
-цикла и не пишет исход без переноса. В `--share` рядом с долями бара
-печатается то же значение в секундах.
+`entryLagMedian`, `entryLagP95` (in fractions of one bar) and `entryShifted`
+are part of the report assumptions and are printed in `--share`; the
+human-readable `gate report` does not show them. `entryLagMs` is the delay from
+the opening of the entry bar to the moment the signal became available (the
+verdict time, otherwise the receipt time). The entry shifts to the next bar if
+the bar opened earlier than the signal availability by more than
+`min(10% of the interval, 30 seconds)`; without a spare bar the signal waits for
+the next cycle and writes no outcome without the shift. In `--share`, the same
+value in seconds is printed next to the bar fractions.
 
 ### `vend gate report --share`
 
@@ -285,20 +302,21 @@ insufficient data: <n> labeled, need 100
 vend gate report --share
 ```
 
-Печатает обезличенную сводку: версию, префикс policy (8 hex), число решений,
-`days` и `active days` по времени приёма `gate.request` в UTC, число меток,
-число ожидающих разметки, просроченных без исхода и
-отклонённых источником (`awaiting labeling`, `no outcome by deadline`,
-`source rejected`), счётчики вердиктов, метрики или `insufficient data`,
-допущения (горизонт, round-trip fee, entry lag median/p95 в долях бара и в
-секундах, entry shifted, equal size/no slippage/no funding) и ссылку на GitHub
-Discussions. В ней нет символов, площадок, цен, state, путей, идентификаторов
-и сумм доходности. Файл через `--out <file>` пишется с правами 0600.
+Prints an anonymized summary: version, policy prefix (8 hex), number of
+decisions, `days` and `active days` by `gate.request` receipt time in UTC,
+number of labels, number awaiting labeling, expired without an outcome and
+rejected by the source (`awaiting labeling`, `no outcome by deadline`,
+`source rejected`), verdict counters, metrics or `insufficient data`,
+assumptions (horizon, round-trip fee, entry lag median/p95 in bar fractions and
+in seconds, entry shifted, equal size/no slippage/no funding) and a link to
+GitHub Discussions. It contains no symbols, venues, prices, state, paths,
+identifiers or return amounts. A file written through `--out <file>` gets
+permissions 0600.
 
-## Шаг 5. Что отправить на ревью
+## Step 5. What to send for review
 
-Соберите четыре файла (имена любые). `doctor.txt` уже сохранён в шаге 1 —
-второй платный вызов `doctor --live` не нужен:
+Collect four files (any names). `doctor.txt` was already saved in step 1 — a
+second paid `doctor --live` call is not needed:
 
 ```bash
 vend status --json > status.json
@@ -306,39 +324,40 @@ vend gate report --share > share.md
 vend journal verify > verify.txt 2>&1
 ```
 
-Отправляйте:
+Send:
 
-1. `doctor.txt` — вывод живых проб и кодов (без токенов: doctor их не печатает);
-2. `status.json` — счётчики, policy hash, последняя ошибка цикла;
-3. `share.md` — обезличенная сводка (проверьте глазами перед отправкой);
-4. `verify.txt` — результат `journal verify` (должен быть `ok`, число событий).
+1. `doctor.txt` — the output of the live probes and codes (without tokens:
+   doctor does not print them);
+2. `status.json` — counters, policy hash, the last cycle error;
+3. `share.md` — the anonymized summary (look it over before sending);
+4. `verify.txt` — the `journal verify` result (must be `ok`, the event count).
 
-Не отправляйте: конфиг, переменные окружения, `--save-raw` файл, `vending.db`,
-скриншоты с ключами. Если `doctor` или `serve` печатают путь/токен — вырежьте
-его.
+Do not send: the config, environment variables, the `--save-raw` file,
+`vending.db`, screenshots with keys. If `doctor` or `serve` prints a path or a
+token — cut it out.
 
-## Репетиция без сети (smokestub)
+## Rehearsal without network (smokestub)
 
-`tools/smokestub` — локальная заглушка трёх провайдеров для репетиции этого
-runbook без ключей и сети. Она отвечает на `POST /v1/systemone` как
-decision-drex, отдаёт синтетические закрытые свечи BTCUSDT на `1m`, `5m`, `1h`
-по `GET /api/v3/klines` и подтверждает `sendMessage` Telegram. Заглушка не
-входит в `tools/release`, слушает только loopback и не должна использоваться
-вне репетиции. `GET /ctl/stats` отдаёт счётчики запросов по ролям —
-`{"decision":N,"telegram":N,"klines":{"BTCUSDT":N}}`; токены и тексты
-сообщений в счётчики и в лог не попадают. Эти счётчики использует
-автоматический сквозной тест `tools/e2e`.
+`tools/smokestub` is a local stub of the three providers for rehearsing this
+runbook without keys and network. It answers `POST /v1/systemone` as
+decision-drex, serves synthetic closed BTCUSDT candles on `1m`, `5m`, `1h` at
+`GET /api/v3/klines` and confirms Telegram `sendMessage`. The stub is not part
+of `tools/release`, listens on loopback only and must not be used outside the
+rehearsal. `GET /ctl/stats` returns request counters by role —
+`{"decision":N,"telegram":N,"klines":{"BTCUSDT":N}}`; tokens and message texts
+never reach the counters or the log. The automated end-to-end test `tools/e2e`
+uses these counters.
 
-1. Запустите заглушку в отдельном терминале:
+1. Start the stub in a separate terminal:
 
    ```bash
    go run ./tools/smokestub --addr 127.0.0.1:28471
    ```
 
-   Другие адреса, кроме `127.0.0.1` и `::1`, отклоняются при старте.
+   Addresses other than `127.0.0.1` and `::1` are rejected at startup.
 
-2. Вымышленные секреты и конфиг. Значения ниже — rehearsal-only строки, не
-   настоящие ключи:
+2. Made-up secrets and config. The values below are rehearsal-only strings, not
+   real keys:
 
    ```bash
    export VENDING_SECRET_CONN_DREX_APIKEY='rehearsal-only'
@@ -346,7 +365,7 @@ decision-drex, отдаёт синтетические закрытые свеч
    export VENDING_SECRET_CONN_LOCAL_APITOKEN='rehearsal-only'
    ```
 
-   Фрагмент конфига (остальные ключи — как создал `init`):
+   Config fragment (the other keys stay as `init` created them):
 
    ```json
    {
@@ -387,54 +406,66 @@ decision-drex, отдаёт синтетические закрытые свеч
    }
    ```
 
-3. Пройдите те же шаги 1–5, что и для живой проверки: `vend config validate`,
-   `vend doctor --live --symbol BTCUSDT`, `vend serve --addr 127.0.0.1:8420`,
-   ручной `POST /v1/gate` с `timeframe: "1m"` и `price: "100000"`, затем через
-   5–6 минут `vend status --json`, `vend gate report`,
-   `vend gate report --share` и `vend journal verify`. Все пробы
-   `doctor --live` должны быть `ok`, а отчёт печатать `source rejected: 0`.
+3. Go through the same steps 1–5 as for the live check:
+   `vend config validate`, `vend doctor --live --symbol BTCUSDT`,
+   `vend serve --addr 127.0.0.1:8420`, a manual `POST /v1/gate` with
+   `timeframe: "1m"` and `price: "100000"`, then after 5–6 minutes
+   `vend status --json`, `vend gate report`, `vend gate report --share` and
+   `vend journal verify`. All `doctor --live` probes must be `ok`, and the
+   report must print `source rejected: 0`.
 
-4. Отработайте отказы (необязательно). Переключите HTTP-статусы ролей:
+4. Rehearse failures (optional). Switch the role HTTP statuses:
 
    ```bash
    curl -s "http://127.0.0.1:28471/ctl?decision=500&telegram=401"
    ```
 
-   Новый ручной сигнал получит `ABSTAIN` с кодом `provider_unavailable`, а
-   Telegram — ошибку доставки. Верните роли в норму:
+   A new manual signal gets `ABSTAIN` with the code `provider_unavailable`, and
+   Telegram gets a delivery error. Return the roles to normal:
 
    ```bash
    curl -s "http://127.0.0.1:28471/ctl?decision=200&telegram=200"
    ```
 
-   Заглушка не пишет в лог токен бота и текст сообщения: только адрес и
-   переключения `/ctl`. Проверить, какие вызовы она получила:
+   The stub does not write the bot token or the message text to the log: only
+   the address and the `/ctl` switches. Check which calls it received:
 
    ```bash
    curl -s "http://127.0.0.1:28471/ctl/stats"
    ```
 
-   В ответе — число запросов decision и Telegram и klines по символам. После
-   одного ручного 1m-сигнала и его метки ожидается один decision-запрос и один
-   klines-запрос по `BTCUSDT`.
+   The response contains the number of decision and Telegram requests and
+   klines by symbol. After one manual 1m signal and its label, one decision
+   request and one klines request for `BTCUSDT` are expected.
 
-## Если что-то не так
+## If something is wrong
 
-| Симптом | Причина и действие |
+| Symptom | Cause and action |
 |---|---|
-| `doctor` возвращает 1 | смотрите строку `FAIL <check>`: конфиг, каталог, БД, журнал, провайдеры |
-| `decision: FAIL verdict=ABSTAIN code=invalid_output` | живой ответ не прошёл проверку вопросов гейта; повторить, при повторе — прислать `--save-raw` |
-| `decision: auth` | ключ не задан/неверен или квота; проверить `VENDING_SECRET_CONN_DREX_APIKEY` |
-| `candles: invalid_request` | символ/интервал не принят Binance; проверить `--symbol BTCUSDT` |
-| `candles: ip_banned` | IP забанен; не ретраить, сменить сеть |
-| `events: 0` через 5 минут | `serve` не запущен или смотрит в другой `--data-dir` |
-| `labeled: 0` через 8 минут | нет ручного 1m-запроса, не хватает закрытых баров, нет сети или неверный `--data-dir`; проверить `lastCycleError` |
-| `verdicts: ABSTAIN=<n>` | провайдер ошибся; код причины — в `gate.verdict` (`provider_auth`, `provider_unavailable`, `invalid_output`, `provider_misconfigured`) |
-| `lastCycleError` не пуст | цикл продолжает работать; ошибка повторяется каждый интервал — прислать текст в отчёте |
-| `journal chain broken at seq N` | журнал повреждён; не продолжать, сохранить файл и сообщить |
+| `doctor` returns 1 | look at the `FAIL <check>` line: config, directory, DB, journal, providers |
+| `decision: FAIL verdict=ABSTAIN code=invalid_output` | the live answer did not pass the gate question check; retry, and on a repeat send `--save-raw` |
+| `decision: auth` | the key is missing/wrong or the quota is exhausted; check `VENDING_SECRET_CONN_DREX_APIKEY` |
+| `candles: invalid_request` | the symbol/interval is not accepted by Binance; check `--symbol BTCUSDT` |
+| `candles: ip_banned` | the IP is banned; do not retry, change the network |
+| `events: 0` after 5 minutes | `serve` is not running or looks at another `--data-dir` |
+| `labeled: 0` after 8 minutes | no manual 1m request, not enough closed bars, no network or a wrong `--data-dir`; check `lastCycleError` |
+| `verdicts: ABSTAIN=<n>` | the provider failed; the cause code is in `gate.verdict` (`provider_auth`, `provider_unavailable`, `invalid_output`, `provider_misconfigured`) |
+| `lastCycleError` is not empty | the cycle keeps running; the error repeats every interval — include the text in the report |
+| `journal chain broken at seq N` | the journal is damaged; do not continue, save the file and report |
 
-## Итог проверки
+Recent notifications without stopping `serve`:
 
-Запишите: дату/время (UTC), версию, префикс policy, число событий, меток и
-вердиктов, коды `doctor --live`, результат `journal verify`. Эти данные —
-вход в G1 и в решение о следующей итерации клина.
+```bash
+vend journal tail --kind notify.sent --limit 20
+```
+
+A line is `seq ts kind decisionId`, without the payload. `--json` shows the
+payload (including `ok` and `uptoSeq`): `ok: false` means a failed send. The
+command only reads the journal and does not verify the chain — use
+`vend journal verify` for that.
+
+## Result of the check
+
+Record: date/time (UTC), version, policy prefix, the number of events, labels
+and verdicts, the `doctor --live` codes, the `journal verify` result. This data
+is the input to G1 and to the decision about the next iteration of the wedge.

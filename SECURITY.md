@@ -1,41 +1,44 @@
 # Security Policy
 
-## Что считается уязвимостью
+[Русская версия](SECURITY.ru.md)
 
-- обход `RiskGate`, исполнение ордера без проверок, повышение лимитов без approve;
-- утечка API-ключей, токенов, приватных ключей или персональных данных;
-- обход live-unlock, kill switch или approve-очереди;
-- подмена рыночных данных/филлов, влияющая на решения;
-- prompt injection, приводящий к действию с деньгами;
-- удалённое выполнение кода через провайдерский пак, стратегию WASM или API;
-- подмена обновлений/артефактов релиза.
+## What counts as a vulnerability
 
-## Как сообщить
+- bypassing `RiskGate`, executing an order without checks, raising limits without approval;
+- leaking API keys, tokens, private keys or personal data;
+- bypassing live-unlock, the kill switch or the approval queue;
+- tampering with market data/fills in a way that affects decisions;
+- prompt injection that leads to an action with money;
+- remote code execution through a provider pack, a WASM strategy or the API;
+- substitution of release updates/artifacts.
 
-Приватно: `security@lv24.by` (или GitHub Security Advisory в этом репозитории).
-Не открывайте публичный issue до исправления.
+## How to report
 
-В сообщении: версия/коммит, конфигурация (paper/live), шаги воспроизведения,
-влияние, логи без секретов.
+Privately: `security@lv24.by` (or a GitHub Security Advisory in this
+repository). Do not open a public issue before the fix.
 
-## Что мы делаем
+In the report: version/commit, configuration (paper/live), reproduction steps,
+impact, logs without secrets.
 
-- Подтверждаем получение в течение 72 часов.
-- Готовим исправление и релиз; координируем раскрытие.
-- Указываем автора в заметках к релизу (если не просил анонимности).
+## What we do
 
-## Область
+- Confirm receipt within 72 hours.
+- Prepare a fix and a release; coordinate disclosure.
+- Credit the reporter in the release notes (unless anonymity was requested).
 
-В scope: код в этом репозитории, релизные артефакты, контракты, провайдерские
-паки, WASM-рантайм, desktop-шелл, mobile-приложение.
+## Scope
 
-Вне scope: сторонние биржи/брокеры, их API и политики; модели LLM/decision-
-провайдеров; инфраструктура пользователя.
+In scope: the code in this repository, release artifacts, contracts, provider
+packs, the WASM runtime, the desktop shell, the mobile app.
 
-## Правила для контрибьюторов
+Out of scope: third-party exchanges/brokers, their APIs and policies;
+LLM/decision-provider models; the user's infrastructure.
 
-- Никаких секретов в коде, тестах, фикстурах и истории git.
-- Деньги — только `Decimal`, никаких `float`.
-- Любой путь к бирже — только через `OrderIntent → RiskGate → OMS`.
-- AGPL/GPL-зависимости в ядре и mobile запрещены (см. `docs/adr/0007`).
-- Тесты не ходят в реальные биржи и не используют реальные ключи.
+## Rules for contributors
+
+- No secrets in code, tests, fixtures or git history.
+- Money — `Decimal` only, no `float`.
+- Any path to an exchange — only through `OrderIntent → RiskGate → OMS`.
+- AGPL/GPL dependencies in the core and mobile are forbidden (see
+  `docs/adr/0007`).
+- Tests do not call real exchanges and do not use real keys.
