@@ -57,6 +57,10 @@ file and fails on any difference.
 The example was checked against minimal `IStrategy` and `DataFrame` interface
 stubs written in the test; the author has not run it with real Freqtrade.
 
+Checked against the Freqtrade documentation (freqtrade.io, version `stable`),
+2026-11-17: the `confirm_trade_entry` signature, the
+`get_analyzed_dataframe(pair, timeframe)` tuple and `self.timeframe`.
+
 <!-- vend-example: examples/freqtrade/vend_shadow_gate.py -->
 ```python
 """Freqtrade strategy that reports entries to the local LV24 shadow gate.

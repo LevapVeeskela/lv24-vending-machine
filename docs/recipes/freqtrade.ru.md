@@ -52,6 +52,10 @@ curl -s http://127.0.0.1:8420/healthz
 Пример проверен на минимальных заглушках интерфейсов `IStrategy` и
 `DataFrame`, написанных в тесте; с настоящим Freqtrade автор его не запускал.
 
+Сверено с документацией Freqtrade (freqtrade.io, версия `stable`), 2026-11-17:
+сигнатура `confirm_trade_entry`, пара `get_analyzed_dataframe(pair, timeframe)`
+и доступность `self.timeframe`.
+
 <!-- vend-example: examples/freqtrade/vend_shadow_gate.py -->
 ```python
 """Freqtrade strategy that reports entries to the local LV24 shadow gate.
