@@ -4,6 +4,7 @@
 package e2e
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -87,21 +88,60 @@ func TestFailureDumpStepRecordsNameAndTime(t *testing.T) {
 }
 
 // TestFailureDumpKeepsFailedRunAndDropsPassingRun: the directory survives a
-// failure and is removed after a success.
+// failure, its path is announced, and a success removes it without a notice.
 func TestFailureDumpKeepsFailedRunAndDropsPassingRun(t *testing.T) {
 	failedDir := t.TempDir()
-	failed := &harness{t: t, dir: failedDir, started: time.Now()}
+	var failedNotice bytes.Buffer
+	failed := &harness{t: t, dir: failedDir, started: time.Now(), notice: &failedNotice}
 	failed.writeFile("vend-serve.stdout.log", "starting on http://127.0.0.1:1\n")
 	failed.report(true)
 	if _, err := os.Stat(filepath.Join(failedDir, "summary.txt")); err != nil {
 		t.Fatalf("a failed run kept no summary: %v", err)
 	}
+	if !strings.Contains(failedNotice.String(), failedDir) {
+		t.Fatalf("the failure notice %q does not name %s", failedNotice.String(), failedDir)
+	}
 
 	passedDir := t.TempDir()
-	passed := &harness{t: t, dir: passedDir, started: time.Now()}
+	var passedNotice bytes.Buffer
+	passed := &harness{t: t, dir: passedDir, started: time.Now(), notice: &passedNotice}
 	passed.writeFile("vend-serve.stdout.log", "starting\n")
 	passed.report(false)
 	if _, err := os.Stat(passedDir); !os.IsNotExist(err) {
 		t.Fatalf("a passing run left %s behind: %v", passedDir, err)
+	}
+	if passedNotice.Len() != 0 {
+		t.Fatalf("a passing run printed a failure notice: %q", passedNotice.String())
+	}
+}
+
+// TestFailureDumpKeepsReplacedProcessOutput: the output of a process that was
+// replaced during the run (vend serve before the restart step) is kept next
+// to the current one, redacted like every other artifact.
+func TestFailureDumpKeepsReplacedProcessOutput(t *testing.T) {
+	dir := t.TempDir()
+	before := &process{name: "vend"}
+	before.stdout.Write([]byte("first instance, token " + testSecret + "\n"))
+	before.stderr.Write([]byte("first instance stderr\n"))
+	current := &process{name: "vend"}
+	current.stdout.Write([]byte("second instance\n"))
+
+	h := &harness{t: t, dir: dir, procs: []*process{before, current}, vend: current}
+	h.addSecret(testSecret)
+	h.collectEarlier()
+
+	raw, err := os.ReadFile(filepath.Join(dir, "earlier-00-vend.stdout.log"))
+	if err != nil {
+		t.Fatalf("the replaced process left no stdout file: %v", err)
+	}
+	if !strings.Contains(string(raw), "first instance") || strings.Contains(string(raw), testSecret) {
+		t.Fatalf("earlier stdout = %q, want the redacted first instance output", raw)
+	}
+	raw, err = os.ReadFile(filepath.Join(dir, "earlier-00-vend.stderr.log"))
+	if err != nil || !strings.Contains(string(raw), "first instance stderr") {
+		t.Fatalf("earlier stderr = %q (%v), want the first instance stderr", raw, err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "earlier-01-vend.stdout.log")); !os.IsNotExist(err) {
+		t.Fatalf("the current process was dumped as an earlier one: %v", err)
 	}
 }

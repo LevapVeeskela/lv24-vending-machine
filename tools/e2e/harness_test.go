@@ -49,6 +49,10 @@ type harness struct {
 	secrets []string
 	steps   []string
 	procs   []*process
+	// notice receives the one-line pointer to the kept directory; nil means
+	// os.Stderr. Tests of the dump itself set it, so a passing run of the
+	// package never prints a failure notice.
+	notice io.Writer
 
 	vendPath   string
 	vend       *process
@@ -130,7 +134,11 @@ func (h *harness) report(failed bool) {
 		return
 	}
 	h.t.Logf("failure diagnostics written to %s", h.dir)
-	fmt.Fprintf(os.Stderr, "\nE2E failure diagnostics: %s\n", h.dir)
+	out := h.notice
+	if out == nil {
+		out = os.Stderr
+	}
+	fmt.Fprintf(out, "\nE2E failure diagnostics: %s\n", h.dir)
 }
 
 // collect copies the evidence of the failed run. Every write is redacted.
@@ -139,12 +147,27 @@ func (h *harness) collect() {
 	h.writeFile("vend-serve.stderr.log", processStderr(h.vend))
 	h.writeFile("smokestub.stdout.log", processStdout(h.stub))
 	h.writeFile("smokestub.stderr.log", processStderr(h.stub))
+	h.collectEarlier()
 	h.collectStats()
 	h.collectCLI("vend-status", "status", "--json")
 	h.collectCLI("vend-journal-tail", "journal", "tail", "--json",
 		"--limit", fmt.Sprintf("%d", journalDumpLimit))
 	h.collectConfig()
 	h.writeFile("summary.txt", h.summary())
+}
+
+// collectEarlier saves the output of every process that was replaced during
+// the run, such as the vend serve instance stopped by the restart step. A
+// failure after the restart is often explained by what ran before it.
+func (h *harness) collectEarlier() {
+	for i, p := range h.procs {
+		if p == h.vend || p == h.stub {
+			continue
+		}
+		prefix := fmt.Sprintf("earlier-%02d-%s", i, p.name)
+		h.writeFile(prefix+".stdout.log", processStdout(p))
+		h.writeFile(prefix+".stderr.log", processStderr(p))
+	}
 }
 
 // collectStats saves the raw /ctl/stats answer of the stub.
