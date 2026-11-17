@@ -12,9 +12,12 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf16"
+	"unicode/utf8"
 
 	"github.com/LevapVeeskela/lv24-vending-machine/core/domain"
 	"github.com/LevapVeeskela/lv24-vending-machine/core/ports"
@@ -147,7 +150,7 @@ func TestSendStatusMapping(t *testing.T) {
 		{name: "rate limit without hint", status: 429, body: `{"ok":false}`, code: domain.CodeRateLimit, retryable: true},
 		{name: "server error", status: 500, body: `{"ok":false}`, code: domain.CodeUnavailable, retryable: true},
 		{name: "service unavailable", status: 503, body: `{"ok":false}`, code: domain.CodeUnavailable, retryable: true},
-		{name: "bad request", status: 400, body: `{"ok":false}`, code: domain.CodeInvalidOutput},
+		{name: "bad request", status: 400, body: `{"ok":false}`, code: domain.CodeInvalidRequest},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -261,7 +264,7 @@ func TestLocalRateLimit(t *testing.T) {
 	var hits atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		hits.Add(1)
-		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"ok":true,"result":{"message_id":7}}`)
 	}))
 	defer srv.Close()
 
@@ -301,7 +304,7 @@ func TestRateLimitWindowAdvances(t *testing.T) {
 	var hits atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		hits.Add(1)
-		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"ok":true,"result":{"message_id":7}}`)
 	}))
 	defer srv.Close()
 
@@ -374,7 +377,7 @@ func TestEmptyTextRejected(t *testing.T) {
 	var hits atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		hits.Add(1)
-		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"ok":true,"result":{"message_id":7}}`)
 	}))
 	defer srv.Close()
 
@@ -472,4 +475,243 @@ func TestDescriptor(t *testing.T) {
 	if len(d.ConfigFields) != 3 {
 		t.Errorf("ConfigFields = %+v, want 3", d.ConfigFields)
 	}
+}
+
+// testUnits counts UTF-16 code units, the unit of the Bot API 4096 limit.
+func testUnits(s string) int {
+	n := 0
+	for _, r := range s {
+		width := utf16.RuneLen(r)
+		if width < 0 {
+			width = 1
+		}
+		n += width
+	}
+	return n
+}
+
+// longMultipartText is well above 4096 UTF-16 units and contains Cyrillic and
+// an emoji so a broken split would show up as invalid UTF-8.
+func longMultipartText() string {
+	var b strings.Builder
+	for i := 0; i < 200; i++ {
+		fmt.Fprintf(&b, "Строка %03d: цена выросла на 1.5%% 🙂\n", i)
+	}
+	return b.String()
+}
+
+// TestSendDeliversOKFalseAsError checks that a 200 response with ok=false is
+// never reported as a delivered message and is mapped by its error_code.
+func TestSendDeliversOKFalseAsError(t *testing.T) {
+	cases := []struct {
+		name       string
+		body       string
+		code       domain.ErrorCode
+		retryable  bool
+		retryAfter time.Duration
+	}{
+		{
+			name: "bad request",
+			body: `{"ok":false,"error_code":400,"description":"Bad Request: chat not found"}`,
+			code: domain.CodeInvalidRequest,
+		},
+		{
+			name: "rate limit",
+			body: `{"ok":false,"error_code":429,"parameters":{"retry_after":9}}`,
+			code: domain.CodeRateLimit, retryable: true, retryAfter: 9 * time.Second,
+		},
+		{name: "unauthorized", body: `{"ok":false,"error_code":401}`, code: domain.CodeAuth},
+		{name: "no error code", body: `{"ok":false}`, code: domain.CodeInvalidOutput},
+		{name: "malformed json", body: `not json`, code: domain.CodeInvalidOutput},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer srv.Close()
+
+			p := newProvider(t, srv.URL, ports.Deps{Secrets: &fakeSecrets{value: testToken}})
+			err := p.Send(t.Context(), ports.Notification{Text: "hello"})
+			if err == nil {
+				t.Fatal("Send = nil error, want a delivery failure")
+			}
+			if got := domain.CodeOf(err); got != tc.code {
+				t.Fatalf("code = %q, want %q (err %v)", got, tc.code, err)
+			}
+			if domain.IsRetryable(err) != tc.retryable {
+				t.Errorf("IsRetryable = %v, want %v", domain.IsRetryable(err), tc.retryable)
+			}
+			if got := domain.RetryAfterOf(err); got != tc.retryAfter {
+				t.Errorf("RetryAfter = %s, want %s", got, tc.retryAfter)
+			}
+			assertSanitized(t, "error", err.Error())
+		})
+	}
+}
+
+// TestSendSplitsLongText checks that text above 4096 UTF-16 units is split on
+// line boundaries, never breaks UTF-8, and is sent under a single local
+// rate-limit reservation.
+func TestSendSplitsLongText(t *testing.T) {
+	text := longMultipartText()
+	if got := testUnits(text); got <= 4096 {
+		t.Fatalf("fixture units = %d, want > 4096", got)
+	}
+	var mu sync.Mutex
+	var parts []string
+	var parseModes []any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read body: %v", err)
+		}
+		var body map[string]any
+		if err := json.Unmarshal(raw, &body); err != nil {
+			t.Errorf("decode body: %v", err)
+		}
+		part, _ := body["text"].(string)
+		mu.Lock()
+		parts = append(parts, part)
+		parseModes = append(parseModes, body["parse_mode"])
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"ok":true,"result":{"message_id":7}}`)
+	}))
+	defer srv.Close()
+
+	// A one-minute interval proves the split parts share one reservation: a
+	// per-part reserve would rate-limit the second message.
+	p, err := notifytelegram.New(notifytelegram.Config{
+		ChatID:      testChatID,
+		BaseURL:     srv.URL,
+		Timeout:     5 * time.Second,
+		MinInterval: time.Minute,
+	}, ports.Deps{Secrets: &fakeSecrets{value: testToken}})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := p.Send(t.Context(), ports.Notification{Text: text}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(parts) < 2 {
+		t.Fatalf("parts = %d, want at least 2", len(parts))
+	}
+	var joined strings.Builder
+	for i, part := range parts {
+		if units := testUnits(part); units > 4096 {
+			t.Errorf("part %d units = %d, want <= 4096", i, units)
+		}
+		if !utf8.ValidString(part) {
+			t.Errorf("part %d is not valid UTF-8", i)
+		}
+		if strings.ContainsRune(part, utf8.RuneError) {
+			t.Errorf("part %d contains a replacement rune", i)
+		}
+		joined.WriteString(part)
+	}
+	if got := joined.String(); got != text {
+		t.Errorf("joined text differs from the original (%d vs %d bytes)", len(got), len(text))
+	}
+	if !strings.HasSuffix(parts[0], "\n") {
+		t.Errorf("first part does not end on a line boundary: %q", parts[0][len(parts[0])-20:])
+	}
+	for i, mode := range parseModes {
+		if mode != nil {
+			t.Errorf("part %d parse_mode = %v, want unset", i, mode)
+		}
+	}
+}
+
+// TestSendSplitsEmojiWithoutBreakingRunes checks a hard split of a string
+// without line or word breaks: surrogate pairs must stay intact.
+func TestSendSplitsEmojiWithoutBreakingRunes(t *testing.T) {
+	const emojiCount = 3000 // 6000 UTF-16 units
+	text := strings.Repeat("🙂", emojiCount)
+	var mu sync.Mutex
+	var parts []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Text string `json:"text"`
+		}
+		raw, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read body: %v", err)
+		}
+		if err := json.Unmarshal(raw, &body); err != nil {
+			t.Errorf("decode body: %v", err)
+		}
+		mu.Lock()
+		parts = append(parts, body.Text)
+		mu.Unlock()
+		_, _ = io.WriteString(w, `{"ok":true,"result":{"message_id":7}}`)
+	}))
+	defer srv.Close()
+
+	p := newProvider(t, srv.URL, ports.Deps{Secrets: &fakeSecrets{value: testToken}})
+	if err := p.Send(t.Context(), ports.Notification{Text: text}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(parts) != 2 {
+		t.Fatalf("parts = %d, want 2", len(parts))
+	}
+	var joined strings.Builder
+	for i, part := range parts {
+		if units := testUnits(part); units > 4096 {
+			t.Errorf("part %d units = %d, want <= 4096", i, units)
+		}
+		if !utf8.ValidString(part) {
+			t.Errorf("part %d is not valid UTF-8", i)
+		}
+		if got := strings.Count(part, "🙂"); got*2 != testUnits(part) {
+			t.Errorf("part %d split an emoji (runes %d, units %d)", i, got, testUnits(part))
+		}
+		joined.WriteString(part)
+	}
+	if got := joined.String(); got != text {
+		t.Errorf("joined text differs from the original")
+	}
+}
+
+// TestSendMultipartFailurePropagates checks that a failed later part is an
+// error and does not hide which part failed.
+func TestSendMultipartFailurePropagates(t *testing.T) {
+	var mu sync.Mutex
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		hits++
+		attempt := hits
+		mu.Unlock()
+		if attempt == 1 {
+			_, _ = io.WriteString(w, `{"ok":true,"result":{"message_id":7}}`)
+			return
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"ok":false,"error_code":400,"description":"Bad Request"}`)
+	}))
+	defer srv.Close()
+
+	p := newProvider(t, srv.URL, ports.Deps{Secrets: &fakeSecrets{value: testToken}})
+	err := p.Send(t.Context(), ports.Notification{Text: longMultipartText()})
+	if err == nil {
+		t.Fatal("Send = nil error, want the second part to fail")
+	}
+	if got := domain.CodeOf(err); got != domain.CodeInvalidRequest {
+		t.Fatalf("code = %q, want invalid_request (err %v)", got, err)
+	}
+	if !strings.Contains(err.Error(), "part 2 of 2") {
+		t.Errorf("error = %q, want it to name the failed part", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if hits != 2 {
+		t.Errorf("hits = %d, want 2", hits)
+	}
+	assertSanitized(t, "error", err.Error())
 }
