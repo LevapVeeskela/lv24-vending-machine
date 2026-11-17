@@ -5,6 +5,10 @@ by minimal interface stubs written here, so the real packages are neither
 imported nor required. Every HTTP call goes to a loopback server bound to
 127.0.0.1 on a free port.
 
+Waiting is event-driven: the sender exposes ``wait_until_idle``, the handler
+reports when it is entered and blocks on an event. No test waits for a fixed
+duration to synchronize.
+
 Run from the repository root:
 
     python -m unittest discover -s examples -p "test_*.py"
@@ -147,13 +151,22 @@ def gate_required_fields() -> list[str]:
 
 
 class RecordingHandler(BaseHTTPRequestHandler):
-    """Record one request and answer with the configured status and body."""
+    """Record requests and answer with the configured status and body.
+
+    When ``server.hold`` is an unset event, the handler reports that it was
+    entered and waits for the event before recording and answering. Tests use
+    it to hold the sender inside a request without sleeping.
+    """
 
     protocol_version = "HTTP/1.1"
 
     def do_POST(self) -> None:
         length = int(self.headers.get("Content-Length") or 0)
         raw = self.rfile.read(length)
+        hold = self.server.hold  # type: ignore[attr-defined]
+        if hold is not None:
+            self.server.entered.set()  # type: ignore[attr-defined]
+            hold.wait(self.server.hold_timeout)  # type: ignore[attr-defined]
         self.server.requests.append(  # type: ignore[attr-defined]
             {
                 "method": self.command,
@@ -178,12 +191,27 @@ class RecordingHandler(BaseHTTPRequestHandler):
         pass
 
 
+class FlakyClient:
+    """Stand-in for VendGate whose first send raises."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def send_and_wait(self, payload: dict) -> None:
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("gate failed")
+
+
 class VendShadowGateTest(unittest.TestCase):
     def setUp(self) -> None:
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), RecordingHandler)
         self.server.daemon_threads = True
         self.server.requests = []
         self.server.received = threading.Event()
+        self.server.entered = threading.Event()
+        self.server.hold = None
+        self.server.hold_timeout = 5.0
         self.server.response_status = 200
         self.server.response_body = json.dumps(VERDICT_BODY).encode("utf-8")
         self._thread = threading.Thread(
@@ -199,6 +227,9 @@ class VendShadowGateTest(unittest.TestCase):
         self.addCleanup(os.environ.pop, "VEND_GATE_URL", None)
 
     def _stop_server(self) -> None:
+        hold = self.server.hold
+        if hold is not None:
+            hold.set()
         self.server.shutdown()
         self.server.server_close()
         self._thread.join(5)
@@ -207,15 +238,26 @@ class VendShadowGateTest(unittest.TestCase):
         os.environ["VEND_GATE_TOKEN"] = TOKEN
         os.environ["VEND_GATE_URL"] = url or self.base_url
 
+    def hold_gate(self) -> threading.Event:
+        """Make the handler wait before recording and answering."""
+        hold = threading.Event()
+        self.server.hold = hold
+        self.addCleanup(hold.set)
+        return hold
+
     def strategy(self) -> vend_shadow_gate.VendShadowGate:
         return vend_shadow_gate.VendShadowGate()
 
-    def confirm(self, strategy: vend_shadow_gate.VendShadowGate) -> bool:
+    def confirm(
+        self,
+        strategy: vend_shadow_gate.VendShadowGate,
+        rate: float = 97500.5,
+    ) -> bool:
         return strategy.confirm_trade_entry(
             pair=PAIR,
             order_type="limit",
             amount=0.01,
-            rate=97500.5,
+            rate=rate,
             time_in_force="GTC",
             current_time=datetime.now(timezone.utc),
             entry_tag=None,
@@ -233,24 +275,23 @@ class VendShadowGateTest(unittest.TestCase):
         strategy.dp = FakeDataProvider(dataframe, error)
         return strategy
 
+    def settle(self, strategy: vend_shadow_gate.VendShadowGate, count: int) -> None:
+        """Wait until the sender is idle and assert how many requests arrived."""
+        self.assertTrue(strategy.wait_until_idle(5.0), "sender did not drain")
+        self.assertEqual(len(self.server.requests), count)
+
     def posted_body(self, strategy: vend_shadow_gate.VendShadowGate) -> dict:
         """Confirm one entry and return the gate request body it sent."""
         self.assertTrue(self.confirm(strategy))
-        self.wait_for_requests(1)
+        self.settle(strategy, 1)
         return json.loads(self.server.requests[0]["body"])
-
-    def wait_for_requests(self, count: int, timeout: float = 5.0) -> None:
-        deadline = time.monotonic() + timeout
-        while len(self.server.requests) < count and time.monotonic() < deadline:
-            self.server.received.wait(0.05)
-            self.server.received.clear()
-        self.assertEqual(len(self.server.requests), count)
 
     def test_confirm_trade_entry_posts_one_valid_gate_request(self) -> None:
         self.use_gate()
+        strategy = self.strategy()
 
-        self.assertTrue(self.confirm(self.strategy()))
-        self.wait_for_requests(1)
+        self.assertTrue(self.confirm(strategy))
+        self.settle(strategy, 1)
 
         request = self.server.requests[0]
         self.assertEqual(request["method"], "POST")
@@ -327,46 +368,135 @@ class VendShadowGateTest(unittest.TestCase):
 
         self.assertTrue(self.confirm(strategy))
         self.assertTrue(self.confirm(strategy))
-        self.wait_for_requests(2)
+        self.settle(strategy, 2)
 
         first = json.loads(self.server.requests[0]["body"])["signalId"]
         second = json.loads(self.server.requests[1]["body"])["signalId"]
         self.assertNotEqual(first, second)
 
-    def test_closed_port_does_not_block_and_respects_timeout(self) -> None:
+    def test_sender_is_one_lazy_daemon_thread(self) -> None:
+        self.use_gate()
+        strategy = self.strategy()
+
+        self.assertFalse(hasattr(strategy, "_vend_sender"))
+        self.assertTrue(self.confirm(strategy))
+        sender = strategy._vend_sender
+        self.assertTrue(sender._thread.daemon)
+        self.assertTrue(self.confirm(strategy))
+        self.assertIs(strategy._vend_sender, sender)
+        self.settle(strategy, 2)
+
+    def test_confirm_returns_while_send_is_blocked(self) -> None:
+        self.use_gate()
+        self.hold_gate()
+        strategy = self.strategy()
+
+        started = time.monotonic()
+        self.assertTrue(self.confirm(strategy))
+        elapsed = time.monotonic() - started
+
+        self.assertLess(elapsed, vend_shadow_gate.GATE_TIMEOUT_SECONDS)
+        self.assertTrue(self.server.entered.wait(5.0), "sender did not reach the gate")
+        self.assertEqual(self.server.requests, [])
+
+    def test_signal_arrives_after_gate_unblocks(self) -> None:
+        self.use_gate()
+        hold = self.hold_gate()
+        strategy = self.strategy()
+
+        self.assertTrue(self.confirm(strategy))
+        self.assertTrue(self.server.entered.wait(5.0), "sender did not reach the gate")
+        self.assertEqual(self.server.requests, [])
+
+        hold.set()
+
+        self.assertTrue(strategy.wait_until_idle(5.0))
+        self.assertEqual(len(self.server.requests), 1)
+
+    def test_order_of_two_signals_is_preserved(self) -> None:
+        self.use_gate()
+        strategy = self.strategy()
+
+        self.assertTrue(self.confirm(strategy, rate=100.0))
+        self.assertTrue(self.confirm(strategy, rate=200.0))
+        self.settle(strategy, 2)
+
+        prices = [json.loads(request["body"])["price"] for request in self.server.requests]
+        self.assertEqual(prices, ["100.00000000", "200.00000000"])
+
+    def test_full_queue_drops_extra_signal_and_allows_entry(self) -> None:
+        self.use_gate()
+        original_size = vend_shadow_gate.GATE_QUEUE_SIZE
+        vend_shadow_gate.GATE_QUEUE_SIZE = 2
+        self.addCleanup(setattr, vend_shadow_gate, "GATE_QUEUE_SIZE", original_size)
+        hold = self.hold_gate()
+        strategy = self.strategy()
+
+        self.assertTrue(self.confirm(strategy, rate=1.0))
+        self.assertTrue(self.server.entered.wait(5.0), "sender did not reach the gate")
+        # One request is in flight; the queue holds two more.
+        self.assertTrue(self.confirm(strategy, rate=2.0))
+        self.assertTrue(self.confirm(strategy, rate=3.0))
+        # The queue is full: this signal is dropped and the call still returns.
+        self.assertTrue(self.confirm(strategy, rate=4.0))
+
+        hold.set()
+
+        self.assertTrue(strategy.wait_until_idle(5.0))
+        prices = [json.loads(request["body"])["price"] for request in self.server.requests]
+        self.assertEqual(prices, ["1.00000000", "2.00000000", "3.00000000"])
+
+    def test_send_failure_does_not_kill_sender(self) -> None:
+        self.use_gate()
+        strategy = self.strategy()
+        client = FlakyClient()
+        strategy._vend_gate = client
+
+        self.assertTrue(self.confirm(strategy, rate=1.0))
+        self.assertTrue(strategy.wait_until_idle(5.0))
+        self.assertTrue(self.confirm(strategy, rate=2.0))
+        self.assertTrue(strategy.wait_until_idle(5.0))
+
+        self.assertEqual(client.calls, 2)
+        self.assertEqual(self.server.requests, [])
+
+    def test_closed_port_does_not_block(self) -> None:
         probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
         probe.close()
         self.use_gate(f"http://127.0.0.1:{port}")
+        strategy = self.strategy()
 
-        started = time.monotonic()
-        self.assertTrue(self.confirm(self.strategy()))
-        elapsed = time.monotonic() - started
-        self.assertLess(elapsed, vend_shadow_gate.GATE_TIMEOUT_SECONDS + 0.5)
+        self.assertTrue(self.confirm(strategy))
+        self.assertTrue(strategy.wait_until_idle(5.0))
 
     def test_unauthorized_does_not_block(self) -> None:
         self.server.response_status = 401
         self.server.response_body = json.dumps({"code": "unauthorized"}).encode("utf-8")
         self.use_gate()
+        strategy = self.strategy()
 
-        self.assertTrue(self.confirm(self.strategy()))
-        self.wait_for_requests(1)
+        self.assertTrue(self.confirm(strategy))
+        self.settle(strategy, 1)
 
     def test_server_error_does_not_block(self) -> None:
         self.server.response_status = 500
         self.server.response_body = json.dumps({"code": "internal"}).encode("utf-8")
         self.use_gate()
+        strategy = self.strategy()
 
-        self.assertTrue(self.confirm(self.strategy()))
-        self.wait_for_requests(1)
+        self.assertTrue(self.confirm(strategy))
+        self.settle(strategy, 1)
 
     def test_missing_token_disables_reporting(self) -> None:
         os.environ.pop("VEND_GATE_TOKEN", None)
         os.environ["VEND_GATE_URL"] = self.base_url
+        strategy = self.strategy()
 
-        self.assertTrue(self.confirm(self.strategy()))
-        time.sleep(0.2)
+        self.assertTrue(self.confirm(strategy))
+
+        self.assertFalse(hasattr(strategy, "_vend_sender"))
         self.assertEqual(self.server.requests, [])
 
     def test_token_is_not_printed_or_logged(self) -> None:
@@ -381,15 +511,17 @@ class VendShadowGateTest(unittest.TestCase):
         root = logging.getLogger()
         root.addHandler(handler)
         self.addCleanup(root.removeHandler, handler)
+        strategy = self.strategy()
 
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            self.assertTrue(self.confirm(self.strategy()))
-            self.wait_for_requests(1)
+            self.assertTrue(self.confirm(strategy))
+            self.assertTrue(strategy.wait_until_idle(5.0))
             self.server.response_status = 401
-            self.assertTrue(self.confirm(self.strategy()))
-            self.wait_for_requests(2)
+            self.assertTrue(self.confirm(strategy))
+            self.assertTrue(strategy.wait_until_idle(5.0))
 
+        self.assertEqual(len(self.server.requests), 2)
         captured = out.getvalue() + err.getvalue()
         captured += "".join(record.getMessage() for record in records)
         self.assertNotIn(TOKEN, captured)
