@@ -38,20 +38,33 @@ curl -s http://127.0.0.1:8420/healthz
 
 ## 2. Положить клиент рядом со стратегией
 
-Скопируйте `vend_gate.py` в каталог `user_data/strategies/` (или добавьте его
-путь в `sys.path`) и создайте файл стратегии, например
-`user_data/strategies/vend_shadow_gate.py`.
+Скопируйте `vend_gate.py` и `vend_shadow_gate.py` из `examples/freqtrade/` в
+каталог `user_data/strategies/` (или добавьте оба пути в `sys.path`).
 
 ## 3. Минимальная стратегия
 
-Сигнал намеренно простой: две скользящие средние. Важна не логика входа, а
-хук `confirm_trade_entry`.
+Готовый файл — [`examples/freqtrade/vend_shadow_gate.py`](../../examples/freqtrade/vend_shadow_gate.py).
+Ниже он приведён целиком; тест `examples/freqtrade/test_vend_shadow_gate.py`
+сверяет этот блок с файлом и падает при расхождении.
 
+Пример проверен на минимальных заглушках интерфейсов `IStrategy` и
+`DataFrame`, написанных в тесте; с настоящим Freqtrade автор его не запускал.
+
+<!-- vend-example: examples/freqtrade/vend_shadow_gate.py -->
 ```python
 """Freqtrade strategy that reports entries to the local LV24 shadow gate.
 
-Written from scratch for the public IStrategy interface; no Freqtrade
-source is vendored here.
+Written from scratch for the public IStrategy interface; no Freqtrade source
+is vendored here. The gate is advisory in M1: ``confirm_trade_entry`` always
+returns True, and a missing, slow or failing gate never blocks a trade.
+
+Environment:
+    VEND_GATE_TOKEN  bearer token of the local gate; without it the strategy
+                     runs normally and sends nothing.
+    VEND_GATE_URL    gate origin, default ``http://127.0.0.1:8420``.
+
+Copy this file and ``vend_gate.py`` into your Freqtrade
+``user_data/strategies/`` directory. See ``docs/recipes/freqtrade.md``.
 """
 
 import os
@@ -66,6 +79,9 @@ from pandas import DataFrame
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from vend_gate import VendGate  # noqa: E402
 
+DEFAULT_GATE_URL = "http://127.0.0.1:8420"
+GATE_TIMEOUT_SECONDS = 2.0
+
 
 class VendShadowGate(IStrategy):
     timeframe = "1h"
@@ -75,12 +91,29 @@ class VendShadowGate(IStrategy):
     process_only_new_candles = True
     use_exit_signal = False
 
-    # Один клиент на процесс. Bearer-токен живёт только в памяти.
-    gate = VendGate(
-        base_url="http://127.0.0.1:8420",
-        token=os.environ["VEND_GATE_TOKEN"],
-        timeout=2.0,
-    )
+    def _gate(self) -> VendGate | None:
+        """Return the cached client, or None when reporting is not configured.
+
+        The token is read from the environment on first use and kept in
+        memory only. A missing token or an invalid URL disables reporting
+        instead of breaking the strategy.
+        """
+        client = getattr(self, "_vend_gate", None)
+        if client is not None:
+            return client
+        token = os.environ.get("VEND_GATE_TOKEN", "").strip()
+        if not token:
+            return None
+        try:
+            client = VendGate(
+                base_url=os.environ.get("VEND_GATE_URL", DEFAULT_GATE_URL),
+                token=token,
+                timeout=GATE_TIMEOUT_SECONDS,
+            )
+        except ValueError:
+            return None
+        self._vend_gate = client
+        return client
 
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         dataframe["ma_fast"] = dataframe["close"].rolling(12).mean()
@@ -108,27 +141,33 @@ class VendShadowGate(IStrategy):
         **kwargs,
     ) -> bool:
         payload = {
-            # Уникальный id на каждую попытку входа: повтор с тем же id и
-            # другим телом гейт отклонит.
+            # Unique per entry attempt: reusing an id with another body is a
+            # conflict on the gate side.
             "signalId": f"freqtrade-{uuid.uuid4().hex}",
-            # pair передаётся как есть; ядро канонизирует BTC/USDT, BTC-USDT,
-            # BTCUSDT и BTCUSDT:USDT в BTCUSDT.
+            # pair is sent exactly as Freqtrade gives it; the core
+            # canonicalises BTC/USDT, BTC-USDT, BTCUSDT and BTCUSDT:USDT.
             "instrument": {"venue": "freqtrade", "symbol": pair},
             "side": "buy" if side == "long" else "sell",
             "intentKind": "entry",
             "timeframe": self.timeframe,
-            # ts — момент сигнала, UTC.
+            # ts is the moment the signal became known, in UTC.
             "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            # Деньги на границе — строкой, не float.
+            # Money on the wire is a decimal string, not a float.
             "price": f"{float(rate):.8f}",
             "source": "freqtrade:VendShadowGate",
             "state": {},
         }
-        # Fire-and-forget: отправка в фоновом потоке, ответ не ждём.
-        self.gate.send(payload)
-        # Shadow: вход разрешён всегда, вердикт гейта только журналируется.
+        client = self._gate()
+        if client is not None:
+            try:
+                # Fire-and-forget: the answer is not awaited.
+                client.send(payload)
+            except Exception:  # noqa: BLE001 - the gate must never block a trade
+                pass
+        # Shadow mode: entries are always allowed; the verdict is journaled.
         return True
 ```
+<!-- /vend-example -->
 
 Если нужен реальный venue биржи, подставьте его в `instrument.venue`
 (например, из `self.config["exchange"]["name"]`), но не меняйте `pair`:
