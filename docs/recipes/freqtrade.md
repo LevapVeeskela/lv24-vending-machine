@@ -322,9 +322,12 @@ vend journal verify
 
 - `vend gate report` shows the accumulated verdicts and outcome labeling.
 - `vend journal verify` checks the integrity of the journal.
-- If the gate is off, busy, or answers longer than the timeout, the client
-  silently drops the call: trading continues, there is simply no record in
-  the journal.
+- If the gate is off or busy, the client silently drops the call: trading
+  continues, there is simply no record in the journal.
+- If the gate answers longer than the client timeout
+  (`GATE_TIMEOUT_SECONDS`, 2 seconds), the client stops waiting and trading
+  continues, but the gate still finishes the decision and records it in the
+  journal.
 
 ## 5. M1 limitations
 
@@ -335,6 +338,11 @@ vend journal verify
 - The client does not retry requests. A unique `signalId` is the strategy's
   responsibility.
 - One call is one HTTP POST to `127.0.0.1:8420`; no external network is used.
+- The call runs inside `confirm_trade_entry`, and the Freqtrade documentation
+  advises against network requests there because the callback is
+  time-critical. A slow gate delays the entry order by up to the client
+  timeout (2 seconds); lower `GATE_TIMEOUT_SECONDS` if your strategy cannot
+  afford that.
 - Live exchange keys are not needed for this recipe: `--dry-run` is enough.
 - Supported timeframes are a positive amount followed by a lowercase `m`, `h`,
   `d` or `w` (`5m`, `1h`, `4h`, `1d`, `1w`). The gate answers HTTP 400 to
