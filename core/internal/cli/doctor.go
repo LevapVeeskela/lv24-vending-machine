@@ -123,14 +123,35 @@ func (r *runner) cmdDoctor(args []string) int {
 		add("providers", false, err.Error())
 	} else {
 		reg = built
-		var ids []string
+		var ids, decisions []string
 		for _, d := range reg.Descriptors() {
+			if d.Kind == ports.KindDecision {
+				decisions = append(decisions, d.ID)
+			}
 			ids = append(ids, d.ID)
 		}
-		add("providers", true, strings.Join(ids, ", "))
+		// config validate cannot check the provider id: it does not see the
+		// provider registry. doctor is the preflight that does.
+		if _, err := reg.Decision(cfg.Providers.Decision.ID); err != nil {
+			registered := strings.Join(decisions, ", ")
+			if registered == "" {
+				registered = "(none)"
+			}
+			add("providers", false, fmt.Sprintf(
+				"unknown decision provider %q; registered: %s",
+				cfg.Providers.Decision.ID, registered))
+		} else {
+			add("providers", true, strings.Join(ids, ", "))
+		}
 	}
 
-	if cfgErr != nil {
+	// The loopback gate API refuses to start without its bearer token, so a
+	// missing token is a hard doctor failure, not a warning like the
+	// provider secret: doctor is the preflight for vend serve.
+	if r.getenv(localAPITokenEnv) == "" {
+		add("secrets", false, fmt.Sprintf(
+			"%s is not set; vend serve requires it", localAPITokenEnv))
+	} else if cfgErr != nil {
 		add("secrets", false, "config is unavailable")
 	} else {
 		name := config.SecretEnvName(cfg.Providers.Decision.SecretRef)

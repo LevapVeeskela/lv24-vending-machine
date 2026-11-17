@@ -258,6 +258,94 @@ func TestDoctorWithoutLiveMakesNoProviderCall(t *testing.T) {
 	}
 }
 
+func TestDoctorUnknownDecisionProvider(t *testing.T) {
+	env, stdout, stderr, cfgPath, dataDir := initTestEnv(t)
+	env.NewRegistry = liveRegistry(t, okDecision(), okCandles(), nil)
+
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	cfg.Providers.Decision.ID = "decision-unknown"
+	if err := config.Save(cfgPath, cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	// The provider id is registry knowledge: config validate still accepts it.
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("config.Validate() = %v, want nil", err)
+	}
+
+	if code := runArgs(env, "doctor", "--config", cfgPath, "--data-dir", dataDir); code != exitGeneral {
+		t.Fatalf("doctor unknown provider = %d, want %d, stdout=%s stderr=%s",
+			code, exitGeneral, stdout.String(), stderr.String())
+	}
+	got := stdout.String()
+	for _, want := range []string{
+		`unknown decision provider "decision-unknown"`,
+		"registered: decision-drex",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("stdout misses %q: %q", want, got)
+		}
+	}
+}
+
+func TestDoctorMissingLocalAPIToken(t *testing.T) {
+	env, stdout, _, cfgPath, dataDir := initTestEnv(t)
+	env.Getenv = func(string) string { return "" }
+	env.NewRegistry = liveRegistry(t, okDecision(), okCandles(), nil)
+
+	if code := runArgs(env, "doctor", "--config", cfgPath, "--data-dir", dataDir); code != exitGeneral {
+		t.Fatalf("doctor without local API token = %d, want %d, stdout=%s",
+			code, exitGeneral, stdout.String())
+	}
+	got := stdout.String()
+	if !strings.Contains(got, localAPITokenEnv) {
+		t.Fatalf("stdout misses %s: %q", localAPITokenEnv, got)
+	}
+	if !strings.Contains(got, "not set") {
+		t.Fatalf("stdout misses the not-set wording: %q", got)
+	}
+}
+
+// TestDoctorLiveMissingTokenStillRunsProbes checks that the token failure does
+// not stop the opt-in probes: the remaining checks still run and report their
+// own status.
+func TestDoctorLiveMissingTokenStillRunsProbes(t *testing.T) {
+	env, stdout, stderr, cfgPath, dataDir := initTestEnv(t)
+	env.Getenv = func(string) string { return "" }
+	dec, cd := okDecision(), okCandles()
+	env.NewRegistry = liveRegistry(t, dec, cd, nil)
+
+	if code := runArgs(env, "doctor", "--live", "--config", cfgPath, "--data-dir", dataDir); code != exitGeneral {
+		t.Fatalf("doctor --live without token = %d, want %d, stdout=%s stderr=%s",
+			code, exitGeneral, stdout.String(), stderr.String())
+	}
+	got := stdout.String()
+	if !strings.Contains(got, localAPITokenEnv) {
+		t.Fatalf("stdout misses %s: %q", localAPITokenEnv, got)
+	}
+	for _, want := range []string{"decision: ok", "candles: ok"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("stdout misses %q: %q", want, got)
+		}
+	}
+	if dec.calls != 1 || cd.calls != 1 {
+		t.Fatalf("probes = decision %d, candles %d, want 1 each", dec.calls, cd.calls)
+	}
+}
+
+func TestDefaultDecisionProviderRegistered(t *testing.T) {
+	env, stdout, stderr, cfgPath, dataDir := initTestEnv(t)
+	env.NewRegistry = liveRegistry(t, okDecision(), okCandles(), nil)
+	if code := runArgs(env, "doctor", "--config", cfgPath, "--data-dir", dataDir); code != 0 {
+		t.Fatalf("doctor = %d, stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "ok providers:") {
+		t.Fatalf("stdout misses the providers check: %q", stdout.String())
+	}
+}
+
 func TestDoctorLiveRequiresLiveFlag(t *testing.T) {
 	env, stdout, stderr, cfgPath, dataDir := initTestEnv(t)
 

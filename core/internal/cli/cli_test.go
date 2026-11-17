@@ -21,9 +21,16 @@ func testEnv(t *testing.T) (Env, *bytes.Buffer, *bytes.Buffer) {
 	t.Helper()
 	var stdout, stderr bytes.Buffer
 	return Env{
-		Stdout:  &stdout,
-		Stderr:  &stderr,
-		Getenv:  func(string) string { return "" },
+		Stdout: &stdout,
+		Stderr: &stderr,
+		Getenv: func(name string) string {
+			// doctor requires the loopback API token because serve cannot
+			// start without it; a missing-token test overrides Getenv.
+			if name == localAPITokenEnv {
+				return "test-token"
+			}
+			return ""
+		},
 		Version: "0.1.0-m0-test",
 		NewRegistry: func(cfg config.Config, logger *slog.Logger) (*registry.Registry, error) {
 			return registry.New(), nil
@@ -116,6 +123,7 @@ func TestCLIEndToEnd(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
+	env.NewRegistry = liveRegistry(t, okDecision(), okCandles(), nil)
 	if code := runArgs(env, "doctor", "--config", cfgPath, "--data-dir", dataDir); code != 0 {
 		t.Fatalf("doctor = %d, stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
@@ -290,6 +298,7 @@ func TestConfigValidateMissingFileHint(t *testing.T) {
 
 func TestDoctorJSON(t *testing.T) {
 	env, stdout, stderr, cfgPath, dataDir := initTestEnv(t)
+	env.NewRegistry = liveRegistry(t, okDecision(), okCandles(), nil)
 
 	if code := runArgs(env, "doctor", "--json", "--config", cfgPath, "--data-dir", dataDir); code != 0 {
 		t.Fatalf("doctor --json = %d, stderr=%s", code, stderr.String())
