@@ -18,7 +18,7 @@ tasks:
       - go build all
 
   test:
-    desc: Test all workspace modules
+    desc: Test all workspace modules (fast; e2e and the 7-day run are separate tasks)
     cmds:
       - task: test:core
       - task: test:providers
@@ -40,9 +40,34 @@ tasks:
         "$py" -m unittest discover -s examples -p "test_*.py"
 
   test:core:
-    desc: Test the core module
+    desc: Test the core module in -short mode (the 7-day simulation has its own task)
     cmds:
-      - go -C core test ./...
+      - go -C core test ./... -short
+
+  test:7d:
+    desc: Run the seven-day shadow simulation (slow, minutes; not part of `task check`)
+    cmds:
+      - go -C core test ./internal/app/shadow -run '^TestShadowSevenDays$' -count=1 -timeout 30m -v
+
+  test:race:
+    desc: Run the core tests with the race detector (skips the 7-day run; needs cgo)
+    cmds:
+      - |
+        cc="$(go env CC)"
+        set -- $cc
+        if [ "$(go env CGO_ENABLED)" != "1" ] || ! command -v "$1" >/dev/null 2>&1; then
+          echo "test:race needs cgo and a C compiler: CGO_ENABLED=$(go env CGO_ENABLED), CC=$cc." >&2
+          echo "Windows: install mingw-w64 (MSYS2, or WinLibs) and put gcc on PATH, then run with CGO_ENABLED=1." >&2
+          echo "Linux/macOS: install gcc or clang; cgo is usually enabled by default." >&2
+          echo "No race detector on this machine: use 'task test:core' instead." >&2
+          exit 1
+        fi
+        go -C core test -race -short ./...
+
+  test:e2e:
+    desc: HTTP+CLI end-to-end rehearsal against the local smokestub (slow, opt-in)
+    cmds:
+      - VEND_E2E=1 go -C tools test -count=1 ./e2e/...
 
   test:providers:
     desc: Test provider modules
@@ -77,9 +102,16 @@ tasks:
       - go run ./tools/lintimports
 
   check:
-    desc: gen:check + lint + test + build
+    desc: gen:check + lint + test + build (fast; see check:full)
     cmds:
       - task: gen:check
       - task: lint:imports
       - task: test
       - task: build
+
+  check:full:
+    desc: check plus the opt-in e2e rehearsal and the seven-day simulation
+    cmds:
+      - task: check
+      - task: test:e2e
+      - task: test:7d
