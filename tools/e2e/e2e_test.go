@@ -6,6 +6,10 @@
 // labeling window:
 //
 //	VEND_E2E=1 go -C tools test -count=1 ./e2e/...
+//
+// VEND_E2E_BIN points at a prebuilt vend binary (absolute, or relative to the
+// repository root). When it is set, the test runs that file instead of
+// building vend; tools/smokestub is always built.
 package e2e
 
 import (
@@ -163,6 +167,10 @@ func (p *process) stop() {
 // TestShadowGateE2E is the automated rehearsal: it builds vend and smokestub,
 // starts both on free loopback ports, and checks the gate, conflict, auth,
 // labeling, restart, report and secret behavior over HTTP and the CLI.
+// secondAlertBound is how long after the first operator alert the second one
+// may arrive: the 60-second local send limiter, two runner cycles and slack.
+const secondAlertBound = 90 * time.Second
+
 func TestShadowGateE2E(t *testing.T) {
 	if os.Getenv("VEND_E2E") != "1" {
 		t.Skip("set VEND_E2E=1 to run the end-to-end rehearsal")
@@ -175,7 +183,8 @@ func TestShadowGateE2E(t *testing.T) {
 		t.Fatalf("create bin dir: %v", err)
 	}
 
-	vend := buildBinary(t, filepath.Join(root, "core"), "./cmd/vend", filepath.Join(binDir, exeName("vend")))
+	vend := vendBinary(t, root, filepath.Join(binDir, exeName("vend")))
+	t.Logf("vend under test: %s", vend)
 	stub := buildBinary(t, filepath.Join(root, "tools"), "./smokestub", filepath.Join(binDir, exeName("smokestub")))
 
 	decisionSecret := randomSecret(t)
@@ -290,7 +299,11 @@ func TestShadowGateE2E(t *testing.T) {
 	firstAlertAt := time.Now()
 
 	// 7. An auth failure is a separate alert. The local one-message-per-minute
-	// limiter must not delay it past 75 seconds after the first alert.
+	// limiter defers it by up to 60 seconds and the runner then needs up to
+	// two 10-second cycles (a tick that lands just before the deferral ends
+	// waits for the next one), so the alert is due within about 80 seconds of
+	// the first one. The bound leaves room for a slow machine: a freshly built
+	// binary can start and cycle slowly while it is being scanned.
 	setCtl(t, client, stubBase, "decision=401")
 	sigD := newSignal(t, "e2e-auth", "BTC/USDT", "123460.004")
 	status, raw = post(localToken, sigD)
@@ -302,11 +315,11 @@ func TestShadowGateE2E(t *testing.T) {
 			auth.Verdict.Verdict, auth.Verdict.Code)
 	}
 	setCtl(t, client, stubBase, "decision=200")
-	waitStats(t, client, stubBase, 75*time.Second, "the second Telegram alert", func(s stats) bool {
+	waitStats(t, client, stubBase, secondAlertBound, "the second Telegram alert", func(s stats) bool {
 		return s.Telegram >= 2
 	})
-	if elapsed := time.Since(firstAlertAt); elapsed > 75*time.Second {
-		t.Fatalf("second alert arrived after %s, want <= 75s", elapsed)
+	if elapsed := time.Since(firstAlertAt); elapsed > secondAlertBound {
+		t.Fatalf("second alert arrived after %s, want <= %s", elapsed, secondAlertBound)
 	}
 	if got := getStats(t, client, stubBase); got.Telegram != 2 {
 		t.Fatalf("telegram alerts = %d, want exactly 2", got.Telegram)
@@ -485,6 +498,31 @@ func buildBinary(t *testing.T, dir, pkg, out string) string {
 		t.Fatalf("go build %s in %s: %v\n%s", pkg, dir, err, raw)
 	}
 	return out
+}
+
+// vendBinary returns the vend binary under test. With VEND_E2E_BIN set it
+// uses that file and does not build vend; a relative value is resolved from
+// the repository root. Without it vend is built from the checkout into
+// fallback.
+func vendBinary(t *testing.T, root, fallback string) string {
+	t.Helper()
+	configured := strings.TrimSpace(os.Getenv("VEND_E2E_BIN"))
+	if configured == "" {
+		return buildBinary(t, filepath.Join(root, "core"), "./cmd/vend", fallback)
+	}
+	path := configured
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(root, path)
+	}
+	path = filepath.Clean(path)
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("VEND_E2E_BIN %q: %v", configured, err)
+	}
+	if info.IsDir() {
+		t.Fatalf("VEND_E2E_BIN %q is a directory, want the vend executable", configured)
+	}
+	return path
 }
 
 // freeAddr reserves and releases a loopback port.

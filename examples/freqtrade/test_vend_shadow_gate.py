@@ -74,6 +74,56 @@ install_interface_stubs()
 import vend_shadow_gate  # noqa: E402  (import after the stubs)
 
 
+class FakeRow(dict):
+    """One analyzed candle: column name to value."""
+
+
+class FakeFrame:
+    """Analyzed dataframe stub exposing only ``.iloc[-1]``."""
+
+    def __init__(self, rows: list[FakeRow]) -> None:
+        self._rows = rows
+
+    @property
+    def iloc(self) -> "FakeILoc":
+        return FakeILoc(self._rows)
+
+
+class FakeILoc:
+    """Positional access stub with the one operation the example uses."""
+
+    def __init__(self, rows: list[FakeRow]) -> None:
+        self._rows = rows
+
+    def __getitem__(self, index: int) -> FakeRow:
+        return self._rows[index]
+
+
+class FakeDataProvider:
+    """Data provider stub recording calls and returning one frame.
+
+    Only ``get_analyzed_dataframe`` exists: the example must not need anything
+    else from the data provider.
+    """
+
+    def __init__(
+        self,
+        dataframe: FakeFrame | None = None,
+        error: Exception | None = None,
+    ) -> None:
+        self.dataframe = dataframe
+        self.error = error
+        self.calls: list[tuple[str, str]] = []
+
+    def get_analyzed_dataframe(self, pair: str, timeframe: str) -> tuple[FakeFrame, datetime]:
+        self.calls.append((pair, timeframe))
+        if self.error is not None:
+            raise self.error
+        if self.dataframe is None:
+            raise AssertionError("no dataframe configured")
+        return self.dataframe, datetime.now(timezone.utc)
+
+
 TOKEN = "test-token-not-a-secret"
 PAIR = "BTC/USDT:USDT"
 VERDICT_BODY = {
@@ -172,6 +222,23 @@ class VendShadowGateTest(unittest.TestCase):
             side="long",
         )
 
+    def strategy_with(
+        self,
+        row: FakeRow | None = None,
+        error: Exception | None = None,
+    ) -> vend_shadow_gate.VendShadowGate:
+        """Return a strategy whose data provider serves one analyzed candle."""
+        strategy = self.strategy()
+        dataframe = None if row is None else FakeFrame([row])
+        strategy.dp = FakeDataProvider(dataframe, error)
+        return strategy
+
+    def posted_body(self, strategy: vend_shadow_gate.VendShadowGate) -> dict:
+        """Confirm one entry and return the gate request body it sent."""
+        self.assertTrue(self.confirm(strategy))
+        self.wait_for_requests(1)
+        return json.loads(self.server.requests[0]["body"])
+
     def wait_for_requests(self, count: int, timeout: float = 5.0) -> None:
         deadline = time.monotonic() + timeout
         while len(self.server.requests) < count and time.monotonic() < deadline:
@@ -205,6 +272,54 @@ class VendShadowGateTest(unittest.TestCase):
 
         ts = datetime.strptime(body["ts"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
         self.assertLess(abs((datetime.now(timezone.utc) - ts).total_seconds()), 5.0)
+
+    def test_state_carries_last_candle_indicators(self) -> None:
+        self.use_gate()
+        strategy = self.strategy_with(
+            FakeRow({"close": 100.0, "ma_fast": 102.0, "ma_slow": 100.0})
+        )
+
+        body = self.posted_body(strategy)
+
+        self.assertEqual(set(body), set(gate_required_fields()))
+        state = body["state"]
+        self.assertEqual(set(state), {"candle_close", "ma_fast", "ma_slow", "ma_gap"})
+        self.assertEqual(state["candle_close"], 100.0)
+        self.assertEqual(state["ma_fast"], 102.0)
+        self.assertEqual(state["ma_slow"], 100.0)
+        self.assertAlmostEqual(state["ma_gap"], 0.02, places=12)
+        self.assertEqual(strategy.dp.calls, [(PAIR, "1h")])
+
+    def test_nan_ma_slow_is_dropped_from_state(self) -> None:
+        self.use_gate()
+        strategy = self.strategy_with(
+            FakeRow({"close": 100.0, "ma_fast": 102.0, "ma_slow": float("nan")})
+        )
+
+        body = self.posted_body(strategy)
+
+        self.assertEqual(set(body), set(gate_required_fields()))
+        self.assertEqual(set(body["state"]), {"candle_close", "ma_fast"})
+        self.assertNotIn("NaN", self.server.requests[0]["body"].decode("utf-8"))
+
+    def test_missing_data_provider_sends_empty_state(self) -> None:
+        self.use_gate()
+        strategy = self.strategy()
+        self.assertFalse(hasattr(strategy, "dp"))
+
+        body = self.posted_body(strategy)
+
+        self.assertEqual(set(body), set(gate_required_fields()))
+        self.assertEqual(body["state"], {})
+
+    def test_data_provider_error_sends_empty_state_and_allows_entry(self) -> None:
+        self.use_gate()
+        strategy = self.strategy_with(error=RuntimeError("dataframe unavailable"))
+
+        body = self.posted_body(strategy)
+
+        self.assertEqual(set(body), set(gate_required_fields()))
+        self.assertEqual(body["state"], {})
 
     def test_signal_id_is_unique_per_call(self) -> None:
         self.use_gate()

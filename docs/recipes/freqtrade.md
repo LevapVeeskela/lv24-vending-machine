@@ -74,6 +74,7 @@ Copy this file and ``vend_gate.py`` into your Freqtrade
 ``user_data/strategies/`` directory. See ``docs/recipes/freqtrade.md``.
 """
 
+import math
 import os
 import sys
 import uuid
@@ -88,6 +89,31 @@ from vend_gate import VendGate  # noqa: E402
 
 DEFAULT_GATE_URL = "http://127.0.0.1:8420"
 GATE_TIMEOUT_SECONDS = 2.0
+
+# Candle column -> state key, copied from the last analyzed candle. ``ma_gap``
+# is derived from the two averages and needs both of them. The candle close is
+# sent as ``candle_close``: the gate fills ``close`` itself from ``price`` and
+# would overwrite a key with that name.
+STATE_COLUMNS = (
+    ("close", "candle_close"),
+    ("ma_fast", "ma_fast"),
+    ("ma_slow", "ma_slow"),
+)
+
+
+def finite_number(value: object) -> float | None:
+    """Return value as a finite float, or None when it is not one.
+
+    The gate contract accepts only finite JSON numbers, so NaN, infinities,
+    None and non-numeric values are dropped instead of being sent.
+    """
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number):
+        return None
+    return number
 
 
 class VendShadowGate(IStrategy):
@@ -121,6 +147,40 @@ class VendShadowGate(IStrategy):
             return None
         self._vend_gate = client
         return client
+
+    def _market_state(self, pair: str) -> dict[str, float]:
+        """Return the finite indicators of the last analyzed candle for pair.
+
+        The candle comes from the strategy's public data provider interface:
+        ``get_analyzed_dataframe(pair, timeframe)`` returns the analyzed frame
+        and the time of its last candle. Only the last row is read, and only
+        finite numbers are kept: ``state`` on the wire is a plain object of
+        finite numbers.
+
+        Any failure (no data provider, an empty frame, a missing column, a
+        non-finite value, an exception) yields ``{}``. Reporting context must
+        never block or fail an entry.
+        """
+        try:
+            dataprovider = getattr(self, "dp", None)
+            if dataprovider is None:
+                return {}
+            dataframe, _ = dataprovider.get_analyzed_dataframe(pair, self.timeframe)
+            candle = dataframe.iloc[-1]
+            state: dict[str, float] = {}
+            for column, key in STATE_COLUMNS:
+                number = finite_number(candle.get(column))
+                if number is not None:
+                    state[key] = number
+            fast = state.get("ma_fast")
+            slow = state.get("ma_slow")
+            if fast is not None and slow is not None and slow != 0.0:
+                gap = finite_number(fast / slow - 1.0)
+                if gap is not None:
+                    state["ma_gap"] = gap
+            return state
+        except Exception:  # noqa: BLE001 - context collection never blocks an entry
+            return {}
 
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         dataframe["ma_fast"] = dataframe["close"].rolling(12).mean()
@@ -162,7 +222,9 @@ class VendShadowGate(IStrategy):
             # Money on the wire is a decimal string, not a float.
             "price": f"{float(rate):.8f}",
             "source": "freqtrade:VendShadowGate",
-            "state": {},
+            # Market context from the last analyzed candle; {} when it cannot
+            # be read. The gate accepts finite numbers only.
+            "state": self._market_state(pair),
         }
         client = self._gate()
         if client is not None:
@@ -180,8 +242,37 @@ If you need the real exchange venue, put it into `instrument.venue` (for
 example, from `self.config["exchange"]["name"]`), but do not change `pair`:
 the symbol is sent exactly as Freqtrade provides it.
 
-`state` holds arbitrary finite numbers (indicators) for decision context. An
-empty object is allowed; `null` is not.
+### What goes into `state`
+
+On every entry the strategy reads the last analyzed candle through the public
+data provider call `self.dp.get_analyzed_dataframe(pair, self.timeframe)` and
+sends four numbers:
+
+| Key | Value |
+|---|---|
+| `candle_close` | close of the last analyzed candle |
+| `ma_fast` | the 12-bar mean computed in `populate_indicators` |
+| `ma_slow` | the 48-bar mean computed in `populate_indicators` |
+| `ma_gap` | `ma_fast / ma_slow − 1` |
+
+Only finite numbers are sent: NaN, infinities, `None` and non-numeric values
+are dropped key by key. `ma_gap` is omitted when `ma_fast` or `ma_slow` is
+missing, non-finite, or `ma_slow` is zero. If the data provider is absent, the
+frame is empty, or anything raises, the request still goes with `state: {}`
+and the entry is still allowed.
+
+The gate adds its own fields to what the model sees: `symbol`, `venue`,
+`timeframe`, `side`, `intent_kind`, `timestamp` and `close` (taken from
+`price`). A key with one of these names in your `state` is overwritten, which
+is why the candle close is sent as `candle_close`.
+
+You can add your own numeric features to `state`: use snake_case keys, finite
+numbers and a flat object. A number is required, not a string:
+`{"rsi_14": 55.5}` is a number on the gate side, `{"rsi_14": "55.5"}` is not.
+
+The author did not select these four keys as predictors and did not measure
+how they affect the verdict or its quality. They are a minimal example of
+passing market context, not a feature set.
 
 ### Symbols
 
