@@ -10,11 +10,15 @@ from __future__ import annotations
 
 import json
 import socket
+import sys
 import threading
 import time
 import unittest
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from vend_gate import VendGate
 

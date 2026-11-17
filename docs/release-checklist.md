@@ -26,9 +26,13 @@
   go -C providers/notify-telegram test ./...
   go -C tools test ./...
   VEND_E2E=1 go -C tools test -count=1 ./e2e/...                 # сквозной тест HTTP+CLI
-  python -m unittest discover -s examples/clients/python -p "test_*.py"  # test:clients:python
+  python -m unittest discover -s examples -p "test_*.py"          # test:clients:python
   go build all                                                   # build
   ```
+
+  Команда `python -m unittest discover -s examples` находит и Python-клиент, и
+  пример Freqtrade; пример проверяется на заглушках интерфейсов `IStrategy` и
+  `DataFrame`, а не на настоящем Freqtrade.
 
   Сквозной тест собирает `vend` и `tools/smokestub` во временный каталог,
   поднимает оба процесса на свободных портах `127.0.0.1`, проходит сценарий
@@ -39,10 +43,10 @@
   `$env:VEND_E2E='1'; go -C tools test -count=1 ./e2e/...`.
 
   Если `python` в PATH нет, но есть `python3`, используйте
-  `python3 -m unittest discover -s examples/clients/python -p "test_*.py"`:
-  задача `test:clients:python` сама выбирает доступную команду. Если нет ни
-  `python`, ни `python3`, клиентские тесты выполнить нельзя — установите
-  Python 3 и повторите; молча пропускать этот шаг не нужно.
+  `python3 -m unittest discover -s examples -p "test_*.py"`: задача
+  `test:clients:python` сама выбирает доступную команду. Если нет ни `python`,
+  ни `python3`, тесты клиента и примера выполнить нельзя — установите Python 3
+  и повторите; молча пропускать этот шаг не нужно.
 - [ ] `go run ./tools/release` ещё не запускался на грязном дереве.
 - [ ] Владелец подтвердил дату публикации: она станет датой старта G1.
 

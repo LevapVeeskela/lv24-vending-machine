@@ -26,7 +26,7 @@ tasks:
       - task: test:clients:python
 
   test:clients:python:
-    desc: Test the stdlib Python client against a loopback server
+    desc: Test the Python client and the Freqtrade example on loopback
     cmds:
       - |
         if command -v python >/dev/null 2>&1; then
@@ -34,10 +34,10 @@ tasks:
         elif command -v python3 >/dev/null 2>&1; then
           py=python3
         else
-          echo "Python 3 is required for examples/clients/python; install Python 3 and put 'python' or 'python3' on PATH" >&2
+          echo "Python 3 is required for examples/; install Python 3 and put 'python' or 'python3' on PATH" >&2
           exit 1
         fi
-        "$py" -m unittest discover -s examples/clients/python -p "test_*.py"
+        "$py" -m unittest discover -s examples -p "test_*.py"
 
   test:core:
     desc: Test the core module
