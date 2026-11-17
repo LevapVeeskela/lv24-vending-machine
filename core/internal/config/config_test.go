@@ -139,8 +139,8 @@ func TestLiveMessage(t *testing.T) {
 	if err == nil {
 		t.Fatalf("Validate() = nil")
 	}
-	if got := err.Error(); !contains(got, "live mode is not available in M0") {
-		t.Fatalf("error %q misses live M0 text", got)
+	if got := err.Error(); !contains(got, "live mode is not available in this release") {
+		t.Fatalf("error %q misses the release wording", got)
 	}
 }
 
@@ -426,6 +426,20 @@ func TestEnabledSectionsValid(t *testing.T) {
 	c.Notify.Telegram.BaseURL = "https://api.telegram.org"
 	if err := c.Validate(); err != nil {
 		t.Fatalf("Validate() https telegram baseUrl = %v", err)
+	}
+}
+
+func TestLoadInvalidJSONMessage(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte("{"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load() accepted broken JSON")
+	}
+	if !contains(err.Error(), "invalid JSON in") {
+		t.Fatalf("error %q misses the invalid-JSON wording", err)
 	}
 }
 

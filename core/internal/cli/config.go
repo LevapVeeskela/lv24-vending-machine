@@ -2,7 +2,9 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	iofs "io/fs"
 
 	"github.com/LevapVeeskela/lv24-vending-machine/core/internal/config"
 )
@@ -94,8 +96,14 @@ func (r *runner) cmdConfig(args []string) int {
 					fmt.Sprintf("config file not found at %s", cfgPath),
 					"run vend init to create the config", false, nil)
 			}
-			return r.fail(jsonOut, exitUsage, codeUsage, err.Error(),
-				"fix the JSON syntax or run vend init --force to recreate it", false, nil)
+			hint := "fix the JSON syntax or run vend init --force to recreate it"
+			// config.Load wraps the read error, so os.IsNotExist in
+			// isNotFound does not see it; keep the exit code but give the
+			// missing-file hint instead of the JSON-syntax one.
+			if errors.Is(err, iofs.ErrNotExist) {
+				hint = "run vend init to create the config"
+			}
+			return r.fail(jsonOut, exitUsage, codeUsage, err.Error(), hint, false, nil)
 		}
 		if verr := raw.Validate(); verr != nil {
 			return r.fail(jsonOut, exitUsage, codeUsage, verr.Error(),

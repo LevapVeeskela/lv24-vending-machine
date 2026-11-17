@@ -183,7 +183,7 @@ func (c Config) Validate() error {
 		// ok
 	case "live":
 		return domain.NewError(domain.CodeInvalidRequest,
-			"config: live mode is not available in M0")
+			"config: live mode is not available in this release; use shadow, paper or sandbox")
 	default:
 		return invalid(fmt.Sprintf("mode must be paper, sandbox or shadow, got %q", c.Mode))
 	}
@@ -352,7 +352,7 @@ func Load(path string) (Config, error) {
 	}
 	if err := json.Unmarshal(raw, &c); err != nil {
 		return Config{}, domain.WrapError(domain.CodeInvalidRequest,
-			fmt.Sprintf("config: parse %s", path), err)
+			fmt.Sprintf("config: invalid JSON in %s", path), err)
 	}
 	return c, nil
 }

@@ -435,6 +435,11 @@ func TestEvaluateProviderErrorCodes(t *testing.T) {
 					t.Fatalf("check detail leaks provider error text: %q", d)
 				}
 			}
+			if tc.wantCode == CodeProviderAuth {
+				if !strings.Contains(got.Reasons[0], "check the provider secret") {
+					t.Fatalf("auth reason misses the operator hint: %q", got.Reasons[0])
+				}
+			}
 		})
 	}
 }

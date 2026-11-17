@@ -184,7 +184,7 @@ func (r *runner) cmdServe(args []string) int {
 		return r.fail(jsonOut, exitGeneral, codeGeneral, err.Error(),
 			"check the server wiring and retry", false, nil)
 	}
-	fmt.Fprintf(r.stderr, "listening on http://%s\n", *addr)
+	fmt.Fprintf(r.stderr, "starting on http://%s\n", *addr)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	done := make(chan struct{})

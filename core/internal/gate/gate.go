@@ -92,7 +92,7 @@ func Evaluate(req domain.GateRequest, outcome domain.DecisionOutcome, policy dom
 			code = CodeProviderInvalidOutput
 		case domain.CodeAuth, domain.CodePaymentRequired:
 			code = CodeProviderAuth
-			detail = "provider rejected credentials or the quota is exhausted"
+			detail = "provider rejected credentials or the quota is exhausted; check the provider secret (VENDING_SECRET_*) and quota"
 			reason = "provider auth error: " + detail
 		case domain.CodeInvalidRequest:
 			code = CodeProviderMisconfigured

@@ -229,7 +229,7 @@ func (r *runner) liveChecks(cfg config.Config, cfgErr error, cfgValid bool,
 		})
 		cancel()
 		if derr != nil {
-			add("decision", false, liveCode(derr))
+			add("decision", false, liveDetail(derr))
 		} else {
 			raw = resp.Raw
 			// The live answer goes through the same gate policy as a real
@@ -276,7 +276,7 @@ func (r *runner) liveChecks(cfg config.Config, cfgErr error, cfgValid bool,
 		cancel()
 		switch {
 		case cerr != nil:
-			add("candles", false, liveCode(cerr))
+			add("candles", false, liveDetail(cerr))
 		case len(got) < doctorLiveCandles:
 			add("candles", false, string(domain.CodeInvalidOutput))
 		default:
@@ -295,7 +295,7 @@ func (r *runner) liveChecks(cfg config.Config, cfgErr error, cfgValid bool,
 			})
 			cancel()
 			if serr != nil {
-				add("telegram", false, liveCode(serr))
+				add("telegram", false, liveDetail(serr))
 			} else {
 				add("telegram", true, "ok")
 			}
@@ -323,6 +323,32 @@ func liveCode(err error) string {
 		return string(c)
 	}
 	return string(domain.CodeUnavailable)
+}
+
+// liveDetail adds a short operator action to a failed live-probe code. The
+// provider message itself is never printed: it may carry a token or a body.
+func liveDetail(err error) string {
+	code := liveCode(err)
+	switch code {
+	case string(domain.CodeAuth):
+		return code + " (check the provider secret and quota)"
+	case string(domain.CodePaymentRequired):
+		return code + " (top up or enable the provider quota)"
+	case string(domain.CodeRateLimit):
+		return code + " (wait and retry)"
+	case string(domain.CodeInvalidRequest):
+		return code + " (check the provider URL, model and profile)"
+	case string(domain.CodeInvalidOutput):
+		return code + " (retry; if it repeats, save the raw answer)"
+	case string(domain.CodeTimeout):
+		return code + " (check the network/provider and retry)"
+	case string(domain.CodeIPBanned):
+		return code + " (do not retry; change the network/provider)"
+	case string(domain.CodeRegionUnavailable):
+		return code + " (use an available region/provider)"
+	default:
+		return code + " (check the provider URL and network, then retry)"
+	}
 }
 
 // flagWasSet reports whether name was given explicitly on the command line.

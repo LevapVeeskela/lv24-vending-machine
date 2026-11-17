@@ -272,6 +272,22 @@ func TestConfigPathValidate(t *testing.T) {
 	}
 }
 
+func TestConfigValidateMissingFileHint(t *testing.T) {
+	env, _, stderr := testEnv(t)
+	path := filepath.Join(t.TempDir(), "missing.json")
+
+	if code := runArgs(env, "config", "validate", "--config", path); code != exitUsage {
+		t.Fatalf("config validate missing = %d, want %d", code, exitUsage)
+	}
+	got := stderr.String()
+	if !strings.Contains(got, "run vend init to create the config") {
+		t.Fatalf("stderr misses the missing-file hint: %q", got)
+	}
+	if strings.Contains(got, "fix the JSON syntax") {
+		t.Fatalf("stderr still suggests fixing JSON syntax: %q", got)
+	}
+}
+
 func TestDoctorJSON(t *testing.T) {
 	env, stdout, stderr, cfgPath, dataDir := initTestEnv(t)
 

@@ -96,6 +96,20 @@ func TestOpenRejectsQueryLikePath(t *testing.T) {
 	}
 }
 
+func TestOpenDirectoryPathMessage(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(context.Background(), dir)
+	if err == nil {
+		_ = s.Close()
+		t.Fatal("Open(directory) succeeded")
+	}
+	got := err.Error()
+	if !strings.Contains(got, "cannot open the journal database at") &&
+		!strings.Contains(got, "cannot use the journal database at") {
+		t.Fatalf("error %q misses the journal database wording", got)
+	}
+}
+
 func TestTamperAnyFieldBreaksVerify(t *testing.T) {
 	// All 13 event columns. wantBroken is the seq Verify reports: the
 	// tampered row's own seq, except for the seq case itself: the row

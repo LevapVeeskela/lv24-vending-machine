@@ -178,7 +178,7 @@ vend config validate
 vend serve --addr 127.0.0.1:8420
 ```
 
-В stderr появится `listening on http://127.0.0.1:8420`. Процесс не закрывать:
+В stderr появится `starting on http://127.0.0.1:8420`. Процесс не закрывать:
 раннер работает внутри `serve`. Первый цикл выполняется сразу, далее каждые
 30 секунд.
 
@@ -434,6 +434,9 @@ decision-drex, отдаёт синтетические закрытые свеч
 | `verdicts: ABSTAIN=<n>` | провайдер ошибся; код причины — в `gate.verdict` (`provider_auth`, `provider_unavailable`, `invalid_output`, `provider_misconfigured`) |
 | `lastCycleError` не пуст | цикл продолжает работать; ошибка повторяется каждый интервал — прислать текст в отчёте |
 | `journal chain broken at seq N` | журнал повреждён; не продолжать, сохранить файл и сообщить |
+
+Более полная таблица первого запуска, с фактическими сообщениями и кодами
+выхода — в [troubleshooting](troubleshooting.ru.md).
 
 Последние уведомления без остановки `serve`:
 
