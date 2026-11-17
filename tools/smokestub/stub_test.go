@@ -266,6 +266,70 @@ func TestCtlSwitchesRoles(t *testing.T) {
 	}
 }
 
+// TestCtlStatsCountsRoles checks the /ctl/stats counters by role and symbol
+// and that neither the bot token nor the message text reaches the response.
+func TestCtlStatsCountsRoles(t *testing.T) {
+	var logs bytes.Buffer
+	logger := log.New(&logs, "", 0)
+	srv := httptest.NewServer(newStub(func() time.Time { return stubNow }, logger))
+	defer srv.Close()
+
+	if status, raw := doJSON(t, http.MethodPost, srv.URL+"/v1/systemone", decisionBody); status != http.StatusOK {
+		t.Fatalf("decision status = %d, want 200: %s", status, raw)
+	}
+	if status, _ := doJSON(t, http.MethodGet, srv.URL+"/ctl?decision=500", ""); status != http.StatusOK {
+		t.Fatalf("ctl status = %d, want 200", status)
+	}
+	if status, raw := doJSON(t, http.MethodPost, srv.URL+"/v1/systemone", decisionBody); status != 500 {
+		t.Fatalf("failed decision status = %d, want 500: %s", status, raw)
+	}
+
+	const token = "123456:AAH-stats-only"
+	const text = "stats message CANARY"
+	tgBody := `{"chat_id":"42","text":"` + text + `"}`
+	if status, raw := doJSON(t, http.MethodPost, srv.URL+"/bot"+token+"/sendMessage", tgBody); status != http.StatusOK {
+		t.Fatalf("telegram status = %d, want 200: %s", status, raw)
+	}
+
+	for i := 0; i < 2; i++ {
+		if status, raw := doJSON(t, http.MethodGet, srv.URL+"/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=1", ""); status != http.StatusOK {
+			t.Fatalf("klines status = %d, want 200: %s", status, raw)
+		}
+	}
+	if status, _ := doJSON(t, http.MethodGet, srv.URL+"/api/v3/klines?symbol=ETHUSDT&interval=1m&limit=1", ""); status != http.StatusBadRequest {
+		t.Fatalf("other symbol status = %d, want 400", status)
+	}
+
+	status, raw := doJSON(t, http.MethodGet, srv.URL+"/ctl/stats", "")
+	if status != http.StatusOK {
+		t.Fatalf("stats status = %d, want 200: %s", status, raw)
+	}
+	if strings.Contains(string(raw), token) || strings.Contains(string(raw), text) {
+		t.Fatalf("stats leak the token or the message text: %s", raw)
+	}
+	var got struct {
+		Decision int            `json:"decision"`
+		Telegram int            `json:"telegram"`
+		Klines   map[string]int `json:"klines"`
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("decode stats: %v (%s)", err, raw)
+	}
+	if got.Decision != 2 || got.Telegram != 1 {
+		t.Fatalf("stats = %+v, want decision=2 telegram=1", got)
+	}
+	if got.Klines["BTCUSDT"] != 2 || got.Klines["ETHUSDT"] != 1 || len(got.Klines) != 2 {
+		t.Fatalf("klines = %v, want BTCUSDT=2 ETHUSDT=1", got.Klines)
+	}
+	if strings.Contains(logs.String(), token) || strings.Contains(logs.String(), text) {
+		t.Fatalf("log leaks the token or the message text: %q", logs.String())
+	}
+
+	if status, _ := doJSON(t, http.MethodPost, srv.URL+"/ctl/stats", ""); status != http.StatusMethodNotAllowed {
+		t.Fatalf("stats POST status = %d, want 405", status)
+	}
+}
+
 // TestValidateAddr keeps the rehearsal server on loopback.
 func TestValidateAddr(t *testing.T) {
 	for _, addr := range []string{"127.0.0.1:28471", "[::1]:28471"} {

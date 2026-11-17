@@ -1,118 +1,115 @@
 # LV24 Vending
 
-**Платформа автоматической торговли с детерминированным ядром и сменными
-ИИ-агентами.** Крипто-биржи и брокеры, LLM и decision-модели (Drex/Jev),
-локальный терминал, веб и мобильный пульт.
+[Русский](README.ru.md)
 
-> Статус: **релиз-кандидат 0.1.0-m1 (2026-11-16), не опубликован** —
-> shadow-гейт с фоновой разметкой, trend-сигналы, Telegram-уведомления, арена
-> моделей, `--share`, policy-фильтр, живые пробы `doctor --live`, канонические
-> символы, оценка объёма сигналов `signals estimate` и локальная сборка релиза.
-> Бинарники не подписаны; релиз собирается
-> `go run ./tools/release` и никуда не загружается.
-> Установка — [install](docs/install.md) / [install.ru](docs/install.ru.md);
-> живая проверка на 15 минут — [runbook](docs/runbook-live-smoke.md);
-> выпуск — [release checklist](docs/release-checklist.md).
-> **НЕ сделано:** публикация релиза, адаптер TradingView webhook,
-> desktop/web/mobile, paper/live, команды Telegram (двусторонний бот).
-> Тесты — офлайн; живые вызовы — только ключом владельца.
+LV24 Vending is a local shadow gate for trading signals. Your bot sends an
+entry signal to the loopback API, the gate asks a decision model for a second
+opinion, and the verdict is written to a hash-chained journal. Later the gate
+labels the entry from closed candles and reports whether filtering the signal
+would have helped or hurt. It never places an order.
 
-## Идея
+## Who it is for
 
-```
-рынок ─▶ стратегии ─┐
-                    ├─▶ proposals ─▶ RiskGate ─▶ OMS ─▶ биржа
-ИИ-агенты ──────────┘                (код)      (код)
-```
+- You already run a bot such as [Freqtrade](docs/recipes/freqtrade.md) and want
+  an independent check before an entry.
+- Or you enable the built-in `signals.trend` source (EMA fast/slow on closed
+  candles) and let it produce the entry signals.
 
-- **ИИ советует, код решает.** Агент возвращает типизированный `Proposal`;
-  ордер может отправить только детерминированный слой после риск-проверок.
-- **Провайдер — пакет, а не ветка `if`.** Биржа, брокер, данные, LLM,
-  decision-модель — отдельные модули с дескриптором возможностей.
-- **Фича вендора → свой агент.** Матрица «роль × вендор × класс активов»
-  настраивается декларативно; несовместимые агенты не загружаются.
-- **Объяснимо и воспроизводимо.** Журнал решений с hash-chain, реплей,
-  калибровка моделей (Brier/ECE).
-- **Local-first.** Один бинарник и SQLite на ноутбуке; тот же core — сервером
-  с Postgres.
+## What you need
 
-## Стек
+- A decision-provider key for `decision-drex` (Drex or Jev profile). The key is
+  yours (BYOK); the binary calls your provider directly.
+- Candles: the default `marketdata-binance` provider reads the public Binance
+  Spot klines endpoint and needs no key.
+- Go 1.27 to build from source. The `0.1.0-m1` binaries are not published yet.
 
-| Слой | Технология |
-|---|---|
-| Core + CLI | Go 1.27 (`vend`; `vendd` — цель) |
-| Desktop | Tauri 2 + React 19 + TypeScript (FSD) |
-| Web | React 19 + TypeScript (общий `packages/ui-web`) |
-| Mobile | Flutter + Riverpod |
-| Контракты | OpenAPI 3.1 + JSON Schema → Go/TS/Dart |
-| Хранение | SQLite (локально) / Postgres (сервер) |
+## Quick start
 
-## Документация
-
-- [Установка (EN)](docs/install.md) · [Установка (RU)](docs/install.ru.md)
-- [Быстрый старт (EN)](docs/quickstart.md) · [Быстрый старт (RU)](docs/quickstart.ru.md)
-- [Живая проверка shadow-гейта](docs/runbook-live-smoke.md)
-- [Семь дней работы и критерий G1](docs/run-7-days.md)
-- [Чек-лист выпуска](docs/release-checklist.md)
-- [Спецификация](docs/spec/README.md)
-- [Ядро и CLI](docs/spec/03-core-cli.md)
-- [Архитектура](docs/spec/01-architecture.md)
-- [Провайдеры](docs/spec/04-providers.md)
-- [Агенты и ИИ](docs/spec/05-agents.md)
-- [Риск и исполнение](docs/spec/06-risk-execution.md)
-- [План](docs/spec/10-roadmap.md)
-- [Изменения](CHANGELOG.md)
-- [ADR](docs/adr/)
-
-## Рабочий quickstart (RC)
-
-Установите `vend` ([install](docs/install.md) / [install.ru](docs/install.ru.md))
-или соберите из корня репозитория. Офлайн, без ключа:
+Offline, no key, no network:
 
 ```bash
 go build -o vend ./core/cmd/vend
-vend init
-vend gate test --request contracts/examples/gate-request.json \
+./vend init
+./vend gate test --request contracts/examples/gate-request.json \
   --fixture core/cmd/vend/testdata/decision-response.json
-vend journal verify
-vend gate report
+./vend gate report
 ```
 
-Путь за 15 минут с ключом decision-провайдера, фоновой разметкой, `vend status`
-и `gate report --share` — в [quickstart](docs/quickstart.md) /
-[quickstart.ru](docs/quickstart.ru.md). Живые пробы (один вызов decision, две
-свечи, тестовое сообщение Telegram при включении) — `vend doctor --live`;
-`--save-raw <file>` пишет сырой ответ провайдера с правами 0600.
-Длительный прогон для G1 (≥ 7 дней, ≥ 100 меток) — [семь дней работы](docs/run-7-days.md);
-объём сигналов до старта проверяется `vend signals estimate --days 7`.
+`init` creates the config and the SQLite journal; `gate test` replays a
+recorded decision response through the same flow as a live call; `gate report`
+prints the counters. The full paths:
 
-Тесты офлайн; живые вызовы провайдеров — только ключом владельца.
+- [Quickstart](docs/quickstart.md) — 15 minutes with a real decision key, or
+  the offline path above.
+- [Install](docs/install.md) — prebuilt binary or source build, checksums and
+  the unsigned-binary warnings.
+- [Live smoke runbook](docs/runbook-live-smoke.md) — 15-minute live check with
+  `doctor --live`, one manual 1m signal and one label (Russian).
+- [Seven days of operation](docs/run-7-days.md) — the multi-day shadow run and
+  the G1 criterion (Russian).
 
-## Целевой UX (не реализовано)
+## What you get
 
-```bash
-vend init --template crypto-paper
-vend provider connect exchange-binance --id binance-main
-vend run start grid-btc --account binance-main --symbol BTC/USDT --mode paper
-vend agent explain <decision-id>
-vend serve            # desktop/web/mobile подключаются к API
+`vend gate report` prints counters and, once there are enough labels, model
+quality and return comparisons. Before 100 labels it says so instead of
+inventing a result:
+
+```text
+verdicts: ALLOW=<n> REJECT=<n> ABSTAIN=<n> SKIP=<n>
+window: days=<n> active=<n>
+labeled: <n>
+awaiting labeling: <n>
+insufficient data: <n> labeled, need 100
 ```
 
-## Безопасность
+`vend gate report --share` prints the same picture as a sanitized Markdown
+summary: aggregate counts, metrics when available, assumptions, and no symbols,
+venues, prices, data paths or signal/decision ids. It is meant to be posted
+manually.
 
-- Shadow-режим по умолчанию (ордера не отправляются); paper/live — отдельные
-  этапы, live требует явного unlock с TTL и подтверждением.
-- Ключи — только через `secretRef` и переменные окружения (в M1 — env;
-  ОС-keychain — следующий шаг), не в конфиге и не в БД; приложение не видит их в UI.
-- Журнал с hash-chain; kill switch, approve-очередь и reconciliation с биржей —
-  обязательные условия для live (не реализованы).
-- Никакой гарантии доходности: это инструмент, а не инвестиционная рекомендация.
+The report describes what the filter would have done with the signals it saw.
+It is not a profit forecast and not investment advice; a positive sample says
+nothing about the next trade.
 
-## Лицензия
+## Status and limitations
 
-Ядро, провайдеры и SDK — **Apache-2.0** (см. `LICENSE` и `NOTICE`).
-Документация — CC-BY-4.0. Мобильное приложение может распространяться как
-коммерческий продукт в App Store, Google Play и RuStore — Apache-2.0 это
-позволяет. AGPL/GPL-зависимости в ядре и мобильной сборке запрещены: подробности
-в [ADR-0007](docs/adr/0007-license-and-stores.md) и
+- **Prerelease.** `0.1.0-m1` is a release candidate and is not published.
+- **Unsigned binaries.** Build artifacts are not code-signed or notarized;
+  `SHA256SUMS` is the only integrity check. Read
+  [install](docs/install.md#unsigned-binaries) before running one.
+- **Shadow only.** The gate evaluates and journals; there is no order execution
+  path. `live` is rejected by config validation; `paper` and `sandbox` are
+  accepted by the config but have no OMS behind them yet.
+- **Not done yet:** release publication, TradingView webhook adapter,
+  desktop/web/mobile clients, paper/live execution, two-way Telegram bot.
+- **Verified environment.** Only the offline end-to-end rehearsal against the
+  local stub has been exercised, on Windows 11. The live path with real
+  decision, candle and Telegram providers has not been exercised on any
+  platform yet; Linux and macOS builds exist but have not been run.
+
+## Security
+
+- Secrets are read from `VENDING_SECRET_*` environment variables and referenced
+  by `secretRef`; they are never written to the config, the journal or the logs.
+- The HTTP API binds `127.0.0.1` and requires a bearer token.
+- The journal is append-only with a hash chain (`vend journal verify`).
+- `--share` is sanitized on purpose; `--save-raw` may contain vendor payloads
+  and must not be published.
+- There is no guaranteed return and no investment recommendation. See
+  [SECURITY.md](SECURITY.md).
+
+## License
+
+Code, providers and SDKs are **Apache-2.0** (see [LICENSE](LICENSE) and
+[NOTICE](NOTICE)); documentation is CC-BY-4.0. A commercial mobile app can be
+distributed through the App Store, Google Play and RuStore — Apache-2.0 allows
+it. AGPL/GPL dependencies are forbidden in the core and the mobile build; see
+[ADR-0007](docs/adr/0007-license-and-stores.md) and
 [ADR-0012](docs/adr/0012-license-apache-2.md).
+
+## Target platform (not implemented)
+
+The target is a deterministic Go core (`vend`, later `vendd`) with a Tauri +
+React desktop app, a React web client and a Flutter mobile app, plus brokers,
+paper/live execution and the OMS. Only the core and the CLI exist today; the
+other clients and the execution path are not implemented.

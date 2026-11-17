@@ -1242,6 +1242,48 @@ func TestLastLabelAtRestoredFromJournal(t *testing.T) {
 	}
 }
 
+// appendingLabeler appends one outcome.labeled event per run with a journal
+// time that differs from the cycle clock, like the real labeler does.
+type appendingLabeler struct {
+	jr *memJournal
+	at time.Time
+}
+
+func (l *appendingLabeler) Run(ctx context.Context) (outcome.Summary, error) {
+	raw, err := json.Marshal(domain.Outcome{SignalID: "sig-new"})
+	if err != nil {
+		return outcome.Summary{}, err
+	}
+	if _, err := l.jr.Append(ctx, domain.Event{
+		Kind:          domain.EventOutcomeLabeled,
+		TS:            l.at,
+		SchemaVersion: domain.EventSchemaVersion,
+		Payload:       raw,
+		CodeVersion:   "v-test",
+	}); err != nil {
+		return outcome.Summary{}, err
+	}
+	return outcome.Summary{Labeled: 1}, nil
+}
+
+// TestLastLabelAtSameAcrossRestart: the running cycle and a restarted runner
+// must report the same lastLabelAt, the journal time of the latest label, not
+// the cycle clock.
+func TestLastLabelAtSameAcrossRestart(t *testing.T) {
+	jr := &memJournal{}
+	labelAt := baseTime.Add(-3 * time.Millisecond)
+	r := newRunner(jr, fixedDeps(), testConfig(""), &appendingLabeler{jr: jr, at: labelAt}, nil, nil, nil, nil)
+	r.Step(context.Background())
+	running := r.Status().LastLabelAt
+	if !running.Equal(labelAt) {
+		t.Fatalf("running lastLabelAt = %v, want the journal time %v", running, labelAt)
+	}
+	restarted := newRunner(jr, fixedDeps(), testConfig(""), nil, nil, nil, nil, nil)
+	if got := restarted.Status().LastLabelAt; !got.Equal(running) {
+		t.Fatalf("restarted lastLabelAt = %v, want %v", got, running)
+	}
+}
+
 // TestProviderFaultAlertOnlyWhenFresh: a provider fault verdict older than a
 // day must not page the operator after a restart; a fresh one still does.
 func TestProviderFaultAlertOnlyWhenFresh(t *testing.T) {

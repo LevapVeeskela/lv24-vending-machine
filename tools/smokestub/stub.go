@@ -95,6 +95,19 @@ type stub struct {
 	telegramStatus int
 	now            func() time.Time
 	logger         *log.Logger
+
+	// Request counters served by GET /ctl/stats. They count role requests,
+	// never token or message content.
+	decisionRequests int
+	telegramRequests int
+	klineRequests    map[string]int
+}
+
+// stats is the GET /ctl/stats payload: request counters by role.
+type stats struct {
+	Decision int            `json:"decision"`
+	Telegram int            `json:"telegram"`
+	Klines   map[string]int `json:"klines"`
 }
 
 // newStub builds the rehearsal handler with both roles at HTTP 200.
@@ -107,6 +120,7 @@ func newStub(now func() time.Time, logger *log.Logger) *stub {
 		telegramStatus: http.StatusOK,
 		now:            now,
 		logger:         logger,
+		klineRequests:  make(map[string]int),
 	}
 }
 
@@ -117,6 +131,8 @@ func (s *stub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.decision(w, r)
 	case r.URL.Path == "/api/v3/klines":
 		s.klines(w, r)
+	case r.URL.Path == "/ctl/stats":
+		s.stats(w, r)
 	case r.URL.Path == "/ctl":
 		s.ctl(w, r)
 	case strings.HasPrefix(r.URL.Path, "/bot") && strings.HasSuffix(r.URL.Path, "/sendMessage"):
@@ -133,6 +149,7 @@ func (s *stub) decision(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 		return
 	}
+	s.countDecision()
 	if status := s.roleStatus(false); status != http.StatusOK {
 		writeJSON(w, status, map[string]any{"error": map[string]string{"code": "smokestub_decision_status"}})
 		return
@@ -277,6 +294,7 @@ func (s *stub) klines(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
+	s.countKlines(q.Get("symbol"))
 	if q.Get("symbol") != "BTCUSDT" {
 		writeBinanceError(w, http.StatusBadRequest, -1121, "Invalid symbol.")
 		return
@@ -375,6 +393,7 @@ func (s *stub) telegram(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "description": "method not allowed"})
 		return
 	}
+	s.countTelegram()
 	token := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/bot"), "/sendMessage")
 	if token == "" {
 		writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "description": "unknown bot"})
@@ -385,6 +404,56 @@ func (s *stub) telegram(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "result": map[string]int{"message_id": 1}})
+}
+
+// stats serves the request counters by role. Only aggregate counters are
+// returned: no token, message text or request body is ever stored or echoed.
+func (s *stub) stats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, s.snapshot())
+}
+
+// snapshot copies the counters under the lock.
+func (s *stub) snapshot() stats {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	klines := make(map[string]int, len(s.klineRequests))
+	for symbol, n := range s.klineRequests {
+		klines[symbol] = n
+	}
+	return stats{
+		Decision: s.decisionRequests,
+		Telegram: s.telegramRequests,
+		Klines:   klines,
+	}
+}
+
+// countDecision records one decision role request.
+func (s *stub) countDecision() {
+	s.mu.Lock()
+	s.decisionRequests++
+	s.mu.Unlock()
+}
+
+// countTelegram records one Telegram role request.
+func (s *stub) countTelegram() {
+	s.mu.Lock()
+	s.telegramRequests++
+	s.mu.Unlock()
+}
+
+// countKlines records one klines role request for symbol.
+func (s *stub) countKlines(symbol string) {
+	s.mu.Lock()
+	if s.klineRequests == nil {
+		s.klineRequests = make(map[string]int)
+	}
+	s.klineRequests[symbol]++
+	s.mu.Unlock()
 }
 
 // ctl switches the HTTP status of a role. Both parameters are optional.

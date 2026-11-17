@@ -7,6 +7,7 @@
 //	GET  /api/v3/klines       synthetic BTCUSDT candles
 //	POST /bot<token>/sendMessage  Telegram sendMessage success
 //	GET  /ctl?decision=&telegram=  switch the HTTP status of a role
+//	GET  /ctl/stats           request counters by role (no tokens or texts)
 //
 // It uses only the standard library and never talks to Drex, Binance or
 // Telegram. The command is a rehearsal tool, not a release artifact:
