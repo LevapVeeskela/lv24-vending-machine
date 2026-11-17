@@ -108,6 +108,9 @@ notifications, and writes `shadow-status.json` into the data directory; with
 `signals.trend` enabled, trend scans run two seconds after each trend bar
 closes. Keep the process running.
 
+Before the week, check how many signals your config produces: `vend signals
+estimate --days 7` (see [run-7-days.md](run-7-days.md)).
+
 ### 5. Send a gate request
 
 ```bash

@@ -116,9 +116,15 @@ type Report struct {
 	OtherPolicyDecisions int                `json:"otherPolicyDecisions,omitempty"`
 	// OtherLabelParams counts labeled outcomes produced with a different
 	// horizon/fee pair than the report assumptions.
-	OtherLabelParams int                `json:"otherLabelParams,omitempty"`
-	BackfillLabeled  int                `json:"backfillLabeled,omitempty"`
-	BackfillExcluded int                `json:"backfillExcluded,omitempty"`
-	Assumptions      *ReportAssumptions `json:"assumptions,omitempty"`
-	Arena            *ArenaReport       `json:"arena,omitempty"`
+	OtherLabelParams int `json:"otherLabelParams,omitempty"`
+	BackfillLabeled  int `json:"backfillLabeled,omitempty"`
+	BackfillExcluded int `json:"backfillExcluded,omitempty"`
+	// Days is the inclusive UTC-day span of accepted gate requests, the same
+	// value the human report prints on its window line.
+	Days int `json:"days,omitempty"`
+	// ActiveDays is the number of distinct UTC dates with at least one
+	// accepted gate request, the same value the human report prints.
+	ActiveDays  int                `json:"activeDays,omitempty"`
+	Assumptions *ReportAssumptions `json:"assumptions,omitempty"`
+	Arena       *ArenaReport       `json:"arena,omitempty"`
 }

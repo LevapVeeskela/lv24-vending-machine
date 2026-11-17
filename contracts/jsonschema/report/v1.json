@@ -46,6 +46,16 @@
     },
     "backfillLabeled": { "type": "integer", "minimum": 0 },
     "backfillExcluded": { "type": "integer", "minimum": 0 },
+    "days": {
+      "description": "Inclusive UTC-day span of accepted gate requests, matching the human window line.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "activeDays": {
+      "description": "Number of distinct UTC dates with at least one accepted gate request, matching the human window line.",
+      "type": "integer",
+      "minimum": 0
+    },
     "assumptions": { "$ref": "#/$defs/ReportAssumptions" },
     "arena": { "$ref": "#/$defs/ArenaReport" }
   },
