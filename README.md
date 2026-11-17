@@ -110,7 +110,9 @@ vend serve            # desktop/web/mobile подключаются к API
 
 ## Лицензия
 
-Ядро, провайдеры и SDK — **MIT** (см. `LICENSE`). Документация — CC-BY-4.0.
-Мобильное приложение может распространяться как коммерческий продукт в App Store,
-Google Play и RuStore — MIT это позволяет. AGPL/GPL-зависимости в ядре и мобильной
-сборке запрещены: подробности в [ADR-0007](docs/adr/0007-license-and-stores.md).
+Ядро, провайдеры и SDK — **Apache-2.0** (см. `LICENSE` и `NOTICE`).
+Документация — CC-BY-4.0. Мобильное приложение может распространяться как
+коммерческий продукт в App Store, Google Play и RuStore — Apache-2.0 это
+позволяет. AGPL/GPL-зависимости в ядре и мобильной сборке запрещены: подробности
+в [ADR-0007](docs/adr/0007-license-and-stores.md) и
+[ADR-0012](docs/adr/0012-license-apache-2.md).
