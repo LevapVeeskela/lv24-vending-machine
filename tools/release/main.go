@@ -5,8 +5,10 @@
 //
 //	go run ./tools/release
 //
-// The command is local-only: it builds into dist/, writes dist/SHA256SUMS and
-// never publishes, uploads or touches the network. Builds are reproducible:
+// The command is local-only: it builds into dist/, copies LICENSE and NOTICE
+// next to the binaries (Apache-2.0 requires both to travel with every
+// distribution), writes dist/SHA256SUMS and never publishes, uploads or
+// touches the network. Builds are reproducible:
 // static (CGO disabled), trimmed paths, no VCS stamping and a fixed version.
 package main
 
@@ -50,6 +52,11 @@ var targets = []target{
 	{goos: "darwin", goarch: "amd64", output: "vend_darwin_amd64"},
 	{goos: "darwin", goarch: "arm64", output: "vend_darwin_arm64"},
 }
+
+// legalFiles are copied from the repository root into dist/ and listed in the
+// checksum manifest: the license text and the attribution notice must
+// accompany the binaries.
+var legalFiles = []string{"LICENSE", "NOTICE"}
 
 func main() {
 	cwd, err := os.Getwd()
@@ -106,6 +113,13 @@ func run(root string) error {
 		}
 	}
 
+	for _, name := range legalFiles {
+		if err := copyLegal(root, name); err != nil {
+			return err
+		}
+		fmt.Printf("  copied %s\n", name)
+	}
+
 	if err := writeSums(root); err != nil {
 		return err
 	}
@@ -151,6 +165,23 @@ func build(root string, t target) error {
 	return nil
 }
 
+// copyLegal copies one legal file from the repository root into dist/. A
+// missing or empty file stops the run: a release without its license text is
+// not a complete set of artifacts.
+func copyLegal(root, name string) error {
+	data, err := os.ReadFile(filepath.Join(root, name))
+	if err != nil {
+		return fmt.Errorf("copy %s: %w", name, err)
+	}
+	if len(data) == 0 {
+		return fmt.Errorf("copy %s: file is empty", name)
+	}
+	if err := os.WriteFile(filepath.Join(root, distDir, name), data, 0o644); err != nil {
+		return fmt.Errorf("copy %s: %w", name, err)
+	}
+	return nil
+}
+
 // buildEnv returns the process environment with the cross-compilation
 // variables forced for one target.
 func buildEnv(t target) []string {
@@ -172,10 +203,11 @@ func buildEnv(t target) []string {
 
 // writeSums writes dist/SHA256SUMS as "<hex>  <filename>", sorted by filename.
 func writeSums(root string) error {
-	names := make([]string, 0, len(targets))
+	names := make([]string, 0, len(targets)+len(legalFiles))
 	for _, t := range targets {
 		names = append(names, t.output)
 	}
+	names = append(names, legalFiles...)
 	sort.Strings(names)
 
 	var buf bytes.Buffer
