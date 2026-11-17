@@ -283,8 +283,8 @@ class VendShadowGateTest(unittest.TestCase):
 
         self.assertEqual(set(body), set(gate_required_fields()))
         state = body["state"]
-        self.assertEqual(set(state), {"close", "ma_fast", "ma_slow", "ma_gap"})
-        self.assertEqual(state["close"], 100.0)
+        self.assertEqual(set(state), {"candle_close", "ma_fast", "ma_slow", "ma_gap"})
+        self.assertEqual(state["candle_close"], 100.0)
         self.assertEqual(state["ma_fast"], 102.0)
         self.assertEqual(state["ma_slow"], 100.0)
         self.assertAlmostEqual(state["ma_gap"], 0.02, places=12)
@@ -299,7 +299,7 @@ class VendShadowGateTest(unittest.TestCase):
         body = self.posted_body(strategy)
 
         self.assertEqual(set(body), set(gate_required_fields()))
-        self.assertEqual(set(body["state"]), {"close", "ma_fast"})
+        self.assertEqual(set(body["state"]), {"candle_close", "ma_fast"})
         self.assertNotIn("NaN", self.server.requests[0]["body"].decode("utf-8"))
 
     def test_missing_data_provider_sends_empty_state(self) -> None:

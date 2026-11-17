@@ -85,9 +85,15 @@ from vend_gate import VendGate  # noqa: E402
 DEFAULT_GATE_URL = "http://127.0.0.1:8420"
 GATE_TIMEOUT_SECONDS = 2.0
 
-# Indicators copied from the last analyzed candle. ``ma_gap`` is derived from
-# the two averages and needs both of them.
-STATE_COLUMNS = ("close", "ma_fast", "ma_slow")
+# Candle column -> state key, copied from the last analyzed candle. ``ma_gap``
+# is derived from the two averages and needs both of them. The candle close is
+# sent as ``candle_close``: the gate fills ``close`` itself from ``price`` and
+# would overwrite a key with that name.
+STATE_COLUMNS = (
+    ("close", "candle_close"),
+    ("ma_fast", "ma_fast"),
+    ("ma_slow", "ma_slow"),
+)
 
 
 def finite_number(value: object) -> float | None:
@@ -157,10 +163,10 @@ class VendShadowGate(IStrategy):
             dataframe, _ = dataprovider.get_analyzed_dataframe(pair, self.timeframe)
             candle = dataframe.iloc[-1]
             state: dict[str, float] = {}
-            for column in STATE_COLUMNS:
+            for column, key in STATE_COLUMNS:
                 number = finite_number(candle.get(column))
                 if number is not None:
-                    state[column] = number
+                    state[key] = number
             fast = state.get("ma_fast")
             slow = state.get("ma_slow")
             if fast is not None and slow is not None and slow != 0.0:
@@ -239,7 +245,7 @@ self.timeframe)` и отправляет четыре числа:
 
 | Ключ | Значение |
 |---|---|
-| `close` | close последней проанализированной свечи |
+| `candle_close` | close последней проанализированной свечи |
 | `ma_fast` | среднее за 12 баров из `populate_indicators` |
 | `ma_slow` | среднее за 48 баров из `populate_indicators` |
 | `ma_gap` | `ma_fast / ma_slow − 1` |
@@ -249,6 +255,11 @@ self.timeframe)` и отправляет четыре числа:
 или `ma_slow` отсутствует, не конечно, или `ma_slow` равен нулю. Если провайдера
 данных нет, кадр пуст или что-то бросает исключение, запрос всё равно уходит с
 `state: {}`, а вход разрешается.
+
+Гейт сам добавляет к тому, что видит модель, свои поля: `symbol`, `venue`,
+`timeframe`, `side`, `intent_kind`, `timestamp` и `close` (берётся из `price`).
+Ключ с таким именем в вашем `state` будет перезаписан — поэтому close свечи
+отправляется как `candle_close`.
 
 Свои числовые признаки можно добавить в `state`: ключи в snake_case, конечные
 числа, плоский объект. Нужно именно число, а не строка: `{"rsi_14": 55.5}` —
