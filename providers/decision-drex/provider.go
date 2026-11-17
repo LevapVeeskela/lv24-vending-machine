@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/LevapVeeskela/lv24-vending-machine/core/domain"
@@ -41,7 +42,28 @@ const (
 )
 
 // defaultTimeout applies when neither the request nor the config sets one.
-const defaultTimeout = 30 * time.Second
+//
+// The vendor recommends at least 60 seconds per attempt: Drex may wait up to
+// 55 seconds for the model before answering 529, and a shorter client timeout
+// abandons requests that were about to succeed.
+// See https://console.nace.ai/docs/drex/guides/errors-and-retries
+const defaultTimeout = 60 * time.Second
+
+// maxRetryAfter caps a vendor-requested retry delay so one header cannot stall
+// a caller for minutes. It matches the cap in core/internal/resilience.
+const maxRetryAfter = 30 * time.Second
+
+// Circuit-breaker tuning. The breaker trips after breakerOpenAfter consecutive
+// availability failures, stays open for breakerOpenFor, then lets exactly one
+// half-open probe through. Parameters are constants, not config: the vendor
+// guide documents no per-account values and the defaults are deliberately
+// conservative.
+const (
+	// breakerOpenAfter is the number of consecutive failures that opens it.
+	breakerOpenAfter = 5
+	// breakerOpenFor is the cooldown before a single half-open probe.
+	breakerOpenFor = 30 * time.Second
+)
 
 // maxBodySize caps a single response body at 1 MiB.
 const maxBodySize = 1 << 20
@@ -68,7 +90,9 @@ type Config struct {
 	SecretRef string
 	// PricePerBillion is the input-token price per 1B tokens, decimal string.
 	PricePerBillion string
-	// Timeout is the default request deadline; 0 means 30s.
+	// Timeout is the default per-attempt deadline; 0 means defaultTimeout
+	// (60s). An explicit per-request domain.DecisionRequest.Timeout still
+	// overrides it, so tests and short-lived callers can shorten one call.
 	Timeout time.Duration
 }
 
@@ -79,6 +103,7 @@ type Provider struct {
 	endpoint string
 	price    domain.Decimal
 	client   *http.Client
+	breaker  breaker
 }
 
 // New builds a Provider from cfg and host deps.
@@ -192,7 +217,12 @@ func (p *Provider) Descriptor() ports.Descriptor {
 }
 
 // Decide sends one advisory request and validates the answer set.
+//
+// Each call is one HTTP attempt: the retry loop lives in core/internal/resilience
+// and sees the typed error plus its RetryAfter hint. The provider breaks the
+// circuit itself so an unhealthy vendor is not hammered by independent callers.
 func (p *Provider) Decide(ctx context.Context, req domain.DecisionRequest) (domain.DecisionResponse, error) {
+	parent := ctx
 	timeout := p.cfg.Timeout
 	if req.Timeout > 0 {
 		timeout = req.Timeout
@@ -233,6 +263,14 @@ func (p *Provider) Decide(ctx context.Context, req domain.DecisionRequest) (doma
 	httpReq.Header.Set("Authorization", "Bearer "+secret)
 	httpReq.Header.Set("Accept", "application/json")
 
+	if allowed, wait := p.breaker.allow(p.deps.Now()); !allowed {
+		e := domain.NewError(domain.CodeUnavailable,
+			"decision-drex: circuit breaker is open")
+		e.Retryable = true
+		e.RetryAfter = wait
+		return domain.DecisionResponse{}, e
+	}
+
 	call := *p.client
 	if timeout > 0 {
 		call.Timeout = timeout
@@ -240,12 +278,20 @@ func (p *Provider) Decide(ctx context.Context, req domain.DecisionRequest) (doma
 	start := time.Now()
 	resp, err := call.Do(httpReq)
 	if err != nil {
+		// Caller cancellation is not a provider-health signal; an attempt
+		// killed by the provider deadline is.
+		if parent.Err() == nil {
+			p.breaker.record(false, p.deps.Now())
+		}
 		return domain.DecisionResponse{}, mapTransportError(ctx, err)
 	}
 	defer resp.Body.Close()
 
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxBodySize+1))
 	if err != nil {
+		if parent.Err() == nil {
+			p.breaker.record(false, p.deps.Now())
+		}
 		return domain.DecisionResponse{}, mapTransportError(ctx, err)
 	}
 	elapsed := time.Since(start)
@@ -253,19 +299,114 @@ func (p *Provider) Decide(ctx context.Context, req domain.DecisionRequest) (doma
 		elapsed = 0
 	}
 	if len(raw) > maxBodySize {
+		// The provider answered, so it is reachable; the body is just unusable.
+		p.breaker.record(true, p.deps.Now())
 		return domain.DecisionResponse{}, domain.NewError(domain.CodeInvalidOutput,
 			"decision-drex: response body exceeds 1 MiB")
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return domain.DecisionResponse{}, mapStatusError(resp.StatusCode, resp.Header.Get("Retry-After"), p.deps.Now(), raw)
+		now := p.deps.Now()
+		p.breaker.record(!transientStatus(resp.StatusCode), now)
+		return domain.DecisionResponse{}, mapStatusError(resp.StatusCode, resp.Header, now, raw)
 	}
+	p.breaker.record(true, p.deps.Now())
 	out, err := parseResponse(raw, req, p.price)
 	if err != nil {
 		return domain.DecisionResponse{}, err
 	}
 	out.Usage.LatencyMS = int64(elapsed / time.Millisecond)
 	return out, nil
+}
+
+// transientStatus reports whether the provider itself looked unhealthy. 429 is
+// throttling, not an outage: it carries Retry-After and must not open the
+// breaker, otherwise the retry loop could never wait it out.
+func transientStatus(status int) bool {
+	return status == http.StatusInternalServerError ||
+		status == http.StatusServiceUnavailable ||
+		status == 529
+}
+
+// breakerState is the circuit-breaker phase.
+type breakerState uint8
+
+const (
+	breakerClosed breakerState = iota
+	breakerOpen
+	breakerHalfOpen
+)
+
+// breaker is a mutex-guarded consecutive-failure circuit breaker.
+//
+// It counts availability failures only: transport errors, timeouts and
+// 5xx/529 answers. Any other HTTP response proves the provider is reachable
+// and resets the streak.
+type breaker struct {
+	mu       sync.Mutex
+	state    breakerState
+	failures int
+	openedAt time.Time
+	probing  bool
+}
+
+// allow reports whether a call may start. When the breaker is open and the
+// cooldown has elapsed, the caller becomes the single half-open probe. A
+// denied caller gets the time left before a probe may run.
+func (b *breaker) allow(now time.Time) (bool, time.Duration) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	switch b.state {
+	case breakerOpen:
+		elapsed := now.Sub(b.openedAt)
+		if elapsed < breakerOpenFor {
+			return false, capRetryAfter(breakerOpenFor - elapsed)
+		}
+		b.state = breakerHalfOpen
+		b.probing = true
+		return true, 0
+	case breakerHalfOpen:
+		if b.probing {
+			return false, 0
+		}
+		b.probing = true
+		return true, 0
+	default:
+		return true, 0
+	}
+}
+
+// record feeds one call result back. A success closes the breaker or resets the
+// streak; a failure counts towards the threshold while closed and re-opens it
+// in half-open. Late results of calls that were already in flight when the
+// breaker opened are ignored so they cannot flap the state.
+func (b *breaker) record(ok bool, now time.Time) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	switch b.state {
+	case breakerOpen:
+		return
+	case breakerHalfOpen:
+		b.probing = false
+		if ok {
+			b.state = breakerClosed
+			b.failures = 0
+			return
+		}
+		b.state = breakerOpen
+		b.openedAt = now
+	case breakerClosed:
+		if ok {
+			b.failures = 0
+			return
+		}
+		b.failures++
+		if b.failures >= breakerOpenAfter {
+			b.state = breakerOpen
+			b.openedAt = now
+			b.failures = breakerOpenAfter
+		}
+	}
 }
 
 // errNoSecret hides the secret-store failure detail from the message chain.
@@ -296,11 +437,64 @@ func mapTransportError(ctx context.Context, err error) error {
 	return e
 }
 
-// vendorErrorEnvelope carries the vendor error code, if present.
+// vendorErrorEnvelope carries the vendor error identity, if present.
+//
+// The vendor documents error.type; error.code is kept as a fallback for older
+// servers and existing fixtures.
 type vendorErrorEnvelope struct {
 	Error *struct {
+		Type string `json:"type"`
 		Code string `json:"code"`
 	} `json:"error"`
+}
+
+// vendorCode extracts the sanitized vendor error identity from an error body.
+func vendorCode(raw []byte) string {
+	var env vendorErrorEnvelope
+	if json.Unmarshal(raw, &env) != nil || env.Error == nil {
+		return ""
+	}
+	if t := sanitizeVendorCode(strings.TrimSpace(env.Error.Type)); t != "" {
+		return t
+	}
+	return sanitizeVendorCode(strings.TrimSpace(env.Error.Code))
+}
+
+// vendorCodeError is a *domain.Error that also exposes the sanitized vendor
+// error.type. domain.Error has no Details field yet, so flow and CLI code can
+// read the value with VendorCodeOf instead of parsing the message.
+type vendorCodeError struct {
+	err  *domain.Error
+	code string
+}
+
+// Error renders the wrapped domain error unchanged.
+func (e *vendorCodeError) Error() string { return e.err.Error() }
+
+// Unwrap returns the wrapped domain error; codes and RetryAfter stay visible
+// to domain.CodeOf, domain.IsRetryable and domain.RetryAfterOf.
+func (e *vendorCodeError) Unwrap() error { return e.err }
+
+// VendorCode returns the sanitized vendor error.type.
+func (e *vendorCodeError) VendorCode() string { return e.code }
+
+// VendorCodeOf returns the sanitized vendor error.type carried by err, or ""
+// when there is none. This is the value meant for details.vendorCode.
+func VendorCodeOf(err error) string {
+	var v interface{ VendorCode() string }
+	if errors.As(err, &v) {
+		return v.VendorCode()
+	}
+	return ""
+}
+
+// withVendorCode attaches code to a domain error without changing its code,
+// retryability or message.
+func withVendorCode(e *domain.Error, code string) error {
+	if e == nil || code == "" {
+		return e
+	}
+	return &vendorCodeError{err: e, code: code}
 }
 
 // sanitizeVendorCode keeps only [A-Za-z0-9_.-], capped at 64 characters.
@@ -327,54 +521,101 @@ func sanitizeVendorCode(s string) string {
 	return b.String()
 }
 
+// statusError builds a typed status error. Only the status, the sanitized
+// vendor type and the retry hint enter the message: headers, the full body and
+// the secret never do.
+func statusError(code domain.ErrorCode, prefix, vendor string, retryAfter time.Duration, retryable bool) error {
+	msg := "decision-drex: " + prefix
+	if retryAfter > 0 {
+		msg += ", retry after " + retryAfter.Round(time.Millisecond).String()
+	}
+	if vendor != "" {
+		msg += " (" + vendor + ")"
+	}
+	e := domain.NewError(code, msg)
+	e.Retryable = retryable
+	e.RetryAfter = retryAfter
+	return withVendorCode(e, vendor)
+}
+
 // mapStatusError maps an HTTP failure status to a domain error.
-// Only the status and the sanitized vendor error code enter the message:
-// headers, the full body and the secret never do.
-func mapStatusError(status int, retryAfter string, now time.Time, raw []byte) error {
-	code := ""
-	var env vendorErrorEnvelope
-	if json.Unmarshal(raw, &env) == nil && env.Error != nil {
-		code = sanitizeVendorCode(strings.TrimSpace(env.Error.Code))
-	}
-	suffix := ""
-	if code != "" {
-		suffix = " (" + code + ")"
-	}
-	msg := func(s string) string { return "decision-drex: " + s + suffix }
+//
+// 429, 503 and 529 carry retry-after-ms and retry-after; the hint is clamped to
+// maxRetryAfter and returned on the error for the retry loop. Only the status
+// and the sanitized vendor error type enter the message.
+func mapStatusError(status int, header http.Header, now time.Time, raw []byte) error {
+	vendor := vendorCode(raw)
+	retryAfter, _ := retryAfterHint(header, now)
 	switch status {
 	case http.StatusUnauthorized, http.StatusForbidden:
-		return domain.NewError(domain.CodeAuth, msg("authentication failed with status "+strconv.Itoa(status)))
+		return statusError(domain.CodeAuth,
+			"authentication failed with status "+strconv.Itoa(status), vendor, 0, false)
 	case http.StatusPaymentRequired:
-		return domain.NewError(domain.CodePaymentRequired, msg("payment required with status 402"))
+		return statusError(domain.CodePaymentRequired,
+			"payment required with status 402", vendor, 0, false)
 	case http.StatusBadRequest, http.StatusUnprocessableEntity, http.StatusRequestEntityTooLarge:
-		return domain.NewError(domain.CodeInvalidRequest, msg("invalid request with status "+strconv.Itoa(status)))
+		return statusError(domain.CodeInvalidRequest,
+			"invalid request with status "+strconv.Itoa(status), vendor, 0, false)
 	case http.StatusTooManyRequests:
-		m := "rate limited with status 429"
-		e := domain.NewError(domain.CodeRateLimit, msg(m))
-		e.Retryable = true
-		if d, ok := parseRetryAfter(retryAfter, now); ok {
-			e.RetryAfter = d
-		}
-		if e.RetryAfter > 0 {
-			e.Message += ", retry after " + strconv.FormatInt(int64(e.RetryAfter/time.Second), 10) + "s"
-		}
-		return e
+		return statusError(domain.CodeRateLimit,
+			"rate limited with status 429", vendor, retryAfter, true)
 	case http.StatusInternalServerError, http.StatusServiceUnavailable, 529:
-		e := domain.NewError(domain.CodeUnavailable, msg("provider unavailable with status "+strconv.Itoa(status)))
-		e.Retryable = true
-		return e
+		return statusError(domain.CodeUnavailable,
+			"provider unavailable with status "+strconv.Itoa(status), vendor, retryAfter, true)
 	default:
 		if status >= 300 && status < 400 {
 			// Redirects are never followed; retrying the same URL is futile.
-			return domain.NewError(domain.CodeInvalidOutput, msg("redirect not followed with status "+strconv.Itoa(status)))
+			return statusError(domain.CodeInvalidOutput,
+				"redirect not followed with status "+strconv.Itoa(status), vendor, 0, false)
 		}
 		if status >= 400 && status < 500 {
-			return domain.NewError(domain.CodeInvalidRequest, msg("request failed with status "+strconv.Itoa(status)))
+			return statusError(domain.CodeInvalidRequest,
+				"request failed with status "+strconv.Itoa(status), vendor, 0, false)
 		}
-		e := domain.NewError(domain.CodeUnavailable, msg("provider failed with status "+strconv.Itoa(status)))
-		e.Retryable = true
-		return e
+		return statusError(domain.CodeUnavailable,
+			"provider failed with status "+strconv.Itoa(status), vendor, retryAfter, true)
 	}
+}
+
+// retryAfterHint reads the vendor retry hint, preferring retry-after-ms (the
+// vendor asks clients to read it when they can) over retry-after, and clamps it
+// to maxRetryAfter.
+func retryAfterHint(header http.Header, now time.Time) (time.Duration, bool) {
+	if d, ok := parseRetryAfterMS(header.Get("Retry-After-Ms")); ok {
+		return capRetryAfter(d), true
+	}
+	if d, ok := parseRetryAfter(header.Get("Retry-After"), now); ok {
+		return capRetryAfter(d), true
+	}
+	return 0, false
+}
+
+// parseRetryAfterMS parses retry-after-ms as a positive millisecond delay.
+func parseRetryAfterMS(v string) (time.Duration, bool) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0, false
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	// Clamp before multiplying so a hostile header cannot overflow Duration.
+	if n > int64(maxRetryAfter/time.Millisecond) {
+		return maxRetryAfter, true
+	}
+	return time.Duration(n) * time.Millisecond, true
+}
+
+// capRetryAfter clamps d to [0, maxRetryAfter].
+func capRetryAfter(d time.Duration) time.Duration {
+	if d <= 0 {
+		return 0
+	}
+	if d > maxRetryAfter {
+		return maxRetryAfter
+	}
+	return d
 }
 
 // parseRetryAfter parses a Retry-After header as a delay: either delta
@@ -385,6 +626,10 @@ func parseRetryAfter(v string, now time.Time) (time.Duration, bool) {
 		return 0, false
 	}
 	if n, err := strconv.ParseInt(v, 10, 64); err == nil && n >= 0 {
+		// Clamp before multiplying so a hostile header cannot overflow Duration.
+		if n > int64(maxRetryAfter/time.Second) {
+			return maxRetryAfter, true
+		}
 		return time.Duration(n) * time.Second, true
 	}
 	if tm, err := http.ParseTime(v); err == nil {
@@ -532,7 +777,8 @@ func writeJSONString(buf *bytes.Buffer, s string) {
 	buf.Write(b)
 }
 
-// wireUsage mirrors the vendor usage block with snake_case fields.
+// wireUsage mirrors the vendor usage block with snake_case fields. The block
+// is optional in the vendor response.
 type wireUsage struct {
 	InputTokens  int `json:"input_tokens"`
 	OutputTokens int `json:"output_tokens"`
@@ -550,10 +796,14 @@ type wireAnswer struct {
 }
 
 // wireResponse mirrors the vendor decision response envelope.
+//
+// Usage, evaluation_time_ms and latency_ms are optional: the port has no
+// optional numeric fields, so a missing value is reported as 0 and means
+// "unknown", never a measured zero.
 type wireResponse struct {
 	Model            string                `json:"model"`
 	Answers          map[string]wireAnswer `json:"answers"`
-	Usage            wireUsage             `json:"usage"`
+	Usage            *wireUsage            `json:"usage"`
 	RequestID        string                `json:"request_id"`
 	EvaluationTimeMS *float64              `json:"evaluation_time_ms"`
 	LatencyMS        *float64              `json:"latency_ms"`
@@ -578,7 +828,7 @@ func parseResponse(raw []byte, req domain.DecisionRequest, price domain.Decimal)
 		return domain.DecisionResponse{}, domain.NewError(domain.CodeInvalidOutput,
 			"decision-drex: answer count does not match question count")
 	}
-	if wr.Usage.InputTokens < 0 || wr.Usage.OutputTokens < 0 {
+	if wr.Usage != nil && (wr.Usage.InputTokens < 0 || wr.Usage.OutputTokens < 0) {
 		return domain.DecisionResponse{}, domain.NewError(domain.CodeInvalidOutput,
 			"decision-drex: usage token count is negative")
 	}
@@ -599,10 +849,19 @@ func parseResponse(raw []byte, req domain.DecisionRequest, price domain.Decimal)
 		}
 		answers[id] = a
 	}
-	cost, err := costUSD(wr.Usage.InputTokens, price)
-	if err != nil {
-		return domain.DecisionResponse{}, domain.WrapError(domain.CodeInvalidOutput,
-			"decision-drex: cannot compute cost", err)
+	// A missing usage block is valid: the response still carries answers.
+	// Zero tokens and a zero cost then mean "not reported", not "free".
+	var inputTokens, outputTokens int
+	cost := domain.Decimal{}
+	if wr.Usage != nil {
+		inputTokens = wr.Usage.InputTokens
+		outputTokens = wr.Usage.OutputTokens
+		var cerr error
+		cost, cerr = costUSD(inputTokens, price)
+		if cerr != nil {
+			return domain.DecisionResponse{}, domain.WrapError(domain.CodeInvalidOutput,
+				"decision-drex: cannot compute cost", cerr)
+		}
 	}
 	var vendorLatency int64
 	switch {
@@ -616,8 +875,8 @@ func parseResponse(raw []byte, req domain.DecisionRequest, price domain.Decimal)
 		Model:          wr.Model,
 		RequestedModel: req.Model,
 		Usage: domain.Usage{
-			InputTokens:     wr.Usage.InputTokens,
-			OutputTokens:    wr.Usage.OutputTokens,
+			InputTokens:     inputTokens,
+			OutputTokens:    outputTokens,
 			CostUSD:         cost,
 			VendorLatencyMS: vendorLatency,
 		},
