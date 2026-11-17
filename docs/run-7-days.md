@@ -159,8 +159,39 @@ Aim for the line `verdict: enough`. If there are too few signals:
   smaller timeframe has more bars and crossings;
 - or connect your own signal source through `POST /v1/gate`.
 
-Actual output against `tools/smokestub` (Windows, 2026-11-16; **the candles are
-synthetic**, this is not the market and not a forecast):
+### Real-market measurement
+
+The owner measured the signal frequency with `vend signals estimate --days 7`,
+the release binary `0.1.0-m1` and Binance candles on 2026-11-17 16:44 UTC.
+This is one week of one market; past frequency does not predict future
+frequency.
+
+| symbols | timeframe | sides | signals per day | verdict |
+|---|---|---|---|---|
+| BTCUSDT | 1h | buy | 0.6 | low |
+| BTCUSDT | 5m | buy | 4.9 | low |
+| 5 symbols | 1h | buy | 1.9 | low |
+| 5 symbols | 15m | buy | 11.4 | low |
+| 5 symbols | 5m | buy | 27.7 | enough |
+| 5 symbols | 15m | buy,sell | 22.9 | enough |
+| 10 symbols | 1h | buy,sell | 8.3 | low |
+| 10 symbols | 15m | buy | 21.7 | enough |
+
+5 symbols = BTCUSDT, ETHUSDT, SOLUSDT, BNBUSDT, XRPUSDT. 10 symbols = the same
+plus DOGEUSDT, ADAUSDT, LINKUSDT, AVAXUSDT, LTCUSDT.
+
+A single symbol on `1h` does not reach the threshold. For the start of G1 the
+config must be at the level of "10 symbols on `15m`" or "5 symbols on `5m`",
+and it must be checked with `vend signals estimate --days 7` before the week
+starts.
+
+Every signal is one decision-provider call, so the number of calls grows with
+the number of signals: about 150 calls per week at 22 signals per day. The
+cost of one call is not stated in this document — unknown.
+
+Example of the output format only, against `tools/smokestub` (Windows,
+2026-11-16; **the candles are synthetic**): it shows the format, not market
+volume.
 
 ```text
 BTCUSDT signals=8 per_day=1.1
@@ -177,8 +208,7 @@ so in the first hours there are necessarily fewer labels than decisions.
 
 The actual `signals.trend` frequency depends on the market: an EMA fast/slow
 crossing on the chosen timeframe may not happen even once a day. There is no
-guaranteed number of signals per day; 15 is a target, not a promise, and past
-frequency does not predict future frequency.
+guaranteed number of signals per day; 15 is a target, not a promise.
 
 Measurement of one runner cycle on a 50,000-event journal (`go -C core test ./internal/app/shadow -run '^$' -bench BenchmarkRunnerCycle50kEvents -benchtime=1x`): 1.34 s — **a measurement on one machine, not a guarantee** (Windows 11, Intel Core Ultra 9 185H, 2026-11-17).
 
@@ -203,5 +233,6 @@ The check was performed on Windows 11. **Linux, macOS and `tmux` have not been
 verified on this machine**: the commands for them come from the OS
 documentation and require a separate check by the owner. A real seven-day run
 with live Drex, Binance and Telegram has not been performed either — only the
-rehearsal against `tools/smokestub`. The signal frequency of the real market has
-not been measured.
+rehearsal against `tools/smokestub`. The signal frequency was measured once
+over one week (section 4); a full week of operation was not repeated and its
+stability is unknown.

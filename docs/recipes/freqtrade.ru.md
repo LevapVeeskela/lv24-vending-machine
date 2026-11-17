@@ -64,6 +64,10 @@ Written from scratch for the public IStrategy interface; no Freqtrade source
 is vendored here. The gate is advisory in M1: ``confirm_trade_entry`` always
 returns True, and a missing, slow or failing gate never blocks a trade.
 
+Reporting is asynchronous: ``confirm_trade_entry`` builds the request and puts
+it on a bounded queue, and one daemon thread per strategy sends the queue in
+order. The entry callback never performs a network call.
+
 Environment:
     VEND_GATE_TOKEN  bearer token of the local gate; without it the strategy
                      runs normally and sends nothing.
@@ -75,7 +79,9 @@ Copy this file and ``vend_gate.py`` into your Freqtrade
 
 import math
 import os
+import queue
 import sys
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -88,6 +94,12 @@ from vend_gate import VendGate  # noqa: E402
 
 DEFAULT_GATE_URL = "http://127.0.0.1:8420"
 GATE_TIMEOUT_SECONDS = 2.0
+# The queue is bounded on purpose: a full queue drops the newest signal
+# instead of delaying the time-critical entry callback.
+GATE_QUEUE_SIZE = 100
+# One lock for the lazy sender: a strategy instance may be called from several
+# Freqtrade worker threads.
+_SENDER_LOCK = threading.Lock()
 
 # Candle column -> state key, copied from the last analyzed candle. ``ma_gap``
 # is derived from the two averages and needs both of them. The candle close is
@@ -113,6 +125,63 @@ def finite_number(value: object) -> float | None:
     if not math.isfinite(number):
         return None
     return number
+
+
+class _GateSender:
+    """Send gate requests in order from one daemon thread.
+
+    The bounded queue decouples the time-critical entry callback from the
+    network. ``submit`` never waits: when the queue is full the signal is
+    dropped silently. The worker swallows every error and stays alive, so a
+    gate outage only costs the signals that could not be delivered.
+
+    ``drain`` is the test and shutdown hook: it waits for the queue to empty
+    through a condition variable instead of polling with sleeps.
+    """
+
+    def __init__(self, client: VendGate) -> None:
+        self._client = client
+        self._pending: queue.Queue[dict] = queue.Queue(maxsize=GATE_QUEUE_SIZE)
+        self._condition = threading.Condition()
+        self._queued = 0
+        self._thread = threading.Thread(
+            target=self._run,
+            name="vend-shadow-gate",
+            daemon=True,
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def submit(self, payload: dict) -> None:
+        """Queue one payload without waiting; drop it when the queue is full."""
+        with self._condition:
+            try:
+                self._pending.put_nowait(payload)
+            except queue.Full:
+                return
+            self._queued += 1
+
+    def drain(self, timeout: float) -> bool:
+        """Wait until every queued payload is sent, or until timeout.
+
+        Returns:
+            True when nothing is pending, False on timeout.
+        """
+        with self._condition:
+            return self._condition.wait_for(lambda: self._queued == 0, timeout)
+
+    def _run(self) -> None:
+        while True:
+            payload = self._pending.get()
+            try:
+                self._client.send_and_wait(payload)
+            except Exception:  # noqa: BLE001 - the sender must outlive any failure
+                pass
+            finally:
+                with self._condition:
+                    self._queued -= 1
+                    self._condition.notify_all()
 
 
 class VendShadowGate(IStrategy):
@@ -146,6 +215,40 @@ class VendShadowGate(IStrategy):
             return None
         self._vend_gate = client
         return client
+
+    def _sender(self) -> _GateSender | None:
+        """Return the strategy's sender, starting its thread on first use.
+
+        A missing token or an invalid URL disables reporting: no queue and no
+        thread are created, and every entry is still allowed. The thread is a
+        daemon and there is at most one per strategy.
+        """
+        client = self._gate()
+        if client is None:
+            return None
+        sender = getattr(self, "_vend_sender", None)
+        if sender is not None:
+            return sender
+        with _SENDER_LOCK:
+            sender = getattr(self, "_vend_sender", None)
+            if sender is None:
+                sender = _GateSender(client)
+                sender.start()
+                self._vend_sender = sender
+            return sender
+
+    def wait_until_idle(self, timeout: float = 5.0) -> bool:
+        """Wait until the sender has sent every queued signal.
+
+        Returns:
+            True when nothing is pending (also when reporting is disabled),
+            False on timeout. The entry callback never calls this method; it
+            exists for tests and for a graceful shutdown.
+        """
+        sender = getattr(self, "_vend_sender", None)
+        if sender is None:
+            return True
+        return sender.drain(timeout)
 
     def _market_state(self, pair: str) -> dict[str, float]:
         """Return the finite indicators of the last analyzed candle for pair.
@@ -225,11 +328,11 @@ class VendShadowGate(IStrategy):
             # be read. The gate accepts finite numbers only.
             "state": self._market_state(pair),
         }
-        client = self._gate()
-        if client is not None:
+        sender = self._sender()
+        if sender is not None:
             try:
-                # Fire-and-forget: the answer is not awaited.
-                client.send(payload)
+                # Bounded queue, no network and no waiting in the callback.
+                sender.submit(payload)
             except Exception:  # noqa: BLE001 - the gate must never block a trade
                 pass
         # Shadow mode: entries are always allowed; the verdict is journaled.
@@ -318,9 +421,10 @@ vend journal verify
 - `vend journal verify` проверяет целостность журнала.
 - Если гейт выключен или занят, клиент молча теряет вызов: торговля
   продолжается, в журнале просто не будет записи.
-- Если гейт отвечает дольше клиентского таймаута (`GATE_TIMEOUT_SECONDS`,
-  2 секунды), клиент перестаёт ждать и торговля продолжается, но гейт всё равно
-  доводит решение до конца и записывает его в журнал.
+- Вход не задерживается: стратегия только кладёт запрос в ограниченную
+  очередь, а отправляет его фоновый поток. Сигнал может быть потерян при
+  переполнении очереди, при недоступном гейте и при остановке бота до
+  отправки. Гейт записывает решение, даже если клиент не дождался ответа.
 
 ## 5. Ограничения M1
 
@@ -328,11 +432,19 @@ vend journal verify
 - Гейт не отправляет ордера и не знает о размере позиции; это теневой режим.
 - Клиент не ретраит запросы. Уникальный `signalId` — ответственность стратегии.
 - Один вызов — один HTTP POST на `127.0.0.1:8420`; сеть наружу не используется.
-- Вызов выполняется внутри `confirm_trade_entry`, а документация Freqtrade
-  советует не делать там сетевых запросов: колбэк критичен ко времени.
-  Медленный гейт задерживает ордер на вход не дольше клиентского таймаута
-  (2 секунды); уменьшите `GATE_TIMEOUT_SECONDS`, если стратегия не может себе
-  этого позволить.
+- Документация Freqtrade советует не делать сетевых запросов в
+  `confirm_trade_entry`: колбэк критичен ко времени. Пример следует этому
+  совету: `confirm_trade_entry` только собирает запрос, кладёт его в
+  ограниченную очередь (`GATE_QUEUE_SIZE`, 100) и возвращает `True`; один
+  daemon-поток на стратегию выполняет HTTP POST. Вход не задерживается.
+  Доставка негарантированная: переполнение отбрасывается молча, запрос,
+  стоящий в очереди на момент остановки бота, теряется. Гейт сам доводит
+  решение до конца и записывает его в журнал, даже если клиент уже перестал
+  ждать ответа.
+- Сигналы отправляются по одному, по порядку. Если гейт отвечает дольше
+  клиентского таймаута (`GATE_TIMEOUT_SECONDS`, 2 секунды), каждый сигнал в
+  очереди ждёт до 2 секунд на каждый сигнал перед ним и на столько же позже
+  попадает в гейт и получает время решения.
 - Живые ключи биржи для этого рецепта не нужны: достаточно `--dry-run`.
 - Поддерживаемые таймфреймы — положительное число и единица `m`, `h`, `d` или
   `w` в нижнем регистре (`5m`, `1h`, `4h`, `1d`, `1w`). На всё остальное,
