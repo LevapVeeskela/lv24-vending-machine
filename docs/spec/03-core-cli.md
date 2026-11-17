@@ -11,7 +11,7 @@ trend-сигналы, Telegram, арена моделей, `--share`, policy-ф�
 `01-architecture.md`, `02-monorepo.md`.
 
 > Реализовано в M0/M1 — см. §2.0. Подразделы §2.1–§2.10 описывают целевую
-> платформу; из них реализованы только отмеченные `journal head/verify` и `serve`,
+> платформу; из них реализованы только отмеченные `journal head/tail/verify` и `serve`,
 > остальное — **не реализовано**: адаптер TradingView webhook, desktop/web/mobile,
 > paper/live, команды Telegram (двусторонний бот).
 > Не вызывать реальные API в тестах; живые вызовы — только ключом владельца.
@@ -64,6 +64,7 @@ vend outcomes label [--candles FILE] [--json] [--config FILE] [--data-dir DIR]
 vend signals estimate [--days N] [--json] [--config FILE] [--data-dir DIR]
 vend status [--json] [--config FILE] [--data-dir DIR]
 vend journal head [--json] [--data-dir DIR]
+vend journal tail [--kind KIND] [--limit N] [--json] [--data-dir DIR]
 vend journal verify [--json] [--data-dir DIR]
 ```
 
@@ -499,11 +500,24 @@ vend backtest walkforward grid-btc --windows 6 --train 0.7
 
 ### 2.9 Журнал
 
-Реализованы только `journal head` и `journal verify` (см. §2.0); остальное —
-цель.
+Реализованы `journal head`, `journal verify` и `journal tail` (см. §2.0);
+остальное — цель.
+
+`vend journal tail [--kind KIND] [--limit N] [--json]` только читает журнал.
+Он печатает последние N событий (1–1000, по умолчанию 20) в порядке возрастания
+`seq`, при `--kind` — только события с точным именем вида (`gate.request`,
+`gate.verdict`, `notify.sent`, `outcome.labeled`, …). Человеческий вывод — строка
+`seq ts kind decisionId` без payload: в payload бывают цены и состояние
+пользователя; отсутствующий `decisionId` печатается как `-`. `--json` отдаёт
+массив объектов `{seq, ts, kind, decisionId, payload}`, payload — как в журнале.
+Пустой журнал и неизвестный `kind` дают пустой вывод и код 0; неверный `--limit`
+— код 2 (usage). Цепочку команда не проверяет (для этого `journal verify`) и
+ничего не пишет.
+
+Цель:
 
 ```bash
-vend journal tail [--follow] [--kind decision|order|risk|fill]
+vend journal tail --follow [--kind decision|order|risk|fill]
 vend journal query --from 2026-11-01 --run <id> --jsonl
 vend journal export --format jsonl|csv --out ./audit/
 vend journal replay <run-id> --from <ts> --to <ts>   # детерминированный реплей

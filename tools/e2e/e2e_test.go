@@ -312,6 +312,38 @@ func TestShadowGateE2E(t *testing.T) {
 		t.Fatalf("telegram alerts = %d, want exactly 2", got.Telegram)
 	}
 
+	// 7b. The journal tail CLI must show exactly the two delivered alerts and
+	// no failed send.
+	tailOut, tailErr, code := runVend(t, vend, configPath, dataDir,
+		"journal", "tail", "--kind", "notify.sent", "--json")
+	if code != 0 {
+		t.Fatalf("journal tail exit = %d: %s", code, redact(tailOut+tailErr))
+	}
+	var sent []struct {
+		Seq     int64  `json:"seq"`
+		Kind    string `json:"kind"`
+		Payload struct {
+			OK bool `json:"ok"`
+		} `json:"payload"`
+	}
+	if err := json.Unmarshal([]byte(tailOut), &sent); err != nil {
+		t.Fatalf("decode journal tail: %v (%s)", err, redact(tailOut))
+	}
+	if len(sent) != 2 {
+		t.Fatalf("notify.sent in journal tail = %d, want exactly 2: %s", len(sent), redact(tailOut))
+	}
+	for i, ev := range sent {
+		if ev.Kind != "notify.sent" {
+			t.Fatalf("journal tail event %d kind = %q, want notify.sent", i, ev.Kind)
+		}
+		if !ev.Payload.OK {
+			t.Fatalf("journal tail event %d has ok=false: %s", i, redact(tailOut))
+		}
+		if i > 0 && ev.Seq <= sent[i-1].Seq {
+			t.Fatalf("journal tail seqs are not ascending: %d then %d", sent[i-1].Seq, ev.Seq)
+		}
+	}
+
 	// Nothing may ask for candles while the forward windows are open.
 	if got := getStats(t, client, stubBase); len(got.Klines) != 0 {
 		t.Fatalf("klines requested before the windows closed = %v", got.Klines)

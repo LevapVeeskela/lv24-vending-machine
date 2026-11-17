@@ -453,6 +453,17 @@ uses these counters.
 | `lastCycleError` is not empty | the cycle keeps running; the error repeats every interval — include the text in the report |
 | `journal chain broken at seq N` | the journal is damaged; do not continue, save the file and report |
 
+Recent notifications without stopping `serve`:
+
+```bash
+vend journal tail --kind notify.sent --limit 20
+```
+
+A line is `seq ts kind decisionId`, without the payload. `--json` shows the
+payload (including `ok` and `uptoSeq`): `ok: false` means a failed send. The
+command only reads the journal and does not verify the chain — use
+`vend journal verify` for that.
+
 ## Result of the check
 
 Record: date/time (UTC), version, policy prefix, the number of events, labels

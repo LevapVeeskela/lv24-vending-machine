@@ -169,6 +169,7 @@ func (r *runner) usage() {
 	fmt.Fprintln(r.stderr, "  gate report [--json]")
 	fmt.Fprintln(r.stderr, "  journal verify [--config FILE] [--data-dir DIR] [--json]")
 	fmt.Fprintln(r.stderr, "  journal head [--data-dir DIR] [--json]")
+	fmt.Fprintln(r.stderr, "  journal tail [--kind KIND] [--limit N] [--data-dir DIR] [--json]")
 	fmt.Fprintln(r.stderr, "  serve [--addr 127.0.0.1:8420]")
 	fmt.Fprintln(r.stderr, "  outcomes label [--candles FILE] [--json]")
 	fmt.Fprintln(r.stderr, "  signals estimate [--days N] [--config FILE] [--data-dir DIR] [--json]")
