@@ -17,6 +17,8 @@ secrets/
 # Go
 /bin/
 /dist/
+/vend
+/vend.exe
 *.exe
 *.exe~
 *.test
@@ -64,6 +66,7 @@ data/
 tmp/
 logs/
 packs/
+/serveF.log
 
 # Release artifacts (tools/release)
 dist/
