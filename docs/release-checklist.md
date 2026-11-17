@@ -78,7 +78,7 @@
 go run ./tools/release
 ```
 
-- [ ] В `dist/` появились пять файлов:
+- [ ] В `dist/` появились пять бинарников, тексты лицензии и манифест сумм:
 
   ```text
   vend_windows_amd64.exe
@@ -86,8 +86,13 @@ go run ./tools/release
   vend_linux_arm64
   vend_darwin_amd64
   vend_darwin_arm64
+  LICENSE
+  NOTICE
   SHA256SUMS
   ```
+
+  `LICENSE` и `NOTICE` обязательны: Apache-2.0 требует передавать оба файла
+  вместе с бинарниками (ADR-0012).
 
 - [ ] `dist/SHA256SUMS` содержит по строке на каждый файл в формате
       `<sha256>  <filename>`.
@@ -135,7 +140,8 @@ go run ./tools/release
 - [ ] GitHub → **Releases** → **Draft a new release**.
 - [ ] Выбрать тег `v<version>` (созданный в шаге 2).
 - [ ] Заголовок: `lv24-vending <version> (RC)`.
-- [ ] Приложить **все** файлы из `dist/`, включая `SHA256SUMS`; ничего не
+- [ ] Приложить **все** файлы из `dist/`, включая `LICENSE`, `NOTICE` и
+      `SHA256SUMS`; ничего не
       переименовывать.
 - [ ] Включить **Set as a pre-release**. Не помечать как latest: `releases/latest`
       должен остаться за стабильным релизом.

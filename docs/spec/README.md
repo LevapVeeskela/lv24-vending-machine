@@ -24,7 +24,8 @@ ADR: [0001 Go](../adr/0001-go-core.md) · [0002 contract-first](../adr/0002-cont
 [0004 provider registry](../adr/0004-provider-registry.md) ·
 [0005 local-first](../adr/0005-local-first.md) ·
 [0006 decision models](../adr/0006-decision-models.md) ·
-[0007 license & stores](../adr/0007-license-and-stores.md)
+[0007 license & stores](../adr/0007-license-and-stores.md) ·
+[0012 Apache-2.0](../adr/0012-license-apache-2.md) (accepted, заменяет пункт о MIT в 0007)
 
 По итогам ревью: [0008 wedge-first scope](../adr/0008-wedge-first-scope.md) (accepted) ·
 [0009 два режима оплаты ИИ](../adr/0009-byok-and-what-we-sell.md) (accepted) ·
@@ -77,7 +78,7 @@ vend serve            # desktop/web/mobile подключаются к этом�
 | # | Вопрос | Решение |
 |---|---|---|
 | 1 | Название и CLI | `vend` + `vendd`, репо `lv24-vending-machine` (рабочее) |
-| 2 | Лицензия | **MIT** для ядра/провайдеров/SDK, docs CC-BY-4.0; mobile можно продавать (ADR-0007) |
+| 2 | Лицензия | **Apache-2.0** для ядра/провайдеров/SDK, docs CC-BY-4.0; mobile можно продавать (ADR-0007, ADR-0012) |
 | 3 | Первые рынки | **Binance spot** (M1), затем Bybit и Alpaca |
 | 4 | Live в v1 | paper-only до M3, live — после чек-листа и 2 недель paper |
 | 5 | Push | FCM/APNs для v1, self-hosted (ntfy/UnifiedPush) как опция |

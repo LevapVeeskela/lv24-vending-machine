@@ -38,7 +38,7 @@ metadata:
   id: crypto-momentum-analyst
   version: 1.2.0
   displayName: Crypto Momentum Analyst
-  license: MIT
+  license: Apache-2.0
 spec:
   role: analyst
   appliesTo:

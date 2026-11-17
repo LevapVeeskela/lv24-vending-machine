@@ -82,9 +82,10 @@ nothing about the next trade.
   accepted by the config but have no OMS behind them yet.
 - **Not done yet:** release publication, TradingView webhook adapter,
   desktop/web/mobile clients, paper/live execution, two-way Telegram bot.
-- **Verified environment.** The end-to-end rehearsal and the live runbook were
-  exercised on Windows 11. Linux and macOS builds exist, but their live paths
-  have not been exercised by the owner yet.
+- **Verified environment.** Only the offline end-to-end rehearsal against the
+  local stub has been exercised, on Windows 11. The live path with real
+  decision, candle and Telegram providers has not been exercised on any
+  platform yet; Linux and macOS builds exist but have not been run.
 
 ## Security
 
@@ -99,11 +100,12 @@ nothing about the next trade.
 
 ## License
 
-Code, providers and SDKs are **MIT** (see [LICENSE](LICENSE)); documentation is
-CC-BY-4.0. A commercial mobile app can be distributed through the App Store,
-Google Play and RuStore — MIT allows it. AGPL/GPL dependencies are forbidden in
-the core and the mobile build; see
-[ADR-0007](docs/adr/0007-license-and-stores.md).
+Code, providers and SDKs are **Apache-2.0** (see [LICENSE](LICENSE) and
+[NOTICE](NOTICE)); documentation is CC-BY-4.0. A commercial mobile app can be
+distributed through the App Store, Google Play and RuStore — Apache-2.0 allows
+it. AGPL/GPL dependencies are forbidden in the core and the mobile build; see
+[ADR-0007](docs/adr/0007-license-and-stores.md) and
+[ADR-0012](docs/adr/0012-license-apache-2.md).
 
 ## Target platform (not implemented)
 
