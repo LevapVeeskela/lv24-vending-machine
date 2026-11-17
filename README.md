@@ -44,9 +44,9 @@ prints the counters. The full paths:
 - [Install](docs/install.md) — prebuilt binary or source build, checksums and
   the unsigned-binary warnings.
 - [Live smoke runbook](docs/runbook-live-smoke.md) — 15-minute live check with
-  `doctor --live`, one manual 1m signal and one label (Russian).
+  `doctor --live`, one manual 1m signal and one label.
 - [Seven days of operation](docs/run-7-days.md) — the multi-day shadow run and
-  the G1 criterion (Russian).
+  the G1 criterion.
 
 ## What you get
 

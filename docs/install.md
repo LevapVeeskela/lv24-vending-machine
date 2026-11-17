@@ -115,7 +115,7 @@ Then create the config and journal:
 `init` prints the config and data paths; `doctor` checks them offline. Continue
 with [quickstart](quickstart.md) (or the 15 minute live check in
 [runbook-live-smoke.md](runbook-live-smoke.md)). For the multi-day G1 run
-(≥ 7 days, ≥ 100 labels) see [run-7-days.md](run-7-days.md) (Russian).
+(≥ 7 days, ≥ 100 labels) see [run-7-days.md](run-7-days.md).
 
 ## Unsigned binaries
 

@@ -36,7 +36,7 @@ ADR: [0001 Go](../adr/0001-go-core.md) · [0002 contract-first](../adr/0002-cont
 [фичи](../review/02-features.md) · [план v0.2](../review/03-plan-v2.md)
 
 Операционные документы: [установка](../install.md) / [install.ru](../install.ru.md) ·
-[живая проверка](../runbook-live-smoke.md) · [чек-лист выпуска](../release-checklist.md)
+[живая проверка](../runbook-live-smoke.ru.md) · [чек-лист выпуска](../release-checklist.md)
 
 ## Ключевые решения (кратко)
 
@@ -59,7 +59,7 @@ ADR: [0001 Go](../adr/0001-go-core.md) · [0002 contract-first](../adr/0002-cont
 `init`, офлайн `gate test --fixture`, `journal verify`, shadow-сервер с
 `VENDING_SECRET_CONN_LOCAL_APITOKEN` и `curl` POST, фоновая разметка исходов,
 `vend status`, `gate report [--share]`, живые пробы `doctor --live`, локальная
-сборка релиза. Живая проверка владельцем — [runbook](../runbook-live-smoke.md);
+сборка релиза. Живая проверка владельцем — [runbook](../runbook-live-smoke.ru.md);
 выпуск — [release checklist](../release-checklist.md).
 
 Целевой UX (не реализовано):

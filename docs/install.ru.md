@@ -114,8 +114,8 @@ Rename-Item .\vend_windows_amd64.exe vend.exe
 
 `init` печатает пути конфига и данных, `doctor` проверяет их без сети. Дальше —
 [quickstart.ru.md](quickstart.ru.md) или живая проверка на 15 минут в
-[runbook-live-smoke.md](runbook-live-smoke.md). Длительный прогон для G1
-(≥ 7 дней, ≥ 100 меток) — [run-7-days.md](run-7-days.md).
+[runbook-live-smoke.ru.md](runbook-live-smoke.ru.md). Длительный прогон для G1
+(≥ 7 дней, ≥ 100 меток) — [run-7-days.ru.md](run-7-days.ru.md).
 
 ## Неподписанные бинарники
 
@@ -203,4 +203,4 @@ go build -o vend ./core/cmd/vend
 
 `doctor` возвращает 0, если все офлайн-проверки прошли, и 1 при любой ошибке.
 Сетевые пробы включаются флагом `vend doctor --live`; что означает каждый код —
-в [runbook](runbook-live-smoke.md).
+в [runbook](runbook-live-smoke.ru.md).

@@ -1,49 +1,50 @@
-# Семь дней непрерывной работы shadow-гейта
+# Seven days of continuous shadow-gate operation
 
-Цель: накопить данные для критерия G1 — **≥ 7 дней работы и ≥ 100 размеченных
-решений** (`docs/spec/10-roadmap.md`). M1 работает только в `shadow`: ордера не
-отправляются, деньги не двигаются. Живые вызовы провайдеров идут только с
-ключами владельца.
+[Русская версия](run-7-days.ru.md)
 
-Этот документ — про длительный запуск, а не про быструю проверку. Быстрая
-проверка на 15 минут — [runbook-live-smoke.md](runbook-live-smoke.md).
+Goal: accumulate data for criterion G1 — **≥ 7 days of operation and ≥ 100 labeled
+decisions** (`docs/spec/10-roadmap.md`). M1 runs only in `shadow`: no orders are
+sent, no money moves. Live provider calls use only the owner's keys.
 
-## 1. Почему `vend serve` в терминале, а не служба
+This document is about a long run, not a quick check. The 15-minute quick check
+is [runbook-live-smoke.md](runbook-live-smoke.md).
 
-Сейчас секреты читаются только из переменных окружения `VENDING_SECRET_*`
-(см. [quickstart.ru.md](quickstart.ru.md), шаг 3). Файла с секретами и
-ОС-keychain в M1 нет.
+## 1. Why `vend serve` in a terminal and not a service
 
-Службы `systemd`, `launchd` и планировщик Windows **не рекомендуются**, пока
-секреты пришлось бы хранить в файле: `Environment=` в unit-файле, `EnvironmentVariables`
-в plist или переменные в скрипте — это тот же секрет на диске. Готовых unit-файлов
-в репозитории нет.
+Today secrets are read only from the `VENDING_SECRET_*` environment variables
+(see [quickstart.md](quickstart.md), step 3). M1 has no secrets file and no
+OS keychain.
 
-Поэтому основной способ — постоянная терминальная сессия:
+`systemd`, `launchd` and the Windows scheduler are **not recommended** while
+secrets would have to live in a file: `Environment=` in a unit file,
+`EnvironmentVariables` in a plist or variables in a script are the same secret
+on disk. There are no ready-made unit files in the repository.
 
-- Linux / macOS: `tmux` или `screen`;
-- Windows: отдельное окно PowerShell.
+The primary way is therefore a persistent terminal session:
 
-Компьютер не должен уходить в сон: при сне останавливается и HTTP-сервер, и
-фоновый раннер. Настройте сон в ОС вручную (Windows: «Параметры → Система →
-Питание и батарея → Экран и спящий режим»; macOS: «Системные настройки →
-Энергосбережение»; Linux: настройки рабочего стола или
+- Linux / macOS: `tmux` or `screen`;
+- Windows: a separate PowerShell window.
+
+The computer must not go to sleep: sleep stops both the HTTP server and the
+background runner. Configure sleep in the OS manually (Windows: Settings →
+System → Power & battery → Screen and sleep; macOS: System Settings → Energy;
+Linux: desktop settings or
 `systemd-inhibit --what=sleep:idle --why="vend shadow gate" vend serve ...`).
-После недели верните прежние настройки.
+Restore the previous settings after the week.
 
-Запуск в `tmux` (Linux/macOS):
+Running in `tmux` (Linux/macOS):
 
 ```bash
 tmux new -s vend
 export VENDING_SECRET_CONN_DREX_APIKEY='<token>'
 export VENDING_SECRET_CONN_LOCAL_APITOKEN='<token>'
-# при включённом Telegram:
+# when Telegram is enabled:
 export VENDING_SECRET_CONN_TELEGRAM_BOTTOKEN='<token>'
 vend serve --addr 127.0.0.1:8420
-# отсоединиться: Ctrl+B, затем D; вернуться: tmux attach -t vend
+# detach: Ctrl+B, then D; reattach: tmux attach -t vend
 ```
 
-Windows, отдельное окно PowerShell:
+Windows, a separate PowerShell window:
 
 ```powershell
 $env:VENDING_SECRET_CONN_DREX_APIKEY = '<token>'
@@ -51,34 +52,35 @@ $env:VENDING_SECRET_CONN_LOCAL_APITOKEN = '<token>'
 .\vend.exe serve --addr 127.0.0.1:8420
 ```
 
-Окно не закрывать. `serve` слушает только loopback и запускает фоновый раннер:
-разметку, trend-сигналы, уведомления и запись `shadow-status.json`.
+Do not close the window. `serve` listens on loopback only and starts the
+background runner: labeling, trend signals, notifications and writing
+`shadow-status.json`.
 
-## 2. Перезагрузка и остановка
+## 2. Restart and stop
 
-Журнал лежит в каталоге данных (`vending.db`, `shadow-status.json`), конфиг —
-отдельно (`vend config path`). После перезагрузки или `Ctrl+C` достаточно снова
-задать переменные окружения и запустить `vend serve` с теми же `--config` /
-`--data-dir` (или теми же `VENDING_CONFIG_FILE` / `VENDING_DATA_DIR`).
+The journal lives in the data directory (`vending.db`, `shadow-status.json`),
+the config separately (`vend config path`). After a reboot or `Ctrl+C`, set the
+environment variables again and start `vend serve` with the same `--config` /
+`--data-dir` (or the same `VENDING_CONFIG_FILE` / `VENDING_DATA_DIR`).
 
-- журнал продолжается с последнего события, цепочка не начинается заново;
-- `lastLabelAt` восстанавливается из последнего `outcome.labeled` при старте
-  раннера;
-- доставленные уведомления не повторяются: состояние алертов выводится из
-  журнала (`notify.sent` с `uptoSeq`), поэтому тихий журнал остаётся тихим.
+- the journal continues from the last event; the chain does not start over;
+- `lastLabelAt` is restored from the last `outcome.labeled` when the runner
+  starts;
+- delivered notifications are not repeated: the alert state is derived from the
+  journal (`notify.sent` with `uptoSeq`), so a quiet journal stays quiet.
 
-Проверка на `tools/smokestub` (локальная заглушка, без сети и реальных ключей;
+Check against `tools/smokestub` (a local stub, no network and no real keys;
 Windows, 2026-11-16):
 
 ```bash
 go build -o vend ./core/cmd/vend
-go run ./tools/smokestub --addr 127.0.0.1:28471   # отдельный терминал
-# в конфиге: providers.*.baseUrl = http://127.0.0.1:28471,
-# вымышленные VENDING_SECRET_* и notify.telegram с baseUrl заглушки
+go run ./tools/smokestub --addr 127.0.0.1:28471   # separate terminal
+# in the config: providers.*.baseUrl = http://127.0.0.1:28471,
+# made-up VENDING_SECRET_* and notify.telegram with the stub baseUrl
 vend serve --addr 127.0.0.1:8420
 ```
 
-До остановки:
+Before the stop:
 
 ```text
 events: 14
@@ -87,7 +89,7 @@ lastLabelAt: 2026-11-16T20:15:52.9232211Z
 notify.sent: 1 (provider_unavailable, uptoSeq=13)
 ```
 
-После остановки `serve` и повторного запуска с теми же переменными:
+After stopping `serve` and restarting it with the same variables:
 
 ```text
 events: 14
@@ -97,67 +99,68 @@ notify.sent: 1
 journal verify: journal ok: 14 events
 ```
 
-Счётчик событий не вырос, метка та же, повторного `notify.sent` нет. Команды
-проверки:
+The event counter did not grow, the label is the same, no `notify.sent` was
+repeated. Check commands:
 
 ```bash
 vend status --json
 vend journal verify
 ```
 
-## 3. Ежедневная проверка
+## 3. Daily check
 
-Раз в сутки, не останавливая `serve`:
+Once a day, without stopping `serve`:
 
 ```bash
 vend status --json
 vend journal verify
 ```
 
-В `status --json`:
+In `status --json`:
 
-- `updatedAt` — время последней записи статуса; должен быть не старше
-  `outcome.labelIntervalSec` плюс несколько секунд (по умолчанию 300 секунд);
-- `labeled` — число меток; должно расти;
-- `lastCycleError` — отсутствует или пустой; любой текст означает ошибку цикла;
-- `lastLabelAt` — время последней метки;
-- `policyHash` — 64 hex, тот же, что печатает `vend doctor`.
+- `updatedAt` — the time of the last status write; it must be no older than
+  `outcome.labelIntervalSec` plus a few seconds (300 seconds by default);
+- `labeled` — the number of labels; it must grow;
+- `lastCycleError` — absent or empty; any text means a cycle error;
+- `lastLabelAt` — the time of the last label;
+- `policyHash` — 64 hex, the same as `vend doctor` prints.
 
-`journal verify` должен печатать `journal ok: N events`. Разрыв цепочки —
-остановиться, сохранить каталог данных и сообщить, не продолжать запись.
+`journal verify` must print `journal ok: N events`. A broken chain means: stop,
+save the data directory and report it; do not continue writing.
 
-Если `serve` остановлен, `updatedAt` в файле остаётся старым: свежесть
-проверяется только при работающем процессе.
+If `serve` is stopped, `updatedAt` in the file stays old: freshness is checked
+only while the process runs.
 
-## 4. Ориентир по объёму
+## 4. Volume target
 
-100 меток за 7 суток — это в среднем **100 / 7 ≈ 15 меток в сутки**.
+100 labels in 7 days is on average **100 / 7 ≈ 15 labels per day**.
 
-Перед началом недели проверьте, сколько сигналов даёт ваш конфиг
-`signals.trend`:
+Before the week, check how many signals your `signals.trend` config produces:
 
 ```bash
 vend signals estimate --days 7
 ```
 
-Команда читает закрытые свечи настроенного marketdata-провайдера за последние
-7 суток плюс прогрев EMA, считает пересечения тем же кодом, что и боевой скан,
-и печатает строку на символ, итог и вердикт. В журнал она ничего не пишет,
-decision-провайдера и Telegram не вызывает, секретов не требует.
+The command reads closed candles of the configured marketdata provider for the
+last 7 days plus the EMA warm-up, counts crossings with the same code as the
+live scan, and prints one line per symbol, a total and a verdict. It writes
+nothing to the journal, does not call the decision provider or Telegram, and
+needs no secrets.
 
-Строка `SYMBOL error=invalid_request` означает, что история символа короче
-окна (например, пара недавно появилась): уменьшите `--days` или уберите символ.
+A `SYMBOL error=invalid_request` line means the symbol history is shorter than
+the window (for example, the pair was listed recently): reduce `--days` or
+remove the symbol.
 
-Добейтесь строки `verdict: enough`. Если сигналов мало:
+Aim for the line `verdict: enough`. If there are too few signals:
 
-- добавьте символы в `signals.trend.symbols` (каждый символ — свой поток
-  сигналов);
-- или уменьшите таймфрейм `signals.trend.timeframe` (например, `1h` → `15m`):
-  на меньшем таймфрейме баров и пересечений больше;
-- или подключите свой источник сигналов через `POST /v1/gate`.
+- add symbols to `signals.trend.symbols` (each symbol is its own signal
+  stream);
+- or reduce the `signals.trend.timeframe` (for example, `1h` → `15m`): a
+  smaller timeframe has more bars and crossings;
+- or connect your own signal source through `POST /v1/gate`.
 
-Фактический вывод на `tools/smokestub` (Windows, 2026-11-16; **свечи
-синтетические**, это не рынок и не прогноз):
+Actual output against `tools/smokestub` (Windows, 2026-11-16; **the candles are
+synthetic**, this is not the market and not a forecast):
 
 ```text
 BTCUSDT signals=8 per_day=1.1
@@ -167,36 +170,38 @@ verdict: low
 past frequency does not predict future frequency
 ```
 
-В первые сутки сверяйте число **решений**, а не меток: строку `verdicts` в
-`vend gate report`. Метка появляется через `(horizonBars + 1)` бара после
-вердикта — при значениях по умолчанию это `(12 + 1) × 1h = 13` часов, — поэтому
-в первые часы меток заведомо меньше, чем решений.
+During the first day compare the number of **decisions**, not labels: the
+`verdicts` line in `vend gate report`. A label appears `(horizonBars + 1)` bars
+after the verdict — with the default values that is `(12 + 1) × 1h = 13` hours —
+so in the first hours there are necessarily fewer labels than decisions.
 
-Фактическая частота `signals.trend` зависит от рынка: пересечение EMA fast/slow
-на выбранном таймфрейме может не появиться ни разу за день. Гарантированного
-числа сигналов в сутки нет; 15 — это ориентир, а не обещание, а прошлая частота
-не предсказывает будущую.
+The actual `signals.trend` frequency depends on the market: an EMA fast/slow
+crossing on the chosen timeframe may not happen even once a day. There is no
+guaranteed number of signals per day; 15 is a target, not a promise, and past
+frequency does not predict future frequency.
 
-Замер стоимости одного цикла раннера на журнале 50 000 событий (`go -C core test ./internal/app/shadow -run '^$' -bench BenchmarkRunnerCycle50kEvents -benchtime=1x`): 1.34 с — **замер на одной машине, не гарантия** (Windows 11, Intel Core Ultra 9 185H, 2026-11-17).
+Measurement of one runner cycle on a 50,000-event journal (`go -C core test ./internal/app/shadow -run '^$' -bench BenchmarkRunnerCycle50kEvents -benchtime=1x`): 1.34 s — **a measurement on one machine, not a guarantee** (Windows 11, Intel Core Ultra 9 185H, 2026-11-17).
 
-## 5. Что прислать на седьмой день
+## 5. What to send on day seven
 
-Только обезличенную сводку:
+Only an anonymized summary:
 
 ```bash
 vend gate report --share
 ```
 
-В ней нет символов, площадок, цен, путей и идентификаторов; публикуется вручную.
-Критерий G1 сверяется по строкам `active days` и `labeled outcomes`.
+It contains no symbols, venues, prices, paths or identifiers; it is published
+manually. Criterion G1 is checked by the `active days` and `labeled outcomes`
+lines.
 
-**Не присылать:** конфиг, ключи и переменные окружения, `vending.db` (журнал),
-`shadow-status.json` с путями, скриншоты с ключами.
+**Do not send:** the config, keys or environment variables, `vending.db` (the
+journal), `shadow-status.json` with paths, screenshots with keys.
 
-## 6. Что не проверено на этой машине
+## 6. What has not been verified on this machine
 
-Проверка выполнялась на Windows 11. **Linux, macOS и `tmux` на этой машине не
-проверялись**: команды для них приведены по документации ОС и требуют отдельной
-проверки владельцем. Реальный семидневный прогон с живыми Drex, Binance и
-Telegram тоже не выполнялся — только репетиция на `tools/smokestub`. Частота
-сигналов реального рынка не измерялась.
+The check was performed on Windows 11. **Linux, macOS and `tmux` have not been
+verified on this machine**: the commands for them come from the OS
+documentation and require a separate check by the owner. A real seven-day run
+with live Drex, Binance and Telegram has not been performed either — only the
+rehearsal against `tools/smokestub`. The signal frequency of the real market has
+not been measured.
