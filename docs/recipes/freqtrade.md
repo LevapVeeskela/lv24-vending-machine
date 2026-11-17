@@ -451,6 +451,10 @@ vend journal verify
   request still queued when the bot stops is lost. The gate itself finishes
   the decision and records it in the journal even if the client has already
   stopped waiting.
+- Signals are sent one at a time, in order. If the gate answers slower than
+  the client timeout (`GATE_TIMEOUT_SECONDS`, 2 seconds), every queued signal
+  waits up to 2 seconds for each signal ahead of it, so it reaches the gate —
+  and gets its decision time — that much later.
 - Live exchange keys are not needed for this recipe: `--dry-run` is enough.
 - Supported timeframes are a positive amount followed by a lowercase `m`, `h`,
   `d` or `w` (`5m`, `1h`, `4h`, `1d`, `1w`). The gate answers HTTP 400 to
