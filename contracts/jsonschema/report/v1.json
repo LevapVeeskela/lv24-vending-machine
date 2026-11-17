@@ -87,7 +87,11 @@
         "constantBrier": { "type": "number", "minimum": 0, "maximum": 1 },
         "brierSkillScore": { "type": "number" },
         "auc": { "type": "number", "minimum": 0, "maximum": 1 },
-        "calibrationCount": { "type": "integer", "minimum": 0 }
+        "calibrationCount": { "type": "integer", "minimum": 0 },
+        "calibrationSufficient": {
+          "description": "Whether calibrationCount reached the minimum that makes brier, ece, auc, brierSkillScore and reliability trustworthy. When false those fields are not meaningful and the CLI prints n/a.",
+          "type": "boolean"
+        }
       }
     },
     "ReliabilityBucket": {
@@ -110,6 +114,11 @@
         "count": { "type": "integer", "minimum": 0 },
         "brier": { "type": "number", "minimum": 0, "maximum": 1 },
         "ece": { "type": "number", "minimum": 0, "maximum": 1 },
+        "calibrationCount": {
+          "description": "Labeled outcomes of this model with a recorded pass probability. Brier and ece need at least 30 pairs to be meaningful.",
+          "type": "integer",
+          "minimum": 0
+        },
         "netReturnSum": { "$ref": "../common/v1.json#/$defs/Decimal" },
         "costUsd": { "$ref": "../common/v1.json#/$defs/Decimal" },
         "avgNetReturn": { "$ref": "../common/v1.json#/$defs/Decimal" }

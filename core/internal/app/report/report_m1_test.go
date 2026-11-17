@@ -3,6 +3,7 @@ package report
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -183,17 +184,18 @@ func TestGroupsCalibrationExact(t *testing.T) {
 	if c.CalibrationCount != 6 {
 		t.Fatalf("CalibrationCount = %d, want 6", c.CalibrationCount)
 	}
-	d := c.Difference
-	if d == nil {
-		t.Fatalf("Difference is nil")
+	// Six pairs are below the 30-pair threshold, so the metrics are computed
+	// but not declared valid.
+	if c.CalibrationSufficient {
+		t.Fatalf("CalibrationSufficient = true with 6 pairs, want false")
 	}
-	decimalIs(t, "difference mean", d.Mean, "0.045000000000")
-	if d.Days != 5 {
-		t.Fatalf("difference days = %d, want 5", d.Days)
+	// The interval needs at least 30 observations per group; three ALLOW and
+	// two REJECT keep only the point mean.
+	if c.Difference != nil {
+		t.Fatalf("Difference = %+v, want nil for 3 ALLOW / 2 REJECT", c.Difference)
 	}
-	if d.BootstrapReps <= 0 || d.BootstrapReps > DefaultBootstrapReps {
-		t.Fatalf("bootstrap reps = %d, want (0,2000]", d.BootstrapReps)
-	}
+	decimalIs(t, "difference point mean",
+		c.Groups["ALLOW"].AvgNetReturn.Sub(c.Groups["REJECT"].AvgNetReturn), "0.045000000000")
 }
 
 // TestBootstrapDeterministicAndNoise contains a reproducible CI and one
@@ -206,10 +208,16 @@ func TestBootstrapDeterministicAndNoise(t *testing.T) {
 		if i%2 == 0 {
 			allow, reject = "-0.05", "0.05"
 		}
-		appendSpec(t, jr, decSpec{id: "na" + string(rune('0'+i)), sig: "na" + string(rune('0'+i)),
-			model: "m", cost: "0.01", net: allow, p: fp(0.6), verdict: domain.VerdictAllow, policy: "p1", entry: day})
-		appendSpec(t, jr, decSpec{id: "nr" + string(rune('0'+i)), sig: "nr" + string(rune('0'+i)),
-			model: "m", cost: "0.01", net: reject, p: fp(0.4), verdict: domain.VerdictReject, policy: "p1", entry: day})
+		// Thirty outcomes per group per day clear the group-size floor while
+		// keeping the day-level means (and therefore the interval) the same.
+		for j := 0; j < 30; j++ {
+			aid := fmt.Sprintf("na%d-%02d", i, j)
+			rid := fmt.Sprintf("nr%d-%02d", i, j)
+			appendSpec(t, jr, decSpec{id: aid, sig: aid,
+				model: "m", cost: "0.01", net: allow, p: fp(0.6), verdict: domain.VerdictAllow, policy: "p1", entry: day})
+			appendSpec(t, jr, decSpec{id: rid, sig: rid,
+				model: "m", cost: "0.01", net: reject, p: fp(0.4), verdict: domain.VerdictReject, policy: "p1", entry: day})
+		}
 	}
 	first := buildReport(t, jr, Config{MinLabeled: 1})
 	second := buildReport(t, jr, Config{MinLabeled: 1})
@@ -235,12 +243,20 @@ func TestBootstrapDeterministicAndNoise(t *testing.T) {
 // available while keeping the point mean.
 func TestTwoDaysNoDifference(t *testing.T) {
 	jr := &fakeJournal{}
-	appendSpec(t, jr, decSpec{id: "t1", sig: "t1", model: "m", cost: "0.01", net: "0.10",
-		p: fp(0.7), verdict: domain.VerdictAllow, policy: "p1",
-		entry: time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)})
-	appendSpec(t, jr, decSpec{id: "t2", sig: "t2", model: "m", cost: "0.01", net: "-0.04",
-		p: fp(0.3), verdict: domain.VerdictReject, policy: "p1",
-		entry: time.Date(2026, 11, 2, 0, 0, 0, 0, time.UTC)})
+	day1 := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	day2 := time.Date(2026, 11, 2, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < 30; i++ {
+		aid := fmt.Sprintf("t-a%02d", i)
+		rid := fmt.Sprintf("t-r%02d", i)
+		day := day1
+		if i%2 == 1 {
+			day = day2
+		}
+		appendSpec(t, jr, decSpec{id: aid, sig: aid, model: "m", cost: "0.01", net: "0.10",
+			p: fp(0.7), verdict: domain.VerdictAllow, policy: "p1", entry: day})
+		appendSpec(t, jr, decSpec{id: rid, sig: rid, model: "m", cost: "0.01", net: "-0.04",
+			p: fp(0.3), verdict: domain.VerdictReject, policy: "p1", entry: day})
+	}
 	b, err := New(jr, testDeps(), Config{MinLabeled: 1})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -252,11 +268,142 @@ func TestTwoDaysNoDifference(t *testing.T) {
 	if rep.Comparisons == nil {
 		t.Fatalf("Comparisons is nil")
 	}
+	if rep.Comparisons.Groups["ALLOW"].Count != 30 || rep.Comparisons.Groups["REJECT"].Count != 30 {
+		t.Fatalf("groups = %+v, want 30/30", rep.Comparisons.Groups)
+	}
 	if rep.Comparisons.Difference != nil {
 		t.Fatalf("Difference = %+v, want nil for 2 days", rep.Comparisons.Difference)
 	}
 	if b.Days() != 2 {
 		t.Fatalf("Days() = %d, want 2", b.Days())
+	}
+}
+
+// TestCalibrationNoPairsWithFullLabeling: 100 labeled outcomes without a
+// risk_check probability are "sufficient" for comparisons but have zero
+// calibration pairs, so the calibration metrics must not be declared valid.
+func TestCalibrationNoPairsWithFullLabeling(t *testing.T) {
+	jr := &fakeJournal{}
+	base := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	for i := 0; i < 100; i++ {
+		verdict := domain.VerdictAllow
+		net := "0.01"
+		if i%2 == 1 {
+			verdict = domain.VerdictReject
+			net = "-0.01"
+		}
+		id := fmt.Sprintf("n%03d", i)
+		appendSpec(t, jr, decSpec{id: id, sig: id, model: "m", cost: "0.01", net: net,
+			verdict: verdict, policy: "p1", entry: base.AddDate(0, 0, i%7)})
+	}
+	rep := buildReport(t, jr, Config{})
+	if rep.LabeledCount != 100 || !rep.Sufficient {
+		t.Fatalf("labeled/sufficient = %d/%v, want 100/true", rep.LabeledCount, rep.Sufficient)
+	}
+	c := rep.Comparisons
+	if c == nil {
+		t.Fatalf("Comparisons is nil")
+	}
+	if c.CalibrationCount != 0 {
+		t.Fatalf("CalibrationCount = %d, want 0", c.CalibrationCount)
+	}
+	if c.CalibrationSufficient {
+		t.Fatalf("CalibrationSufficient = true with 0 pairs, want false")
+	}
+}
+
+// TestCalibrationThreshold: 29 pairs stay invalid, 30 pairs become valid.
+func TestCalibrationThreshold(t *testing.T) {
+	for _, tc := range []struct {
+		pairs int
+		want  bool
+	}{{29, false}, {30, true}} {
+		jr := &fakeJournal{}
+		base := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+		for i := 0; i < tc.pairs; i++ {
+			id := fmt.Sprintf("th%02d", i)
+			appendSpec(t, jr, decSpec{id: id, sig: id, model: "m", cost: "0.01", net: "0.01",
+				p: fp(0.6), verdict: domain.VerdictAllow, policy: "p1", entry: base.AddDate(0, 0, i%7)})
+		}
+		rep := buildReport(t, jr, Config{MinLabeled: 1})
+		c := rep.Comparisons
+		if c == nil {
+			t.Fatalf("%d pairs: Comparisons is nil", tc.pairs)
+		}
+		if c.CalibrationCount != tc.pairs {
+			t.Fatalf("%d pairs: CalibrationCount = %d", tc.pairs, c.CalibrationCount)
+		}
+		if c.CalibrationSufficient != tc.want {
+			t.Fatalf("%d pairs: CalibrationSufficient = %v, want %v",
+				tc.pairs, c.CalibrationSufficient, tc.want)
+		}
+	}
+}
+
+// TestDifferenceRequiresGroupSize: one ALLOW among 99 REJECT must not produce
+// a confidence interval that looks significant.
+func TestDifferenceRequiresGroupSize(t *testing.T) {
+	jr := &fakeJournal{}
+	base := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	for i := 0; i < 100; i++ {
+		id := fmt.Sprintf("g%03d", i)
+		verdict := domain.VerdictReject
+		net := "-0.01"
+		if i == 0 {
+			verdict = domain.VerdictAllow
+			net = "0.50"
+		}
+		appendSpec(t, jr, decSpec{id: id, sig: id, model: "m", cost: "0.01", net: net,
+			p: fp(0.6), verdict: verdict, policy: "p1", entry: base.AddDate(0, 0, i%7)})
+	}
+	rep := buildReport(t, jr, Config{})
+	c := rep.Comparisons
+	if c == nil {
+		t.Fatalf("Comparisons is nil")
+	}
+	if c.Groups["ALLOW"].Count != 1 || c.Groups["REJECT"].Count != 99 {
+		t.Fatalf("groups = %+v, want ALLOW=1 REJECT=99", c.Groups)
+	}
+	if c.Difference != nil {
+		t.Fatalf("Difference = %+v, want nil for 1 ALLOW / 99 REJECT", c.Difference)
+	}
+}
+
+// TestDifferenceThirtyPerGroup keeps the interval once both groups have 30
+// observations over at least five days.
+func TestDifferenceThirtyPerGroup(t *testing.T) {
+	jr := &fakeJournal{}
+	base := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	for i := 0; i < 30; i++ {
+		aid := fmt.Sprintf("da%02d", i)
+		rid := fmt.Sprintf("dr%02d", i)
+		day := base.AddDate(0, 0, i%5)
+		appendSpec(t, jr, decSpec{id: aid, sig: aid, model: "m", cost: "0.01", net: "0.10",
+			p: fp(0.7), verdict: domain.VerdictAllow, policy: "p1", entry: day})
+		appendSpec(t, jr, decSpec{id: rid, sig: rid, model: "m", cost: "0.01", net: "-0.04",
+			p: fp(0.3), verdict: domain.VerdictReject, policy: "p1", entry: day})
+	}
+	rep := buildReport(t, jr, Config{MinLabeled: 60})
+	c := rep.Comparisons
+	if c == nil {
+		t.Fatalf("Comparisons is nil")
+	}
+	if c.Groups["ALLOW"].Count != 30 || c.Groups["REJECT"].Count != 30 {
+		t.Fatalf("groups = %+v, want 30/30", c.Groups)
+	}
+	d := c.Difference
+	if d == nil {
+		t.Fatalf("Difference is nil, want an interval for 30/30")
+	}
+	if d.Days != 5 {
+		t.Fatalf("difference days = %d, want 5", d.Days)
+	}
+	if d.BootstrapReps <= 0 || d.BootstrapReps > DefaultBootstrapReps {
+		t.Fatalf("bootstrap reps = %d, want (0,%d]", d.BootstrapReps, DefaultBootstrapReps)
+	}
+	decimalIs(t, "difference mean", d.Mean, "0.140000000000")
+	if d.Low.Cmp(d.High) > 0 {
+		t.Fatalf("interval low %s > high %s", d.Low.String(), d.High.String())
 	}
 }
 

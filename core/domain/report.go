@@ -12,13 +12,17 @@ type ReliabilityBucket struct {
 
 // ModelBreakdown aggregates labeled outcomes for one decision model.
 type ModelBreakdown struct {
-	Model        string  `json:"model"`
-	Count        int     `json:"count"`
-	Brier        float64 `json:"brier"`
-	ECE          float64 `json:"ece"`
-	NetReturnSum Decimal `json:"netReturnSum"`
-	CostUSD      Decimal `json:"costUsd"`
-	AvgNetReturn Decimal `json:"avgNetReturn,omitempty"`
+	Model string  `json:"model"`
+	Count int     `json:"count"`
+	Brier float64 `json:"brier"`
+	ECE   float64 `json:"ece"`
+	// CalibrationCount is the number of labeled outcomes of this model with
+	// a recorded pass probability. Brier and ECE are only meaningful when it
+	// reaches the report calibration threshold.
+	CalibrationCount int     `json:"calibrationCount"`
+	NetReturnSum     Decimal `json:"netReturnSum"`
+	CostUSD          Decimal `json:"costUsd"`
+	AvgNetReturn     Decimal `json:"avgNetReturn,omitempty"`
 }
 
 // GroupStats aggregates labeled outcomes for one comparison group.
@@ -54,6 +58,11 @@ type ReportComparisons struct {
 	BrierSkillScore   float64               `json:"brierSkillScore"`
 	AUC               float64               `json:"auc"`
 	CalibrationCount  int                   `json:"calibrationCount"`
+	// CalibrationSufficient reports whether CalibrationCount reached the
+	// minimum that makes Brier/ECE/AUC/BSS/reliability trustworthy. The
+	// numeric fields stay populated for machine consumers; human and share
+	// output print n/a while this is false.
+	CalibrationSufficient bool `json:"calibrationSufficient"`
 }
 
 // ReportAssumptions records the labeling assumptions behind a report.
