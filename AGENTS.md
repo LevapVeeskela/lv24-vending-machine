@@ -72,11 +72,12 @@ cmd    → всё (единственный composition root)
 ```bash
 task gen            # кодоген из contracts/
 task gen:check      # drift-проверка (локально)
-task check          # gen:check + lint + test + build
-task test           # go test ./... -race + npm test + flutter test
-task dev:desktop    # vite + tauri dev
-task dev:web
-task dev:core       # go run ./core/cmd/vendd
+task check          # gen:check + lint + test (-short) + build; быстрый
+task check:full     # check + e2e + 7-дневный shadow-прогон
+task test           # все модули; core в -short, e2e и 7d отдельно
+task test:7d        # только 7-дневный прогон (минуты)
+task test:e2e       # HTTP+CLI e2e (VEND_E2E=1)
+task test:race      # core с -race (нужен cgo и C-компилятор)
 ```
 
 ## 8. Definition of Done
