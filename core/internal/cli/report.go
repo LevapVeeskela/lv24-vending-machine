@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -48,6 +49,7 @@ func (r *runner) cmdGateReport(args []string) int {
 	includeBackfill := fs.Bool("include-backfill", false, "count backfilled outcomes in the comparison")
 	share := fs.Bool("share", false, "print a sanitized markdown summary instead of the full report")
 	shareOut := fs.String("out", "", "write the --share markdown to FILE (0600)")
+	shareForce := fs.Bool("force", false, "overwrite an existing --out file")
 	allowBrokenChain := fs.Bool("allow-broken-chain", false,
 		"report even when the journal hash chain is broken")
 	if err := fs.Parse(rest); err != nil {
@@ -135,7 +137,7 @@ func (r *runner) cmdGateReport(args []string) int {
 	rep.Days = win.days
 	rep.ActiveDays = win.active
 	if *share {
-		return r.printShare(rep, *shareOut, win)
+		return r.printShare(rep, *shareOut, win, dataDir, *shareForce)
 	}
 	if jsonOut {
 		r.printJSON(rep)
@@ -288,15 +290,24 @@ func shortPolicy(hash string) string {
 
 // printShare writes the sanitized markdown summary either to stdout or to
 // path, and never echoes journal content beyond aggregate counts.
-func (r *runner) printShare(rep domain.Report, path string, win reportWindow) int {
+func (r *runner) printShare(rep domain.Report, path string, win reportWindow, dataDir string, force bool) int {
 	body := shareMarkdown(rep, r.ver, win)
 	if path == "" {
 		fmt.Fprint(r.stdout, body)
 		return exitOK
 	}
-	if werr := writeFileAtomic(path, []byte(body), 0o600); werr != nil {
-		return r.fail(false, exitGeneral, codeGeneral, werr.Error(),
-			"check the output path is writable and retry", false, nil)
+	if werr := writeFileNew(path, []byte(body), 0o600, newFileOptions{DataDir: dataDir, Force: force}); werr != nil {
+		switch {
+		case errors.Is(werr, errOutputExists):
+			return r.fail(false, exitUsage, codeUsage, werr.Error(),
+				"pass --force to overwrite the file, or choose another path", false, nil)
+		case errors.Is(werr, errOutputInDataDir):
+			return r.fail(false, exitUsage, codeUsage, werr.Error(),
+				"choose an output path outside the data directory", false, nil)
+		default:
+			return r.fail(false, exitGeneral, codeGeneral, werr.Error(),
+				"check the output path is writable and retry", false, nil)
+		}
 	}
 	fmt.Fprintf(r.stdout, "written to %s\n", path)
 	return exitOK

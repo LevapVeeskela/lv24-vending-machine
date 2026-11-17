@@ -183,7 +183,7 @@ commands:
   config path|get KEY|validate [--config FILE] [--data-dir DIR] [--json]
   doctor [--live] [--symbol SYMBOL] [--save-raw FILE] [--config FILE] [--data-dir DIR] [--json]
   gate test --request FILE [--fixture FILE] [--save-raw FILE] [--config FILE] [--data-dir DIR] [--json]
-  gate report [--policy HASH] [--include-backfill] [--share [--out FILE]] [--json] [--config FILE] [--data-dir DIR]
+  gate report [--policy HASH] [--include-backfill] [--share [--out FILE] [--force]] [--json] [--config FILE] [--data-dir DIR]
   journal verify [--config FILE] [--data-dir DIR] [--json]
   journal head [--config FILE] [--data-dir DIR] [--json]
   journal tail [--kind KIND] [--limit N] [--config FILE] [--data-dir DIR] [--json]
@@ -255,7 +255,7 @@ flags:
   --fixture FILE   decision response fixture for an offline replay
   --save-raw FILE  write the raw decision response to FILE (0600)
 `,
-	"gate report": `usage: vend gate report [--policy HASH] [--include-backfill] [--share [--out FILE]]
+	"gate report": `usage: vend gate report [--policy HASH] [--include-backfill] [--share [--out FILE] [--force]]
                        [--json] [--config FILE] [--data-dir DIR]
 
 Build the shadow-gate report. --share prints a sanitized markdown summary and
@@ -265,7 +265,9 @@ flags:
   --policy HASH        only report decisions made under this 64-hex policy hash
   --include-backfill   count backfilled outcomes in the comparison
   --share              print the sanitized markdown summary instead of the report
-  --out FILE           write the --share summary to FILE (0600)
+  --out FILE           write the --share summary to FILE (0600); refuses an existing file
+  --force              overwrite the --out file if it already exists
+  --allow-broken-chain report even when the journal hash chain is broken
 `,
 	"journal": `usage: vend journal verify|head|tail [--config FILE] [--data-dir DIR] [--json]
 

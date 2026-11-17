@@ -234,15 +234,28 @@ func TestGateReportShareRejectsJSON(t *testing.T) {
 func TestGateReportShareOut(t *testing.T) {
 	env, stdout, stderr, cfgPath, dataDir := initShareEnv(t)
 	seedShareReport(t, env, dataDir)
-	// A pre-existing file must not keep its old permissions.
+	// A pre-existing file must not be replaced without --force.
 	outPath := filepath.Join(t.TempDir(), "summary.md")
 	if err := os.WriteFile(outPath, []byte("old\n"), 0o644); err != nil {
 		t.Fatalf("seed out file: %v", err)
 	}
 
 	if code := runArgs(env, "gate", "report", "--share", "--out", outPath,
+		"--config", cfgPath, "--data-dir", dataDir); code != 2 {
+		t.Fatalf("gate report --share --out without --force = %d, want 2, stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "already exists") {
+		t.Fatalf("stderr misses the existing-file hint: %q", stderr.String())
+	}
+	if raw, err := os.ReadFile(outPath); err != nil || string(raw) != "old\n" {
+		t.Fatalf("existing file was modified without --force: %q, err=%v", raw, err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+
+	if code := runArgs(env, "gate", "report", "--share", "--out", outPath, "--force",
 		"--config", cfgPath, "--data-dir", dataDir); code != 0 {
-		t.Fatalf("gate report --share --out = %d, stderr=%s", code, stderr.String())
+		t.Fatalf("gate report --share --out --force = %d, stderr=%s", code, stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "written to "+outPath) {
 		t.Fatalf("stdout misses the written notice: %q", stdout.String())
@@ -285,6 +298,25 @@ func TestGateReportOutRequiresShare(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "--out requires --share") {
 		t.Fatalf("stderr misses the --out hint: %q", stderr.String())
+	}
+}
+
+// TestGateReportShareOutInsideDataDir: --out must never write into the
+// directory that holds the journal and the config, even with --force.
+func TestGateReportShareOutInsideDataDir(t *testing.T) {
+	env, _, stderr, cfgPath, dataDir := initShareEnv(t)
+	seedShareReport(t, env, dataDir)
+	outPath := filepath.Join(dataDir, "summary.md")
+
+	if code := runArgs(env, "gate", "report", "--share", "--out", outPath, "--force",
+		"--config", cfgPath, "--data-dir", dataDir); code != 2 {
+		t.Fatalf("gate report --out inside data dir = %d, want 2, stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "data directory") {
+		t.Fatalf("stderr misses the data-dir hint: %q", stderr.String())
+	}
+	if _, err := os.Stat(outPath); !os.IsNotExist(err) {
+		t.Fatalf("summary was written inside the data dir: err=%v", err)
 	}
 }
 
