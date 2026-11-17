@@ -247,6 +247,13 @@ func validateRequest(req domain.GateRequest) error {
 	if strings.TrimSpace(req.Instrument.Venue) == "" || strings.TrimSpace(req.Instrument.Symbol) == "" {
 		return invalid("instrument venue and symbol must not be empty")
 	}
+	// M1 has one spot venue. A futures-style suffix would be journaled and
+	// charged, but the spot candle source cannot label it afterwards, so the
+	// signal would never reach the report. Reject it before any provider call.
+	if strings.Contains(req.Instrument.Symbol, ":") {
+		return invalid(fmt.Sprintf(
+			"futures-style symbol %q is not supported in M1 (spot only)", req.Instrument.Symbol))
+	}
 	if strings.TrimSpace(req.Timeframe) == "" {
 		return invalid("timeframe must not be empty")
 	}

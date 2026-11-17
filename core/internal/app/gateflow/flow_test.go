@@ -652,6 +652,7 @@ func TestInvalidRequestRejectedBeforeIO(t *testing.T) {
 		"signal":    func(r *domain.GateRequest) { r.SignalID = "" },
 		"venue":     func(r *domain.GateRequest) { r.Instrument.Venue = "" },
 		"symbol":    func(r *domain.GateRequest) { r.Instrument.Symbol = "" },
+		"futures":   func(r *domain.GateRequest) { r.Instrument.Symbol = "BTC/USDT:USDT" },
 		"timeframe": func(r *domain.GateRequest) { r.Timeframe = "" },
 		// An upper-case unit or a monthly bar cannot be labeled later.
 		"timeframeCase":  func(r *domain.GateRequest) { r.Timeframe = "4H" },
