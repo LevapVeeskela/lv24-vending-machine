@@ -177,6 +177,8 @@ past frequency does not predict future frequency
 числа сигналов в сутки нет; 15 — это ориентир, а не обещание, а прошлая частота
 не предсказывает будущую.
 
+Замер стоимости одного цикла раннера на журнале 50 000 событий (`go -C core test ./internal/app/shadow -run '^$' -bench BenchmarkRunnerCycle50kEvents -benchtime=1x`): 1.34 с — **замер на одной машине, не гарантия** (Windows 11, Intel Core Ultra 9 185H, 2026-11-17).
+
 ## 5. Что прислать на седьмой день
 
 Только обезличенную сводку:
