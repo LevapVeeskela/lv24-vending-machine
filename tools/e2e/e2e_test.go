@@ -6,6 +6,10 @@
 // labeling window:
 //
 //	VEND_E2E=1 go -C tools test -count=1 ./e2e/...
+//
+// VEND_E2E_BIN points at a prebuilt vend binary (absolute, or relative to the
+// repository root). When it is set, the test runs that file instead of
+// building vend; tools/smokestub is always built.
 package e2e
 
 import (
@@ -175,7 +179,8 @@ func TestShadowGateE2E(t *testing.T) {
 		t.Fatalf("create bin dir: %v", err)
 	}
 
-	vend := buildBinary(t, filepath.Join(root, "core"), "./cmd/vend", filepath.Join(binDir, exeName("vend")))
+	vend := vendBinary(t, root, filepath.Join(binDir, exeName("vend")))
+	t.Logf("vend under test: %s", vend)
 	stub := buildBinary(t, filepath.Join(root, "tools"), "./smokestub", filepath.Join(binDir, exeName("smokestub")))
 
 	decisionSecret := randomSecret(t)
@@ -485,6 +490,31 @@ func buildBinary(t *testing.T, dir, pkg, out string) string {
 		t.Fatalf("go build %s in %s: %v\n%s", pkg, dir, err, raw)
 	}
 	return out
+}
+
+// vendBinary returns the vend binary under test. With VEND_E2E_BIN set it
+// uses that file and does not build vend; a relative value is resolved from
+// the repository root. Without it vend is built from the checkout into
+// fallback.
+func vendBinary(t *testing.T, root, fallback string) string {
+	t.Helper()
+	configured := strings.TrimSpace(os.Getenv("VEND_E2E_BIN"))
+	if configured == "" {
+		return buildBinary(t, filepath.Join(root, "core"), "./cmd/vend", fallback)
+	}
+	path := configured
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(root, path)
+	}
+	path = filepath.Clean(path)
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("VEND_E2E_BIN %q: %v", configured, err)
+	}
+	if info.IsDir() {
+		t.Fatalf("VEND_E2E_BIN %q is a directory, want the vend executable", configured)
+	}
+	return path
 }
 
 // freeAddr reserves and releases a loopback port.

@@ -33,6 +33,10 @@ PowerShell set the variable first:
 the package is skipped, so an ordinary `go test ./...` stays fast. If `python`
 is missing but `python3` exists, use `python3` for the client and example tests.
 
+Set `VEND_E2E_BIN` to a prebuilt `vend` (absolute, or relative to the repository
+root) to run that file instead of building one; the release checklist uses it on
+the `dist/` artifact before tagging.
+
 ## Hard rules
 
 - **No secrets** in code, config, the journal, logs, tests or commits. Secrets
