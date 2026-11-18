@@ -179,9 +179,9 @@ const generalHelp = `usage: vend <command> [options]
 
 commands:
   version [--json]
-  init [--force] [--config FILE] [--data-dir DIR] [--json]
+  init [--quick] [--force] [--config FILE] [--data-dir DIR] [--json]
   config path|get KEY|validate [--config FILE] [--data-dir DIR] [--json]
-  doctor [--live] [--symbol SYMBOL] [--save-raw FILE] [--force] [--config FILE] [--data-dir DIR] [--json]
+  doctor [--strict] [--live] [--symbol SYMBOL] [--save-raw FILE] [--force] [--config FILE] [--data-dir DIR] [--json]
   gate test --request FILE [--fixture FILE] [--save-raw FILE] [--force] [--config FILE] [--data-dir DIR] [--json]
   gate report [--policy HASH] [--include-backfill] [--share [--out FILE] [--force]] [--json] [--config FILE] [--data-dir DIR]
   journal verify [--config FILE] [--data-dir DIR] [--json]
@@ -211,12 +211,14 @@ var helpPages = map[string]string{
 
 Print the vend version.
 `,
-	"init": `usage: vend init [--force] [--config FILE] [--data-dir DIR] [--json]
+	"init": `usage: vend init [--quick] [--force] [--config FILE] [--data-dir DIR] [--json]
 
-Create the default config file and an empty journal, then print the resolved
-paths and the next commands to run.
+Create the config file and an empty journal, then print the resolved paths
+and the next commands to run. --quick writes the G1 profile (ten USDT
+symbols on 15m, trend source enabled) and prints the export commands.
 
 flags:
+  --quick   write the G1 10 symbols x 15m profile instead of the empty default
   --force   overwrite an existing config file
 `,
 	"config": `usage: vend config path|get KEY|validate [--config FILE] [--data-dir DIR] [--json]
@@ -226,12 +228,15 @@ subcommands:
   get KEY   print one dotted config value, e.g. gate.minPass
   validate  parse and validate the config file
 `,
-	"doctor": `usage: vend doctor [--live] [--symbol SYMBOL] [--save-raw FILE] [--force] [--config FILE] [--data-dir DIR] [--json]
+	"doctor": `usage: vend doctor [--strict] [--live] [--symbol SYMBOL] [--save-raw FILE] [--force] [--config FILE] [--data-dir DIR] [--json]
 
 Check the config, data directory, journal chain, provider registry, secrets and
-gate policy. With --live, also run the opt-in network probes.
+gate policy. With --live, also run the opt-in network probes. With --strict,
+also require the offline G1 profile invariants; it never claims volume is
+verified (run vend signals estimate for that).
 
 flags:
+  --strict         require the offline G1 profile (trend, 10 symbols, 15m, secrets)
   --live           run the network probes (decision, candles, telegram)
   --symbol SYMBOL  symbol for the live candles probe (default BTCUSDT)
   --save-raw FILE  write the raw decision response to FILE (0600); needs --live
