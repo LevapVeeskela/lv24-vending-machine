@@ -61,7 +61,7 @@ vend version [--json]
 vend init [--quick] [--config FILE] [--data-dir DIR] [--force] [--json]
 vend config path|get KEY|validate [--config FILE] [--data-dir DIR] [--json]
 vend doctor [--strict] [--live] [--symbol SYMBOL] [--save-raw FILE] [--config FILE] [--data-dir DIR] [--json]
-vend demo [--data-dir DIR] [--json] [--keep]
+vend demo [--data-dir DIR] [--json] [--keep] [--share]
 vend gate test --request FILE [--fixture FILE] [--save-raw FILE] [--force] [--config FILE] [--data-dir DIR] [--json]
 vend gate report [--policy HASH] [--include-backfill] [--share [--out FILE [--force]]] [--allow-broken-chain] [--json] [--config FILE] [--data-dir DIR]
 vend serve [--addr 127.0.0.1:8420] [--config FILE] [--data-dir DIR]
@@ -429,20 +429,22 @@ Human-вывод печатает после `labeled:` тот же блок G1,
 total:{signals, perDay}, verdict}`; отдельная схема для него в `contracts/` не
 заводится — служебные ответы CLI (version, doctor, status) схем не имеют.
 
-`vend demo [--data-dir DIR] [--json] [--keep]` — офлайн-демонстрация без
-провайдеров, сети и ключей. Команда создаёт временный каталог (если
+`vend demo [--data-dir DIR] [--json] [--keep] [--share]` — офлайн-демонстрация
+без провайдеров, сети и ключей. Команда создаёт временный каталог (если
 `--data-dir` не задан), пишет журнал с `runId=demo` за 7 UTC-дней, не меньше
 120 решений и не меньше 100 `outcome.labeled` с фиксированным seed и печатает
 полный human-отчёт того же builder'а, что и обычный журнал: вероятности и
 исходы детерминированы, Brier/ECE/AUC и counterfactual считаются реальным
-кодом. Баннер `SYNTHETIC — not real market data` стоит в начале и в каждом
+кодом. Баннер `SYNTHETIC - not real market data` стоит в начале и в каждом
 крупном разделе (минимум: заголовок, метрики, допущения). `--json` отдаёт
 `synthetic: true` и те же числа. `--share` не поддерживается: exit 2 с
-сообщением `synthetic journal is not G1 evidence`. Без `--keep` каталог
-удаляется; с `--keep` печатаются путь и подсказка `vend status --data-dir
-<path>`. Demo не вызывает провайдеров, не пишет за пределы своего каталога и
-не засчитывается в G1: `status --data-dir <demo>` показывает `SYNTHETIC` и
-`g1: 0/100, 0/7`. Отдельной JSON-схемы у команды нет.
+сообщением `synthetic journal is not G1 evidence`. Временный каталог удаляется
+без `--keep`; явный `--data-dir` не удаляется, а существующий журнал в нём
+отклоняется (exit 4), чтобы demo никогда не перезаписал реальные данные. С
+`--keep` печатаются путь и подсказка `vend status --data-dir <path>`. Demo не
+вызывает провайдеров, не пишет за пределы своего каталога и не засчитывается в
+G1: `status --data-dir <demo>` показывает `SYNTHETIC` и `g1: 0/100, 0/7`.
+Отдельной JSON-схемы у команды нет.
 
 ### 2.0.2 Уведомления и арена
 

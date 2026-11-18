@@ -50,11 +50,12 @@ Useful flags:
 ./vend demo --data-dir ./demo-data  # explicit directory
 ```
 
-Without `--keep` the temporary directory is deleted; with `--keep` the command
-prints its path and the matching `vend status --data-dir <path>` command. The
-`--data-dir` flag is only for a fresh directory: the synthetic marker is
-permanent for any journal that contains the demo events, so never point it at a
-real journal and never start a real G1 run in a demo directory.
+Without `--keep` the temporary directory is deleted; an explicit `--data-dir` is
+never deleted. With `--keep` the command prints the path and the matching `vend
+status --data-dir <path>` command. The `--data-dir` flag is only for a fresh
+directory: an existing `vending.db` is refused with exit 4. The synthetic
+marker is permanent for any journal that contains the demo events, so never
+point it at a real journal and never start a real G1 run in a demo directory.
 
 ## Route 2 — your own gate in 5 minutes (`init --quick`)
 

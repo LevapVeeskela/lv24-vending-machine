@@ -10,6 +10,17 @@
 ### Added
 
 - `docs/plans/m1-audit-hardening.md` — план закрытия P0/P1 после аудита M1.
+- `docs/plans/m1-phase-b-activation.md` — план активации G1.
+- `init --quick` — профиль G1: 10 USDT-символов на 15m, trend включён,
+  export-команды без записи секретов.
+- `doctor --strict` — offline-инварианты G1-профиля (trend, 10 символов, 15m,
+  label ≤ timeframe/2, секреты); не обещает проверенный объём сигналов.
+- `vend demo` — детерминированная синтетическая неделя (120 меток, 7 дней,
+  фиксированный seed) с полным отчётом и баннером `SYNTHETIC`; не вызывает
+  провайдеров, не засчитывается в G1, `--share` отказывает.
+- `gate report`/`status`: G1-блок (`labels`, `active days`, `max gap`,
+  `eligible`, `lastLabelAge`, `labelsDue`), порог непрерывности 36 ч;
+  синтетический журнал (`runId=demo`) обнуляет G1 и блокирует `--share`.
 - `gate report --allow-broken-chain` — отчёт по повреждённому журналу только
   по явному запросу; по умолчанию отчёт проверяет hash-chain.
 
