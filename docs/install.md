@@ -115,26 +115,25 @@ Rename-Item .\vend_windows_amd64.exe vend.exe
 # vend <version>
 ```
 
-Then create the config and journal:
+Then create the config and journal. The G1 profile enables the trend source,
+so a fresh install is not silent:
 
 ```bash
-./vend init
-./vend doctor
+./vend init --quick
+./vend doctor --strict
 ```
 
-Windows PowerShell:
+Plain `./vend init` writes the same file with the trend source disabled and no
+symbols; use it only when your own bot sends the signals. Windows PowerShell:
+`.\vend.exe init --quick` and `.\vend.exe doctor --strict`.
 
-```powershell
-.\vend.exe init
-.\vend.exe doctor
-```
-
-`init` prints the config and data paths; `doctor` checks them offline. Run
-`init` before `doctor`: without a config `doctor` fails the config, database,
-journal, providers and policy checks and exits 1. Continue with
+`init` prints the config and data paths plus the export commands; `doctor
+--strict` checks the offline G1 invariants (trend, ten symbols, 15m, secrets)
+but never claims the signal volume is verified — run `vend signals estimate
+--days 7` for that. Continue with
 [quickstart](quickstart.md) (or the 15 minute live check in
-[runbook-live-smoke.md](runbook-live-smoke.md)). The offline Path B in
-quickstart starts with the same `init`; skip that line when you have just run
+[runbook-live-smoke.md](runbook-live-smoke.md)). The full walkthrough in
+quickstart starts with its own `init`; skip that line when you have just run
 `init` here — a second run exits 4 with `config already exists`. For the
 multi-day G1 run (≥ 7 days, ≥ 100 labels) see [run-7-days.md](run-7-days.md).
 
@@ -218,10 +217,11 @@ Notes:
 
 ```bash
 ./vend version          # prints the version
-./vend init             # writes config + journal on first use
-./vend doctor           # offline: config, data dir, database, journal, providers, secret presence, policy hash
+./vend init --quick     # writes the G1 profile config + journal on first use
+./vend doctor --strict  # offline: config, data dir, database, journal, providers, secrets, policy hash, G1 profile
 ```
 
-`doctor` exits 0 when every offline check passes and 1 when one fails. Network
-probes are opt-in with `vend doctor --live`; see the
+`doctor --strict` exits 0 when every offline check passes and 1 when one fails.
+It does not verify the signal volume; `vend signals estimate --days 7` does.
+Network probes are opt-in with `vend doctor --live`; see the
 [runbook](runbook-live-smoke.md) for what each live code means.

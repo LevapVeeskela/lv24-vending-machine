@@ -114,26 +114,25 @@ Rename-Item .\vend_windows_amd64.exe vend.exe
 # vend <version>
 ```
 
-Затем создайте конфиг и журнал:
+Затем создайте конфиг и журнал. G1-профиль включает trend-источник, чтобы
+свежая установка не молчала:
 
 ```bash
-./vend init
-./vend doctor
+./vend init --quick
+./vend doctor --strict
 ```
 
-Windows PowerShell:
+Обычный `./vend init` пишет тот же файл, но с выключенным trend и пустым
+списком символов — он нужен, только если сигналы шлёт ваш бот. Windows
+PowerShell: `.\vend.exe init --quick` и `.\vend.exe doctor --strict`.
 
-```powershell
-.\vend.exe init
-.\vend.exe doctor
-```
-
-`init` печатает пути конфига и данных, `doctor` проверяет их без сети. Сначала
-запускайте `init`, потом `doctor`: без конфига `doctor` не проходит проверки
-конфига, БД, журнала, провайдеров и policy и возвращает 1. Дальше —
+`init` печатает пути конфига и данных плюс команды экспорта; `doctor --strict`
+проверяет офлайн-инварианты G1 (trend, 10 символов, 15m, секреты), но не
+обещает проверенный объём сигналов — для этого есть `vend signals estimate
+--days 7`. Дальше —
 [quickstart.ru.md](quickstart.ru.md) или живая проверка на 15 минут в
-[runbook-live-smoke.ru.md](runbook-live-smoke.ru.md). Офлайн-путь B в quickstart
-начинается с того же `init`; пропустите эту строку, если только что выполнили
+[runbook-live-smoke.ru.md](runbook-live-smoke.ru.md). Полный разбор в quickstart
+начинается со своего `init`; пропустите эту строку, если только что выполнили
 `init` здесь — повторный запуск завершается кодом 4 с `config already exists`.
 Длительный прогон для G1 (≥ 7 дней, ≥ 100 меток) —
 [run-7-days.ru.md](run-7-days.ru.md).
@@ -219,10 +218,12 @@ go build -o vend ./core/cmd/vend
 
 ```bash
 ./vend version          # печатает версию
-./vend init             # создаёт конфиг и журнал при первом запуске
-./vend doctor           # офлайн: конфиг, каталог данных, БД, журнал, провайдеры, наличие секрета, policy hash
+./vend init --quick     # создаёт G1-профиль конфига и журнал при первом запуске
+./vend doctor --strict  # офлайн: конфиг, каталог данных, БД, журнал, провайдеры, секреты, policy hash, G1-профиль
 ```
 
-`doctor` возвращает 0, если все офлайн-проверки прошли, и 1 при любой ошибке.
-Сетевые пробы включаются флагом `vend doctor --live`; что означает каждый код —
+`doctor --strict` возвращает 0, если все офлайн-проверки прошли, и 1 при любой
+ошибке. Объём сигналов он не проверяет; для этого —
+`vend signals estimate --days 7`. Сетевые пробы включаются флагом
+`vend doctor --live`; что означает каждый код —
 в [runbook](runbook-live-smoke.ru.md).
