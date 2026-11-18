@@ -102,6 +102,33 @@ type ArenaReport struct {
 	Models         []ArenaModelStats `json:"models"`
 }
 
+// ReportG1 is the honest readiness block of the first gate: how many
+// decisions were labeled, how many UTC days the gate actually answered, and
+// how long the longest pause between two answers was. It is derived from the
+// journal only; a status snapshot or a configuration claim cannot turn it
+// green.
+//
+// Negative LastLabelAgeHours means the journal holds no labeled outcome yet.
+// Negative LabelsDue means the journal does not reveal the labeling window
+// (no horizon and/or no timeframe), so the count is unknown rather than zero.
+type ReportG1 struct {
+	Labels       int `json:"labels"`
+	TargetLabels int `json:"targetLabels"`
+	ActiveDays   int `json:"activeDays"`
+	TargetDays   int `json:"targetDays"`
+	// MaxGapHours is the longest pause between two consecutive gate verdicts
+	// of the journal. It is measured between answer timestamps, not between
+	// UTC dates, so seven calendar dates with a three-day hole cannot pass.
+	MaxGapHours float64 `json:"maxGapHours"`
+	Eligible    bool    `json:"eligible"`
+	// Synthetic is true when the journal contains any event written by
+	// `vend demo`. Such a journal is never G1 evidence.
+	Synthetic                  bool    `json:"synthetic"`
+	LastLabelAgeHours          float64 `json:"lastLabelAgeHours"`
+	ExpectedLabelIntervalHours float64 `json:"expectedLabelIntervalHours"`
+	LabelsDue                  int     `json:"labelsDue"`
+}
+
 // Report is a summary of labeled outcomes and gate performance.
 type Report struct {
 	GeneratedAt  time.Time `json:"generatedAt"`
@@ -136,4 +163,10 @@ type Report struct {
 	ActiveDays  int                `json:"activeDays,omitempty"`
 	Assumptions *ReportAssumptions `json:"assumptions,omitempty"`
 	Arena       *ArenaReport       `json:"arena,omitempty"`
+	// G1 is the honest G1 progress block. It is always populated by the
+	// report builder.
+	G1 *ReportG1 `json:"g1,omitempty"`
+	// Synthetic marks a report built from a journal that contains demo
+	// events. The underlying numbers stay visible, but G1 is not credited.
+	Synthetic bool `json:"synthetic,omitempty"`
 }

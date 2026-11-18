@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"time"
 
@@ -92,6 +93,7 @@ func (r *runner) cmdGateReport(args []string) int {
 			"check the data directory is readable and retry", false, nil)
 	}
 	ctx := context.Background()
+	g1Horizon, g1Frame := r.g1LabelConfig(g)
 	jr, closer, err := r.openJournalAt(dbPath)
 	if err != nil {
 		return r.fail(jsonOut, exitGeneral, codeGeneral, err.Error(),
@@ -117,6 +119,8 @@ func (r *runner) cmdGateReport(args []string) int {
 	b, err := report.New(jr, ports.Deps{Clock: r.clock, NewID: r.newID}, report.Config{
 		PolicyHash:      *policy,
 		IncludeBackfill: *includeBackfill,
+		HorizonBars:     g1Horizon,
+		Timeframe:       g1Frame,
 	})
 	if err != nil {
 		return r.fail(jsonOut, exitGeneral, codeGeneral, err.Error(),
@@ -137,6 +141,14 @@ func (r *runner) cmdGateReport(args []string) int {
 	rep.Days = win.days
 	rep.ActiveDays = win.active
 	if *share {
+		// A synthetic journal is useful for a demo, but publishing it as a
+		// shadow result would misrepresent real G1 progress.
+		if rep.G1 != nil && rep.G1.Synthetic {
+			return r.fail(false, exitUsage, codeUsage,
+				"synthetic journal is not G1 evidence",
+				"run vend demo for a synthetic walkthrough, or report a real data directory",
+				false, nil)
+		}
 		return r.printShare(rep, *shareOut, win, dataDir, *shareForce)
 	}
 	if jsonOut {
@@ -175,6 +187,7 @@ func printReportHuman(w io.Writer, rep domain.Report, days int, win reportWindow
 		counts[string(domain.VerdictAllow)], counts[string(domain.VerdictReject)],
 		counts[string(domain.VerdictAbstain)], counts[string(domain.VerdictSkip)])
 	fmt.Fprintf(w, "window: days=%d active=%d\n", win.days, win.active)
+	printG1Human(w, rep.G1)
 	fmt.Fprintf(w, "labeled: %d\n", rep.LabeledCount)
 	fmt.Fprintf(w, "awaiting labeling: %d\n", rep.AwaitingLabeling)
 	fmt.Fprintf(w, "no outcome by deadline: %d\n", rep.NoOutcomeByDeadline)
@@ -275,6 +288,80 @@ func printReportHuman(w io.Writer, rep domain.Report, days int, win reportWindow
 				m.AvgNetReturn.String(), m.CostUSD.String())
 		}
 	}
+}
+
+// printG1Human prints the readiness block shared by gate report and status.
+// It never prints a bare zero for an unknown value: an unknown label window is
+// "n/a" and an unknown due count is "unknown".
+func printG1Human(w io.Writer, g1 *domain.ReportG1) {
+	if g1 == nil {
+		return
+	}
+	if g1.Synthetic {
+		fmt.Fprintln(w, "SYNTHETIC — not G1 evidence")
+	}
+	fmt.Fprintf(w, "g1: labels %d/%d, active days %d/%d, max gap %sh, eligible=%s\n",
+		g1.Labels, g1.TargetLabels, g1.ActiveDays, g1.TargetDays,
+		formatHours(g1.MaxGapHours), yesNo(g1.Eligible))
+	fmt.Fprintf(w, "last label age: %s\n", formatAge(g1.LastLabelAgeHours))
+	fmt.Fprintf(w, "expected label interval: %s\n", formatInterval(g1.ExpectedLabelIntervalHours))
+	fmt.Fprintf(w, "labels due: %s\n", formatDue(g1.LabelsDue))
+}
+
+// formatHours renders a fractional hour count without a trailing zero.
+func formatHours(h float64) string {
+	return strconv.FormatFloat(h, 'g', -1, 64)
+}
+
+// formatAge renders the age of the latest label; -1 means there is none.
+func formatAge(h float64) string {
+	if h < 0 {
+		return "never"
+	}
+	return formatHours(h) + "h"
+}
+
+// formatInterval renders the expected label interval; <= 0 means unknown.
+func formatInterval(h float64) string {
+	if h <= 0 {
+		return "n/a"
+	}
+	return formatHours(h) + "h"
+}
+
+// formatDue renders the labels-due count; -1 means unknown.
+func formatDue(n int) string {
+	if n < 0 {
+		return "unknown"
+	}
+	return strconv.Itoa(n)
+}
+
+// yesNo renders a boolean as the human report does.
+func yesNo(v bool) string {
+	if v {
+		return "yes"
+	}
+	return "no"
+}
+
+// g1LabelConfig loads the outcome horizon and signal timeframe for the G1
+// block. It is best-effort: a report or status must keep working from the
+// journal alone, so a missing or unreadable config only leaves the values
+// zero and the G1 block then derives what it can from recorded outcomes.
+func (r *runner) g1LabelConfig(g globals) (horizonBars int, timeframe time.Duration) {
+	path, err := r.configPath(g.config)
+	if err != nil {
+		return 0, 0
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		return 0, 0
+	}
+	if tf, perr := domain.ParseTimeframe(cfg.Signals.Trend.Timeframe); perr == nil {
+		timeframe = tf
+	}
+	return cfg.Outcome.HorizonBars, timeframe
 }
 
 // shortPolicy returns the first 12 characters of a policy hash.
@@ -383,6 +470,20 @@ func shareMarkdown(rep domain.Report, ver string, win reportWindow) string {
 	fmt.Fprintf(&b, "- awaiting labeling: %d\n", rep.AwaitingLabeling)
 	fmt.Fprintf(&b, "- no outcome by deadline: %d\n", rep.NoOutcomeByDeadline)
 	fmt.Fprintf(&b, "- source rejected: %d\n", rep.SourceRejected)
+	if g1 := rep.G1; g1 != nil {
+		// The share summary carries the same G1 numbers without paths,
+		// symbols, prices or identifiers.
+		fmt.Fprintf(&b, "- g1 labels: %d/%d\n", g1.Labels, g1.TargetLabels)
+		fmt.Fprintf(&b, "- g1 active days: %d/%d\n", g1.ActiveDays, g1.TargetDays)
+		fmt.Fprintf(&b, "- g1 max gap hours: %s\n", formatHours(g1.MaxGapHours))
+		fmt.Fprintf(&b, "- g1 eligible: %s\n", yesNo(g1.Eligible))
+		fmt.Fprintf(&b, "- g1 labels due: %s\n", formatDue(g1.LabelsDue))
+		fmt.Fprintf(&b, "- g1 last label age hours: %s\n", formatAge(g1.LastLabelAgeHours))
+		fmt.Fprintf(&b, "- g1 expected label interval hours: %s\n", formatInterval(g1.ExpectedLabelIntervalHours))
+		if g1.Synthetic {
+			fmt.Fprintf(&b, "- g1 synthetic: true (not G1 evidence)\n")
+		}
+	}
 	fmt.Fprintf(&b, "- verdicts: ALLOW=%d REJECT=%d ABSTAIN=%d\n\n",
 		rep.VerdictCounts[string(domain.VerdictAllow)],
 		rep.VerdictCounts[string(domain.VerdictReject)],
