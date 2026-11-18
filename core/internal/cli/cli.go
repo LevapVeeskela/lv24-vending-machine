@@ -182,6 +182,7 @@ const generalHelp = `usage: vend <command> [options]
 commands:
   version [--json]
   init [--quick] [--force] [--config FILE] [--data-dir DIR] [--json]
+  demo [--data-dir DIR] [--json] [--keep] [--share]
   config path|get KEY|validate [--config FILE] [--data-dir DIR] [--json]
   doctor [--strict] [--live] [--symbol SYMBOL] [--save-raw FILE] [--force] [--config FILE] [--data-dir DIR] [--json]
   gate test --request FILE [--fixture FILE] [--save-raw FILE] [--force] [--config FILE] [--data-dir DIR] [--json]
@@ -222,6 +223,20 @@ symbols on 15m, trend source enabled) and prints the export commands.
 flags:
   --quick   write the G1 10 symbols x 15m profile instead of the empty default
   --force   overwrite an existing config file
+`,
+	"demo": `usage: vend demo [--data-dir DIR] [--json] [--keep] [--share]
+
+Seed a deterministic synthetic week (seven UTC days, ten symbols, at least
+100 labeled outcomes) into a throwaway journal and print the full report.
+The journal is marked runId=demo and is never G1 evidence; --share is
+refused. Without --data-dir a temporary directory is used and deleted unless
+--keep is set.
+
+flags:
+  --data-dir DIR  seed a fresh directory instead of a temporary one
+  --json          print the report as JSON
+  --keep          keep a temporary data directory and print its path
+  --share         refused: a synthetic journal is not G1 evidence
 `,
 	"config": `usage: vend config path|get KEY|validate [--config FILE] [--data-dir DIR] [--json]
 
