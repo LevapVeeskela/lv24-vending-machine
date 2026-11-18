@@ -1,4 +1,4 @@
-﻿# Quickstart
+# Quickstart
 
 [Русская версия](quickstart.ru.md)
 

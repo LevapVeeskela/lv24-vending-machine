@@ -1,4 +1,4 @@
-﻿# LV24 Vending
+# LV24 Vending
 
 [English](README.md)
 

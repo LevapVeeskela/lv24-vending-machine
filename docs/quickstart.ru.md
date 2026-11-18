@@ -1,4 +1,4 @@
-﻿# Быстрый старт
+# Быстрый старт
 
 [English version](quickstart.md)
 
