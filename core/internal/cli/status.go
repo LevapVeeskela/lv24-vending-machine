@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/LevapVeeskela/lv24-vending-machine/core/domain"
+	"github.com/LevapVeeskela/lv24-vending-machine/core/internal/app/report"
 	"github.com/LevapVeeskela/lv24-vending-machine/core/internal/app/shadow"
 	"github.com/LevapVeeskela/lv24-vending-machine/core/internal/config"
 	"github.com/LevapVeeskela/lv24-vending-machine/core/ports"
@@ -25,18 +26,21 @@ const statusPolicyWidth = 12
 // output: before the first `vend serve` there is no snapshot, and scripts must
 // not read "0001-01-01T00:00:00Z" as a real time.
 type statusView struct {
-	Version        string     `json:"version"`
-	PolicyHash     string     `json:"policyHash,omitempty"`
-	Events         int64      `json:"events"`
-	Labeled        int        `json:"labeled"`
-	LastLabelAt    *time.Time `json:"lastLabelAt,omitempty"`
-	LastCycleError string     `json:"lastCycleError,omitempty"`
-	UpdatedAt      *time.Time `json:"updatedAt,omitempty"`
-	LastSeq        int64      `json:"lastSeq,omitempty"`
+	Version        string           `json:"version"`
+	PolicyHash     string           `json:"policyHash,omitempty"`
+	Events         int64            `json:"events"`
+	Labeled        int              `json:"labeled"`
+	LastLabelAt    *time.Time       `json:"lastLabelAt,omitempty"`
+	LastCycleError string           `json:"lastCycleError,omitempty"`
+	UpdatedAt      *time.Time       `json:"updatedAt,omitempty"`
+	LastSeq        int64            `json:"lastSeq,omitempty"`
+	G1             *domain.ReportG1 `json:"g1,omitempty"`
+	Synthetic      bool             `json:"synthetic,omitempty"`
 }
 
-// newStatusView converts a runner snapshot to its JSON view.
-func newStatusView(st shadow.Status) statusView {
+// newStatusView converts a runner snapshot and the journal-derived G1 block
+// to the JSON view.
+func newStatusView(st shadow.Status, g1 *domain.ReportG1) statusView {
 	v := statusView{
 		Version:        st.Version,
 		PolicyHash:     st.PolicyHash,
@@ -44,6 +48,10 @@ func newStatusView(st shadow.Status) statusView {
 		Labeled:        st.Labeled,
 		LastCycleError: st.LastCycleError,
 		LastSeq:        st.LastSeq,
+		G1:             g1,
+	}
+	if g1 != nil {
+		v.Synthetic = g1.Synthetic
 	}
 	if !st.LastLabelAt.IsZero() {
 		label := st.LastLabelAt.UTC()
@@ -103,7 +111,25 @@ func (r *runner) cmdStatus(args []string) int {
 		return r.fail(jsonOut, exitGeneral, codeGeneral, err.Error(),
 			"check the database file is a valid sqlite database", false, nil)
 	}
-	events, labeled, err := countJournal(context.Background(), jr)
+	ctx := context.Background()
+	events, labeled, err := countJournal(ctx, jr)
+	if err != nil {
+		_ = closer.Close()
+		return r.fail(jsonOut, exitGeneral, codeGeneral, err.Error(),
+			"check the database file is a valid sqlite database", false, nil)
+	}
+	// The G1 block is journal-derived, never a shadow-status claim.
+	horizonBars, timeframe := r.g1LabelConfig(g)
+	b, err := report.New(jr, ports.Deps{Clock: r.clock, NewID: r.newID}, report.Config{
+		HorizonBars: horizonBars,
+		Timeframe:   timeframe,
+	})
+	if err != nil {
+		_ = closer.Close()
+		return r.fail(jsonOut, exitGeneral, codeGeneral, err.Error(),
+			"check the vend wiring and retry", false, nil)
+	}
+	rep, err := b.Build(ctx)
 	_ = closer.Close()
 	if err != nil {
 		return r.fail(jsonOut, exitGeneral, codeGeneral, err.Error(),
@@ -111,9 +137,10 @@ func (r *runner) cmdStatus(args []string) int {
 	}
 	st.Events = events
 	st.Labeled = labeled
+	g1 := rep.G1
 
 	if jsonOut {
-		r.printJSON(newStatusView(st))
+		r.printJSON(newStatusView(st, g1))
 		return exitOK
 	}
 	policy := st.PolicyHash
@@ -134,6 +161,7 @@ func (r *runner) cmdStatus(args []string) int {
 	fmt.Fprintf(r.stdout, "version: %s\n", st.Version)
 	fmt.Fprintf(r.stdout, "events: %d\n", st.Events)
 	fmt.Fprintf(r.stdout, "labeled: %d\n", st.Labeled)
+	printG1Human(r.stdout, g1)
 	fmt.Fprintf(r.stdout, "last label: %s\n", lastLabel)
 	fmt.Fprintf(r.stdout, "policy: %s\n", policy)
 	fmt.Fprintf(r.stdout, "last error: %s\n", lastError)

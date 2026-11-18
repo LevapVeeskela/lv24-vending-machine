@@ -113,12 +113,14 @@ func seedShareReportShape(t *testing.T, env Env, dataDir string, s shareSeed) {
 			{
 				Kind:       domain.EventGateVerdict,
 				DecisionID: dec,
+				TS:         ts,
 				Payload: mustJSON(t, domain.GateVerdict{
 					Verdict:    verdict,
 					Code:       "test",
 					Reasons:    []string{"test"},
 					Checks:     []domain.Check{},
 					PolicyHash: strings.Repeat("ab", 32),
+					DecidedAt:  ts,
 				}),
 			},
 		}
@@ -192,6 +194,13 @@ func TestGateReportShare(t *testing.T) {
 		"- awaiting labeling: 20",
 		"- no outcome by deadline: 0",
 		"- source rejected: 0",
+		"- g1 labels: 100/100",
+		"- g1 active days: 7/7",
+		"- g1 max gap hours: 24",
+		"- g1 eligible: yes",
+		"- g1 labels due:",
+		"- g1 last label age hours:",
+		"- g1 expected label interval hours: 13",
 		"ALLOW=60 REJECT=60 ABSTAIN=0",
 		"calibration pairs: 100",
 		"Brier score:",

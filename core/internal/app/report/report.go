@@ -49,6 +49,22 @@ const (
 	avgScale = 12
 	// dayLayout is the UTC key used to resample bootstrap days.
 	dayLayout = "2006-01-02"
+	// G1TargetLabels is the labeled-decision target of the first gate.
+	G1TargetLabels = 100
+	// G1TargetDays is the number of UTC days with gate answers the first
+	// gate requires.
+	G1TargetDays = 7
+	// G1MaxGapHours is the longest pause between two gate verdicts that
+	// still counts as continuous work. The gap is measured between
+	// consecutive verdict timestamps, not between UTC dates: seven calendar
+	// dates with a three-day hole would otherwise pass a date-only check.
+	// 36 hours tolerates one missed daily cycle. ABSTAIN counts as an
+	// answer: a gate that said "not enough data" was running, which is
+	// continuity evidence even without a trade.
+	G1MaxGapHours = 36.0
+	// demoRunID marks the events written by `vend demo`. A journal holding
+	// even one such event is synthetic and never G1 evidence.
+	demoRunID = "demo"
 )
 
 // riskQuestion and passKey locate the calibration probability inside a
@@ -74,6 +90,12 @@ type Config struct {
 	BootstrapReps int
 	// Seed is the deterministic bootstrap seed. Zero means 42.
 	Seed int64
+	// HorizonBars is the configured outcome horizon in bars. Values <= 0
+	// make the builder derive it from the latest labeled outcome.
+	HorizonBars int
+	// Timeframe is the configured signal bar size. Zero makes the builder
+	// derive it from the latest labeled outcome.
+	Timeframe time.Duration
 }
 
 // Builder computes domain.Report values from a journal.
@@ -86,6 +108,8 @@ type Builder struct {
 	reps            int
 	seed            int64
 	days            int
+	horizonBars     int
+	timeframe       time.Duration
 }
 
 // New builds a Builder over jr. deps supplies the clock for GeneratedAt.
@@ -113,6 +137,8 @@ func New(jr ports.Journal, deps ports.Deps, cfg Config) (*Builder, error) {
 		includeBackfill: cfg.IncludeBackfill,
 		reps:            reps,
 		seed:            seed,
+		horizonBars:     cfg.HorizonBars,
+		timeframe:       cfg.Timeframe,
 	}, nil
 }
 
@@ -130,6 +156,21 @@ type verdictInfo struct {
 	verdict    string
 	policyHash string
 	seq        int64
+	// ts is when the gate answered: the event receipt time, falling back to
+	// the payload decidedAt when an old journal has no envelope time. It is
+	// the input of the G1 activity and continuity metrics.
+	ts time.Time
+	// decidedAt is the gate decision time from the payload. The labeler
+	// anchors the labeling window on it, so labels-due mirrors that choice.
+	decidedAt time.Time
+}
+
+// entrySignal is one entry gate.request: when the gate accepted it, its bar
+// size and the decision it produced. It feeds the labels-due count.
+type entrySignal struct {
+	receivedAt time.Time
+	timeframe  string
+	decisionID string
 }
 
 // labeledOutcome pairs an outcome with its gate verdict and decision ID.
@@ -243,6 +284,7 @@ func (b *Builder) Days() int { return b.days }
 // measured Usage.LatencyMS; vendor latency is stored in decision.response
 // but not aggregated here.
 func (b *Builder) Build(ctx context.Context) (domain.Report, error) {
+	now := b.deps.Now().UTC()
 	verdicts := map[string]verdictInfo{}
 	decisions := map[string]decisionInfo{}
 	signalToDecision := map[string]string{}
@@ -250,24 +292,47 @@ func (b *Builder) Build(ctx context.Context) (domain.Report, error) {
 	var arenas []arenaPayload
 	// Labeling progress across the whole journal: entry signals still waiting
 	// for an outcome, and signals recorded as unlabelable at their deadline.
-	entrySignals := map[string]struct{}{}
+	entrySignals := map[string]entrySignal{}
 	labeledSignals := map[string]struct{}{}
 	unlabelableSignals := map[string]struct{}{}
 	missedDeadline := map[string]struct{}{}
 	sourceRejected := map[string]struct{}{}
+	// G1 provenance and the age of the latest label.
+	synthetic := false
+	var latestLabelAt time.Time
 
 	if err := b.jr.Walk(ctx, 0, "", func(ev domain.Event) error {
+		// One demo event taints the whole journal: the report may still be
+		// useful, but it is not G1 evidence.
+		if ev.RunID == demoRunID {
+			synthetic = true
+		}
 		switch ev.Kind {
 		case domain.EventGateRequest:
 			var req struct {
 				SignalID   string            `json:"signalId"`
 				IntentKind domain.IntentKind `json:"intentKind"`
+				Timeframe  string            `json:"timeframe"`
 			}
 			if err := json.Unmarshal(ev.Payload, &req); err != nil {
 				return nil
 			}
 			if req.SignalID != "" && req.IntentKind == domain.IntentEntry {
-				entrySignals[req.SignalID] = struct{}{}
+				sig := entrySignals[req.SignalID]
+				// Keep the earliest acceptance time: a replay of the same
+				// signal must not hide a long-waiting request behind a fresh
+				// timestamp.
+				accepted := ev.TS.UTC()
+				if sig.receivedAt.IsZero() || (!accepted.IsZero() && accepted.Before(sig.receivedAt)) {
+					sig.receivedAt = accepted
+				}
+				if req.Timeframe != "" {
+					sig.timeframe = req.Timeframe
+				}
+				if ev.DecisionID != "" {
+					sig.decisionID = ev.DecisionID
+				}
+				entrySignals[req.SignalID] = sig
 			}
 			if req.SignalID != "" && ev.DecisionID != "" {
 				signalToDecision[req.SignalID] = ev.DecisionID
@@ -307,11 +372,19 @@ func (b *Builder) Build(ctx context.Context) (domain.Report, error) {
 			if policy == "" {
 				policy = ev.PolicyHash
 			}
+			// Activity is measured on the answer timestamp: the receipt time
+			// when the journal has one, otherwise the payload decidedAt.
+			answeredAt := ev.TS.UTC()
+			if answeredAt.IsZero() {
+				answeredAt = v.DecidedAt.UTC()
+			}
 			// Last verdict per decisionId wins; replays do not double count.
 			verdicts[id] = verdictInfo{
 				verdict:    string(v.Verdict),
 				policyHash: policy,
 				seq:        ev.Seq,
+				ts:         answeredAt,
+				decidedAt:  v.DecidedAt.UTC(),
 			}
 		case domain.EventOutcomeLabeled:
 			var o domain.Outcome
@@ -327,6 +400,16 @@ func (b *Builder) Build(ctx context.Context) (domain.Report, error) {
 			})
 			if o.SignalID != "" {
 				labeledSignals[o.SignalID] = struct{}{}
+			}
+			// The label age is operational evidence of a running labeler, so
+			// it covers every labeled outcome, including backfills and
+			// decisions of another policy.
+			labeledAt := ev.TS.UTC()
+			if labeledAt.IsZero() {
+				labeledAt = o.LabeledAt.UTC()
+			}
+			if labeledAt.After(latestLabelAt) {
+				latestLabelAt = labeledAt
 			}
 		case domain.EventOutcomeUnlabelable:
 			var u domain.OutcomeUnlabelable
@@ -460,7 +543,7 @@ func (b *Builder) Build(ctx context.Context) (domain.Report, error) {
 	}
 
 	rep := domain.Report{
-		GeneratedAt:          b.deps.Now().UTC(),
+		GeneratedAt:          now,
 		LabeledCount:         len(labeled),
 		AwaitingLabeling:     awaiting,
 		NoOutcomeByDeadline:  len(missedDeadline),
@@ -477,6 +560,19 @@ func (b *Builder) Build(ctx context.Context) (domain.Report, error) {
 		Assumptions:          assumptions(labeled, compared, pair),
 		Arena:                arenaReport(arenas, resolved, verdicts, selected, b.includeBackfill),
 	}
+	// G1 is computed before the comparison early returns: a journal with few
+	// labels still has an honest G1 progress block. Backfilled outcomes never
+	// count towards G1, even with --include-backfill: an imported label is
+	// not evidence that this installation labeled a live decision.
+	g1Labels := 0
+	for _, l := range labeled {
+		if !l.outcome.Backfill {
+			g1Labels++
+		}
+	}
+	rep.G1 = b.g1Report(now, g1Labels, latestLabelAt, synthetic,
+		verdicts, entrySignals, labeledSignals, unlabelableSignals, uniq)
+	rep.Synthetic = rep.G1.Synthetic
 	// An explicitly requested policy that no verdict used has no
 	// comparable outcomes; this is not an error.
 	if !policyUsesSelected {
@@ -488,6 +584,169 @@ func (b *Builder) Build(ctx context.Context) (domain.Report, error) {
 	rep.Sufficient = true
 	rep.Comparisons = b.compare(compared, decisions)
 	return rep, nil
+}
+
+// g1Report derives the honest G1 progress block. Labels are the
+// policy-scoped labeled outcomes, always excluding backfills: an imported
+// label is not evidence that this installation labeled a live decision, so
+// --include-backfill must not inflate G1.
+//
+// Activity is derived from gate.verdict events, not gate.request: a request
+// without a verdict is an unfinished cycle, while every verdict (including
+// ABSTAIN) is an answer from a running gate.
+func (b *Builder) g1Report(now time.Time, labels int, latestLabelAt time.Time, synthetic bool,
+	verdicts map[string]verdictInfo, entries map[string]entrySignal,
+	labeled, unlabelable map[string]struct{}, outcomes []outcomeEvent,
+) *domain.ReportG1 {
+	horizon, timeframe := b.horizonBars, b.timeframe
+	derivedHorizon, derivedTimeframe := deriveLabelWindow(outcomes)
+	if horizon <= 0 {
+		horizon = derivedHorizon
+	}
+	if timeframe <= 0 {
+		timeframe = derivedTimeframe
+	}
+
+	g1 := &domain.ReportG1{
+		Labels:            labels,
+		TargetLabels:      G1TargetLabels,
+		TargetDays:        G1TargetDays,
+		Synthetic:         synthetic,
+		LastLabelAgeHours: -1,
+		LabelsDue:         -1,
+	}
+	if !latestLabelAt.IsZero() {
+		age := now.Sub(latestLabelAt).Hours()
+		if age < 0 {
+			// A journal clock ahead of ours is not a negative age.
+			age = 0
+		}
+		g1.LastLabelAgeHours = age
+	}
+	if horizon > 0 && timeframe > 0 {
+		g1.ExpectedLabelIntervalHours = (time.Duration(horizon+1) * timeframe).Hours()
+	}
+
+	// One timestamp per decision: a replay of the same verdict must not look
+	// like fresh activity.
+	answers := make([]time.Time, 0, len(verdicts))
+	dates := make(map[string]struct{}, len(verdicts))
+	for _, v := range verdicts {
+		if v.ts.IsZero() {
+			continue
+		}
+		answers = append(answers, v.ts)
+		dates[v.ts.Format(dayLayout)] = struct{}{}
+	}
+	g1.ActiveDays = len(dates)
+	sort.Slice(answers, func(i, j int) bool { return answers[i].Before(answers[j]) })
+	var maxGap time.Duration
+	for i := 1; i < len(answers); i++ {
+		if gap := answers[i].Sub(answers[i-1]); gap > maxGap {
+			maxGap = gap
+		}
+	}
+	g1.MaxGapHours = maxGap.Hours()
+
+	if due, known := labelsDue(now, horizon, timeframe, entries, labeled, unlabelable, verdicts); known {
+		g1.LabelsDue = due
+	}
+
+	if synthetic {
+		// Demo events prove nothing about a real installation: the counts
+		// that would earn G1 are zeroed, while the diagnostic ages stay so
+		// the operator can see that the demo journal is fresh.
+		g1.Labels = 0
+		g1.ActiveDays = 0
+		g1.MaxGapHours = 0
+		g1.LabelsDue = 0
+	}
+	g1.Eligible = !synthetic &&
+		g1.Labels >= G1TargetLabels &&
+		g1.ActiveDays >= G1TargetDays &&
+		g1.MaxGapHours <= G1MaxGapHours
+	return g1
+}
+
+// deriveLabelWindow returns the horizon and bar size of the latest labeled
+// outcome that recorded them. It lets the G1 block show the expected label
+// interval even when the CLI was not given a config file.
+func deriveLabelWindow(outcomes []outcomeEvent) (horizon int, timeframe time.Duration) {
+	bestHorizonSeq, bestTimeframeSeq := int64(-1), int64(-1)
+	for _, oe := range outcomes {
+		if oe.outcome.HorizonBars > 0 && oe.seq > bestHorizonSeq {
+			horizon = oe.outcome.HorizonBars
+			bestHorizonSeq = oe.seq
+		}
+		if tf, err := domain.ParseTimeframe(oe.outcome.Timeframe); err == nil && oe.seq > bestTimeframeSeq {
+			timeframe = tf
+			bestTimeframeSeq = oe.seq
+		}
+	}
+	return horizon, timeframe
+}
+
+// labelsDue counts entry signals whose labeling window has expired and that
+// have neither outcome.labeled nor outcome.unlabelable. The window mirrors the
+// labeler: (horizonBars+1) x timeframe after the anchor (the verdict time when
+// recorded, otherwise the request receipt time).
+//
+// The second result is false when the horizon or a signal's timeframe is
+// unknown: the honest answer is then "unknown", never a misleading zero.
+func labelsDue(now time.Time, horizon int, fallbackFrame time.Duration,
+	entries map[string]entrySignal, labeled, unlabelable map[string]struct{},
+	verdicts map[string]verdictInfo,
+) (int, bool) {
+	if horizon < 1 {
+		return 0, false
+	}
+	due := 0
+	known := true
+	for sig, e := range entries {
+		if _, ok := labeled[sig]; ok {
+			continue
+		}
+		if _, ok := unlabelable[sig]; ok {
+			continue
+		}
+		frame := fallbackFrame
+		if e.timeframe != "" {
+			tf, err := domain.ParseTimeframe(e.timeframe)
+			if err != nil {
+				// An explicitly corrupt bar size cannot be replaced by a
+				// guess: the window is unknowable for this signal.
+				known = false
+				continue
+			}
+			frame = tf
+		}
+		if frame <= 0 {
+			known = false
+			continue
+		}
+		anchor := e.receivedAt
+		if v, ok := verdicts[e.decisionID]; ok {
+			// Mirror the labeler: the payload decision time wins, then the
+			// journal answer time, then the request receipt time.
+			switch {
+			case !v.decidedAt.IsZero():
+				anchor = v.decidedAt
+			case !v.ts.IsZero():
+				anchor = v.ts
+			}
+		}
+		if anchor.IsZero() {
+			known = false
+			continue
+		}
+		if !now.Before(anchor.Add(time.Duration(horizon+1) * frame)) {
+			due++
+		}
+	}
+	if !known {
+		return 0, false
+	}
+	return due, true
 }
 
 // passProbability extracts the validated p(pass) from a decision response.
