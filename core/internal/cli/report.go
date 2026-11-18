@@ -310,7 +310,13 @@ func printG1Human(w io.Writer, g1 *domain.ReportG1) {
 
 // formatHours renders a fractional hour count without a trailing zero.
 func formatHours(h float64) string {
-	return strconv.FormatFloat(h, 'g', -1, 64)
+	s := strconv.FormatFloat(h, 'f', 2, 64)
+	s = strings.TrimRight(s, "0")
+	s = strings.TrimRight(s, ".")
+	if s == "" || s == "-" {
+		return "0"
+	}
+	return s
 }
 
 // formatAge renders the age of the latest label; -1 means there is none.
