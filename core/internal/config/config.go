@@ -171,6 +171,37 @@ func Default() Config {
 	}
 }
 
+// Quick-start profile constants. The profile keeps the default gate,
+// providers, fast/slow and fee values; only the signal source changes.
+const (
+	// QuickProfileName names the config written by init --quick.
+	QuickProfileName = "g1-10x15m"
+	// QuickTimeframe is the profile candle timeframe.
+	QuickTimeframe = "15m"
+	// QuickMinSymbols is the minimum symbol count doctor --strict accepts.
+	QuickMinSymbols = 10
+)
+
+// quickSymbols is the liquid Binance spot USDT basket of the quick profile.
+var quickSymbols = []string{
+	"BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
+	"DOGEUSDT", "ADAUSDT", "LINKUSDT", "AVAXUSDT", "LTCUSDT",
+}
+
+// QuickProfile returns the G1 quick-start config: the trend source enabled on
+// ten USDT symbols at 15m with both sides, and the default gate, providers and
+// fee settings. A 15m candle holds two 300s label windows, as Validate
+// requires; init --quick writes this profile so a new install is not silent.
+func QuickProfile() Config {
+	c := Default()
+	c.Signals.Trend.Enabled = true
+	c.Signals.Trend.Symbols = append([]string(nil), quickSymbols...)
+	c.Signals.Trend.Timeframe = QuickTimeframe
+	c.Signals.Trend.Sides = []string{"buy", "sell"}
+	c.Outcome.LabelIntervalSec = 300
+	return c
+}
+
 // Validate checks the configuration and returns a *domain.Error with
 // CodeInvalidRequest on the first violation.
 func (c Config) Validate() error {

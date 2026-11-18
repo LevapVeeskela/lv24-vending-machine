@@ -15,6 +15,53 @@ func TestDefaultValid(t *testing.T) {
 	}
 }
 
+func TestQuickProfile(t *testing.T) {
+	c := QuickProfile()
+	if err := c.Validate(); err != nil {
+		t.Fatalf("QuickProfile().Validate() = %v", err)
+	}
+	tr := c.Signals.Trend
+	if !tr.Enabled {
+		t.Fatal("signals.trend.enabled = false, want true")
+	}
+	want := []string{
+		"BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
+		"DOGEUSDT", "ADAUSDT", "LINKUSDT", "AVAXUSDT", "LTCUSDT",
+	}
+	if len(tr.Symbols) != len(want) {
+		t.Fatalf("signals.trend.symbols = %v, want %d symbols", tr.Symbols, len(want))
+	}
+	for i := range want {
+		if tr.Symbols[i] != want[i] {
+			t.Fatalf("signals.trend.symbols = %v, want %v", tr.Symbols, want)
+		}
+	}
+	if tr.Timeframe != QuickTimeframe {
+		t.Fatalf("signals.trend.timeframe = %q, want %q", tr.Timeframe, QuickTimeframe)
+	}
+	if len(tr.Sides) != 2 || tr.Sides[0] != "buy" || tr.Sides[1] != "sell" {
+		t.Fatalf("signals.trend.sides = %v, want [buy sell]", tr.Sides)
+	}
+	def := Default()
+	if tr.Fast != def.Signals.Trend.Fast || tr.Slow != def.Signals.Trend.Slow {
+		t.Fatalf("fast/slow = %d/%d, want defaults %d/%d",
+			tr.Fast, tr.Slow, def.Signals.Trend.Fast, def.Signals.Trend.Slow)
+	}
+	if c.Outcome.LabelIntervalSec != 300 {
+		t.Fatalf("outcome.labelIntervalSec = %d, want 300", c.Outcome.LabelIntervalSec)
+	}
+	if c.Outcome.FeeBps != def.Outcome.FeeBps {
+		t.Fatalf("outcome.feeBps = %d, want default %d", c.Outcome.FeeBps, def.Outcome.FeeBps)
+	}
+
+	// Each call returns its own slice: a caller must not mutate the profile.
+	first := QuickProfile()
+	first.Signals.Trend.Symbols[0] = "MUTATED"
+	if got := QuickProfile().Signals.Trend.Symbols[0]; got != "BTCUSDT" {
+		t.Fatalf("QuickProfile symbols are shared: got %q", got)
+	}
+}
+
 func TestValidateBad(t *testing.T) {
 	cases := []struct {
 		name string
