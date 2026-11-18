@@ -114,20 +114,39 @@ func TestJournalTailKindFilter(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	if code := runArgs(env, "journal", "tail", "--kind", "notify", "--data-dir", dataDir); code != 0 {
-		t.Fatalf("journal tail unknown kind = %d, stderr=%s", code, stderr.String())
+	if code := runArgs(env, "journal", "tail", "--kind", "notify", "--data-dir", dataDir); code != exitUsage {
+		t.Fatalf("journal tail unknown kind = %d, want %d, stderr=%s",
+			code, exitUsage, stderr.String())
 	}
 	if got := stdout.String(); got != "" {
 		t.Fatalf("unknown kind output = %q, want empty", got)
 	}
+	for _, want := range []string{"invalid --kind", "gate.request", "notify.sent"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("unknown kind stderr misses %q: %q", want, stderr.String())
+		}
+	}
 
 	stdout.Reset()
 	stderr.Reset()
-	if code := runArgs(env, "journal", "tail", "--kind", "notify", "--json", "--data-dir", dataDir); code != 0 {
-		t.Fatalf("journal tail unknown kind --json = %d, stderr=%s", code, stderr.String())
+	if code := runArgs(env, "journal", "tail", "--kind", "notify", "--json", "--data-dir", dataDir); code != exitUsage {
+		t.Fatalf("journal tail unknown kind --json = %d, want %d, stderr=%s",
+			code, exitUsage, stderr.String())
 	}
-	if got := strings.TrimSpace(stdout.String()); got != "[]" {
-		t.Fatalf("unknown kind JSON = %q, want []", got)
+	var envelope struct {
+		Code    string `json:"code"`
+		Details struct {
+			Allowed []string `json:"allowed"`
+		} `json:"details"`
+	}
+	if err := json.Unmarshal(stderr.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode unknown kind JSON: %v (%q)", err, stderr.String())
+	}
+	if envelope.Code != codeUsage {
+		t.Fatalf("unknown kind JSON code = %q, want %q", envelope.Code, codeUsage)
+	}
+	if len(envelope.Details.Allowed) != len(journalTailKinds) {
+		t.Fatalf("unknown kind JSON allowed = %v, want all known kinds", envelope.Details.Allowed)
 	}
 }
 

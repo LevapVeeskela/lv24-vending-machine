@@ -111,10 +111,11 @@ func TestOpenDirectoryPathMessage(t *testing.T) {
 }
 
 func TestTamperAnyFieldBreaksVerify(t *testing.T) {
-	// All 13 event columns. wantBroken is the seq Verify reports: the
+	// The 13 hashed event columns. wantBroken is the seq Verify reports: the
 	// tampered row's own seq, except for the seq case itself: the row
 	// moves to the end of the ascending order, so the first gap is
-	// reported at seq 4 ("want 3 got 4").
+	// reported at seq 4 ("want 3 got 4"). signal_id is an index-only
+	// projection outside the chain and is not covered here.
 	cases := []struct {
 		field      string
 		expr       string
@@ -686,5 +687,268 @@ func TestAppendDefaultsAndRoundTrip(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got[0], ev) {
 		t.Fatalf("round trip mismatch:\n%+v\n%+v", got[0], ev)
+	}
+}
+
+// signalIDs returns the signal_id column in seq order; an empty string means
+// SQL NULL.
+func signalIDs(t *testing.T, s *Store, ctx context.Context) []string {
+	t.Helper()
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT COALESCE(signal_id, '') FROM events ORDER BY seq ASC`)
+	if err != nil {
+		t.Fatalf("select signal_id: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			t.Fatalf("scan signal_id: %v", err)
+		}
+		out = append(out, id)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows: %v", err)
+	}
+	return out
+}
+
+func gateRequestPayload(t *testing.T, signalID string) json.RawMessage {
+	t.Helper()
+	raw, err := json.Marshal(map[string]any{"signalId": signalID, "price": "1.5"})
+	if err != nil {
+		t.Fatalf("encode gate request: %v", err)
+	}
+	return raw
+}
+
+func TestDuplicateSignalIDConflicts(t *testing.T) {
+	s, ctx := openTestStore(t)
+	payload := gateRequestPayload(t, "sig-dup")
+	if _, err := s.Append(ctx, domain.Event{
+		Kind: domain.EventGateRequest, Payload: payload, CodeVersion: "test", DecisionID: "dec-1",
+	}); err != nil {
+		t.Fatalf("first append: %v", err)
+	}
+	before := signalIDs(t, s, ctx)
+	_, err := s.Append(ctx, domain.Event{
+		Kind: domain.EventGateRequest, Payload: payload, CodeVersion: "test", DecisionID: "dec-2",
+	})
+	if domain.CodeOf(err) != domain.CodeConflict {
+		t.Fatalf("duplicate append err = %v, want conflict", err)
+	}
+	if got := signalIDs(t, s, ctx); !reflect.DeepEqual(got, before) {
+		t.Fatalf("signal ids after conflict = %v, want unchanged %v", got, before)
+	}
+	// The failed insert must not break the chain or leave a gap.
+	ev, err := s.Append(ctx, domain.Event{Kind: "risk.verdict", Payload: json.RawMessage(`{"i":1}`), CodeVersion: "test"})
+	if err != nil {
+		t.Fatalf("append after conflict: %v", err)
+	}
+	if ev.Seq != 2 {
+		t.Fatalf("seq after conflict = %d, want 2", ev.Seq)
+	}
+	if res, err := s.Verify(ctx); err != nil || !res.OK || res.Count != 2 {
+		t.Fatalf("verify: %+v err=%v", res, err)
+	}
+}
+
+func TestSignalIDOnlyRecordedForGateRequest(t *testing.T) {
+	s, ctx := openTestStore(t)
+	payload := gateRequestPayload(t, "sig-not-a-request")
+	if _, err := s.Append(ctx, domain.Event{
+		Kind: domain.EventGateVerdict, Payload: payload, CodeVersion: "test",
+	}); err != nil {
+		t.Fatalf("append verdict: %v", err)
+	}
+	// A second verdict with the same signalId is not constrained.
+	if _, err := s.Append(ctx, domain.Event{
+		Kind: domain.EventGateVerdict, Payload: payload, CodeVersion: "test",
+	}); err != nil {
+		t.Fatalf("second verdict append: %v", err)
+	}
+	// A gate.request without a signalId stays outside the index too.
+	for i := 0; i < 2; i++ {
+		if _, err := s.Append(ctx, domain.Event{
+			Kind: domain.EventGateRequest, Payload: json.RawMessage(`{"instrument":{"symbol":"BTCUSDT"}}`), CodeVersion: "test",
+		}); err != nil {
+			t.Fatalf("gate.request without signalId append %d: %v", i, err)
+		}
+	}
+	if _, err := s.Append(ctx, domain.Event{
+		Kind: domain.EventGateRequest, Payload: gateRequestPayload(t, "sig-real"), CodeVersion: "test",
+	}); err != nil {
+		t.Fatalf("gate.request append: %v", err)
+	}
+	got := signalIDs(t, s, ctx)
+	want := []string{"", "", "", "", "sig-real"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("signal ids = %v, want %v", got, want)
+	}
+}
+
+func TestOpenV1DatabaseMigratesToV2(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "v1.db")
+	raw, err := sql.Open("sqlite", "file:"+filepath.ToSlash(path))
+	if err != nil {
+		t.Fatalf("raw open: %v", err)
+	}
+	// A real v1 database: 001 applied, user_version 1, one chained row.
+	if _, err := raw.ExecContext(ctx, `CREATE TABLE events (
+	  seq            INTEGER PRIMARY KEY,
+	  event_id       TEXT NOT NULL UNIQUE,
+	  kind           TEXT NOT NULL,
+	  ts             TEXT NOT NULL,
+	  schema_version INTEGER NOT NULL,
+	  payload        BLOB NOT NULL,
+	  code_version   TEXT NOT NULL,
+	  prev_hash      TEXT NOT NULL,
+	  hash           TEXT NOT NULL,
+	  run_id         TEXT,
+	  decision_id    TEXT,
+	  policy_hash    TEXT,
+	  snapshot_hash  TEXT
+	)`); err != nil {
+		_ = raw.Close()
+		t.Fatalf("legacy ddl: %v", err)
+	}
+	if _, err := raw.ExecContext(ctx, `PRAGMA user_version=1`); err != nil {
+		_ = raw.Close()
+		t.Fatalf("set user_version: %v", err)
+	}
+	sealed, err := journal.Seal(domain.Event{
+		Seq:           1,
+		EventID:       "01LEGACYV1000000000000001",
+		Kind:          domain.EventGateRequest,
+		TS:            time.Date(2026, 11, 16, 10, 0, 0, 0, time.UTC),
+		SchemaVersion: 1,
+		Payload:       gateRequestPayload(t, "sig-legacy"),
+		CodeVersion:   "test",
+		DecisionID:    "dec-legacy",
+	}, journal.ZeroHash)
+	if err != nil {
+		_ = raw.Close()
+		t.Fatalf("seal legacy: %v", err)
+	}
+	if _, err := raw.ExecContext(ctx,
+		`INSERT INTO events (seq, event_id, kind, ts, schema_version, payload,
+			code_version, prev_hash, hash, decision_id) VALUES (?,?,?,?,?,?,?,?,?,?)`,
+		sealed.Seq, sealed.EventID, sealed.Kind, sealed.TS.Format(time.RFC3339Nano),
+		sealed.SchemaVersion, []byte(sealed.Payload), sealed.CodeVersion,
+		sealed.PrevHash, sealed.Hash, sealed.DecisionID,
+	); err != nil {
+		_ = raw.Close()
+		t.Fatalf("insert legacy: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("raw close: %v", err)
+	}
+
+	s, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("open v1: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	if v := userVersion(t, s, ctx); v != 2 {
+		t.Fatalf("migrated user_version = %d, want 2", v)
+	}
+	// Old rows are outside the index (NULL) and the chain still verifies.
+	if got := signalIDs(t, s, ctx); !reflect.DeepEqual(got, []string{""}) {
+		t.Fatalf("legacy signal ids = %v, want one NULL", got)
+	}
+	if res, err := s.Verify(ctx); err != nil || !res.OK || res.Count != 1 {
+		t.Fatalf("verify after migrate: %+v err=%v", res, err)
+	}
+	// The index constrains new rows on the migrated database.
+	if _, err := s.Append(ctx, domain.Event{
+		Kind: domain.EventGateRequest, Payload: gateRequestPayload(t, "sig-new"), CodeVersion: "test",
+	}); err != nil {
+		t.Fatalf("append after migrate: %v", err)
+	}
+	if _, err := s.Append(ctx, domain.Event{
+		Kind: domain.EventGateRequest, Payload: gateRequestPayload(t, "sig-new"), CodeVersion: "test",
+	}); domain.CodeOf(err) != domain.CodeConflict {
+		t.Fatalf("duplicate after migrate err = %v, want conflict", err)
+	}
+}
+
+// TestFailedMigrationRollsBack: the DDL and the version bump share one
+// transaction, so a failing migration leaves neither behind and the next open
+// migrates cleanly.
+func TestFailedMigrationRollsBack(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "journal.db")
+	orig := migrations
+	broken := struct {
+		version int
+		file    string
+	}{version: 3, file: "migrations/002_signal_id.sql"} // re-adds signal_id: fails
+	migrations = append(append([]struct {
+		version int
+		file    string
+	}{}, orig...), broken)
+
+	_, openErr := Open(ctx, path)
+	migrations = orig
+	if openErr == nil {
+		t.Fatal("Open with a failing migration succeeded")
+	}
+	s, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("reopen after the failed migration: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	if v := userVersion(t, s, ctx); v != latestVersion {
+		t.Fatalf("user_version = %d, want %d", v, latestVersion)
+	}
+	if _, err := s.Append(ctx, domain.Event{
+		Kind: domain.EventGateRequest, Payload: gateRequestPayload(t, "sig-after-rollback"), CodeVersion: "test",
+	}); err != nil {
+		t.Fatalf("append after rollback: %v", err)
+	}
+}
+
+// TestConcurrentOpenMigratesOnce covers two processes starting on one fresh
+// database: the immediate migration transaction serializes them, so neither
+// fails on the other's ALTER TABLE.
+func TestConcurrentOpenMigratesOnce(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "shared.db")
+	const openers = 2
+	var wg sync.WaitGroup
+	stores := make([]*Store, openers)
+	errs := make([]error, openers)
+	for i := 0; i < openers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			stores[i], errs[i] = Open(ctx, path)
+		}(i)
+	}
+	wg.Wait()
+	t.Cleanup(func() {
+		for _, s := range stores {
+			if s != nil {
+				_ = s.Close()
+			}
+		}
+	})
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent open %d: %v", i, err)
+		}
+	}
+	for i, s := range stores {
+		if v := userVersion(t, s, ctx); v != latestVersion {
+			t.Fatalf("store %d user_version = %d, want %d", i, v, latestVersion)
+		}
+		if _, err := s.Append(ctx, domain.Event{Kind: "k", Payload: json.RawMessage(`{}`), CodeVersion: "t"}); err != nil {
+			t.Fatalf("store %d append: %v", i, err)
+		}
+	}
+	if res, err := stores[0].Verify(ctx); err != nil || !res.OK || res.Count != openers {
+		t.Fatalf("verify = %+v err=%v", res, err)
 	}
 }

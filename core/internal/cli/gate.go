@@ -62,6 +62,7 @@ func (r *runner) cmdGateTest(args []string) int {
 	reqFlag := fs.String("request", "", "gate request JSON file")
 	fixFlag := fs.String("fixture", "", "decision response fixture file (offline)")
 	saveRaw := fs.String("save-raw", "", "write the raw provider response to FILE (0600)")
+	saveForce := fs.Bool("force", false, "overwrite an existing --save-raw file")
 	if err := fs.Parse(rest); err != nil {
 		return exitUsage
 	}
@@ -101,6 +102,7 @@ func (r *runner) cmdGateTest(args []string) int {
 	}
 
 	var provider ports.Decision
+	var fixtureResp *domain.DecisionResponse
 	if strings.TrimSpace(*fixFlag) != "" {
 		resp, raw, failCode, failErr := readDecisionFixture(*fixFlag, cfg.Providers.Decision.Model)
 		if failErr != nil {
@@ -116,6 +118,7 @@ func (r *runner) cmdGateTest(args []string) int {
 		}
 		resp.Raw = json.RawMessage(raw)
 		provider = fixtureProvider{resp: resp}
+		fixtureResp = &resp
 	} else if gateReq.IntentKind != domain.IntentExit {
 		reg, err := r.newRegistry(cfg,
 			slog.New(slog.NewTextHandler(r.stderr, nil)))
@@ -155,11 +158,26 @@ func (r *runner) cmdGateTest(args []string) int {
 	res, err := flow.Evaluate(context.Background(), gateReq)
 	if err != nil {
 		code, errCode := loadFailureCode(err)
-		if domain.CodeOf(err) == domain.CodeInvalidRequest {
+		hint := "fix the request file or check the data directory"
+		switch domain.CodeOf(err) {
+		case domain.CodeInvalidRequest:
 			code, errCode = exitUsage, codeUsage
+		case domain.CodeConflict:
+			// Another process holds this signalId: its gate.request is
+			// journaled but the verdict is not there yet.
+			hint = "retry with the same signalId once the other evaluation records its verdict"
 		}
-		return r.fail(jsonOut, code, errCode, err.Error(),
-			"fix the request file or check the data directory", false, nil)
+		return r.fail(jsonOut, code, errCode, err.Error(), hint, false, nil)
+	}
+
+	// A replay must be the same decision: the offline fixture is compared to
+	// the response the journaled verdict was computed from, so a changed
+	// --fixture cannot silently print an old verdict.
+	if res.Reused && fixtureResp != nil && !sameDecisionResponse(*fixtureResp, res.Journaled) {
+		return r.fail(jsonOut, exitConflict, codeConflict,
+			"fixture differs from journaled decision; change signalId or use another --data-dir",
+			"the journaled verdict was computed from a different response; use a new signalId to record a new decision",
+			false, nil)
 	}
 
 	if strings.TrimSpace(*saveRaw) != "" {
@@ -168,9 +186,9 @@ func (r *runner) cmdGateTest(args []string) int {
 				"raw response unavailable, e.g. idempotent replay",
 				"omit --save-raw on replay or rerun with a new signalId", false, nil)
 		}
-		if werr := writeFileAtomic(*saveRaw, res.Response.Raw, 0o600); werr != nil {
-			return r.fail(jsonOut, exitGeneral, codeGeneral, werr.Error(),
-				"check the output path is writable and retry", false, nil)
+		if werr := writeFileNew(*saveRaw, res.Response.Raw, 0o600,
+			newFileOptions{DataDir: dataDir, Force: *saveForce}); werr != nil {
+			return r.failOutput(jsonOut, werr)
 		}
 	}
 
@@ -183,6 +201,10 @@ func (r *runner) cmdGateTest(args []string) int {
 		fmt.Fprintln(r.stdout, string(raw))
 	} else {
 		printVerdictHuman(r.stdout, res.Verdict)
+		if res.Reused {
+			fmt.Fprintln(r.stdout, "replayed: true")
+			fmt.Fprintln(r.stdout, "hint: replayed from the journal, no provider call was made")
+		}
 	}
 
 	if res.ProviderErr != nil {
@@ -207,6 +229,16 @@ func (r *runner) cmdGateTest(args []string) int {
 	return exitOK
 }
 
+// readJSONFileNoBOM reads path and drops a leading UTF-8 BOM, which some
+// Windows editors prepend and encoding/json rejects.
+func readJSONFileNoBOM(path string) ([]byte, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return bytes.TrimPrefix(raw, []byte{0xEF, 0xBB, 0xBF}), nil
+}
+
 // readGateRequest parses the request file strictly and validates fields.
 func readGateRequest(path string) (domain.GateRequest, int, error) {
 	var req domain.GateRequest
@@ -216,15 +248,14 @@ func readGateRequest(path string) (domain.GateRequest, int, error) {
 		}
 		return req, exitGeneral, err
 	}
-	f, err := os.Open(path)
+	raw, err := readJSONFileNoBOM(path)
 	if err != nil {
 		if isNotFound(err) {
 			return req, exitNotFound, fmt.Errorf("request file not found at %s", path)
 		}
 		return req, exitGeneral, err
 	}
-	defer func() { _ = f.Close() }()
-	dec := json.NewDecoder(f)
+	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&req); err != nil {
 		return req, exitUsage, fmt.Errorf("invalid request JSON: %v", firstLine(err))
@@ -257,7 +288,7 @@ func readGateRequest(path string) (domain.GateRequest, int, error) {
 // with the raw file bytes for --save-raw.
 func readDecisionFixture(path, model string) (domain.DecisionResponse, []byte, int, error) {
 	var resp domain.DecisionResponse
-	raw, err := os.ReadFile(path)
+	raw, err := readJSONFileNoBOM(path)
 	if err != nil {
 		if isNotFound(err) || os.IsNotExist(err) {
 			return resp, nil, exitNotFound, fmt.Errorf("fixture file not found at %s", path)
@@ -271,6 +302,24 @@ func readDecisionFixture(path, model string) (domain.DecisionResponse, []byte, i
 	}
 	resp.RequestedModel = model
 	return resp, raw, exitOK, nil
+}
+
+// sameDecisionResponse reports whether the offline fixture is the answer the
+// journaled verdict was computed from. Raw is excluded from JSON (json:"-"),
+// so only the decoded response is compared.
+func sameDecisionResponse(fixture domain.DecisionResponse, journaled *domain.DecisionResponse) bool {
+	if journaled == nil {
+		return false
+	}
+	want, err := json.Marshal(fixture)
+	if err != nil {
+		return false
+	}
+	got, err := json.Marshal(*journaled)
+	if err != nil {
+		return false
+	}
+	return bytes.Equal(want, got)
 }
 
 // validateFixture checks an offline decision response against the gate

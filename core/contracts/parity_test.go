@@ -268,6 +268,19 @@ func TestParityReport(t *testing.T) {
 		BackfillExcluded:     2,
 		Days:                 7,
 		ActiveDays:           5,
+		Synthetic:            true,
+		G1: &domain.ReportG1{
+			Labels:                     100,
+			TargetLabels:               100,
+			ActiveDays:                 7,
+			TargetDays:                 7,
+			MaxGapHours:                2.5,
+			Eligible:                   true,
+			Synthetic:                  true,
+			LastLabelAgeHours:          1.5,
+			ExpectedLabelIntervalHours: 3,
+			LabelsDue:                  0,
+		},
 		Assumptions: &domain.ReportAssumptions{
 			HorizonBars:      12,
 			FeeBpsRoundTrip:  20,
@@ -295,16 +308,17 @@ func TestParityReport(t *testing.T) {
 			},
 		},
 		Comparisons: &domain.ReportComparisons{
-			AllEntriesReturn:  domain.MustParseDecimal("0.012400"),
-			AllowReturn:       domain.MustParseDecimal("0.018200"),
-			RejectedAvgReturn: domain.MustParseDecimal("-0.004100"),
-			Brier:             0.21,
-			ECE:               0.06,
-			BaseRate:          0.55,
-			ConstantBrier:     0.25,
-			BrierSkillScore:   0.16,
-			AUC:               0.62,
-			CalibrationCount:  42,
+			AllEntriesReturn:      domain.MustParseDecimal("0.012400"),
+			AllowReturn:           domain.MustParseDecimal("0.018200"),
+			RejectedAvgReturn:     domain.MustParseDecimal("-0.004100"),
+			Brier:                 0.21,
+			ECE:                   0.06,
+			BaseRate:              0.55,
+			ConstantBrier:         0.25,
+			BrierSkillScore:       0.16,
+			AUC:                   0.62,
+			CalibrationCount:      42,
+			CalibrationSufficient: true,
 			Groups: map[string]domain.GroupStats{
 				"allow": {
 					Count:        25,
@@ -326,13 +340,14 @@ func TestParityReport(t *testing.T) {
 			},
 			ByModel: []domain.ModelBreakdown{
 				{
-					Model:        "dre-x-1",
-					Count:        42,
-					Brier:        0.21,
-					ECE:          0.06,
-					NetReturnSum: domain.MustParseDecimal("0.280800"),
-					CostUSD:      domain.MustParseDecimal("0.0003024"),
-					AvgNetReturn: domain.MustParseDecimal("0.006686"),
+					Model:            "dre-x-1",
+					Count:            42,
+					Brier:            0.21,
+					ECE:              0.06,
+					NetReturnSum:     domain.MustParseDecimal("0.280800"),
+					CostUSD:          domain.MustParseDecimal("0.0003024"),
+					AvgNetReturn:     domain.MustParseDecimal("0.006686"),
+					CalibrationCount: 42,
 				},
 			},
 		},
@@ -346,6 +361,9 @@ func TestParityReport(t *testing.T) {
 	}
 	if c.Days == nil || *c.Days != 7 || c.ActiveDays == nil || *c.ActiveDays != 5 {
 		t.Fatalf("window lost on the wire: %+v", c)
+	}
+	if c.Synthetic == nil || !*c.Synthetic || c.G1 == nil || c.G1.Labels != 100 || !c.G1.Eligible || c.G1.MaxGapHours != 2.5 {
+		t.Fatalf("G1 block lost on the wire: synthetic=%v g1=%+v", c.Synthetic, c.G1)
 	}
 	if string(c.DecisionCostUSD) != "0.0003024" {
 		t.Fatalf("money lost on the wire: %+v", c)
@@ -379,6 +397,12 @@ func TestParityReport(t *testing.T) {
 	}
 	if c.Comparisons.CalibrationCount == nil || *c.Comparisons.CalibrationCount != 42 {
 		t.Fatalf("calibrationCount lost on the wire: %+v", c.Comparisons)
+	}
+	if c.Comparisons.CalibrationSufficient == nil || !*c.Comparisons.CalibrationSufficient {
+		t.Fatalf("calibrationSufficient lost on the wire: %+v", c.Comparisons)
+	}
+	if c.Comparisons.ByModel[0].CalibrationCount == nil || *c.Comparisons.ByModel[0].CalibrationCount != 42 {
+		t.Fatalf("model calibrationCount lost on the wire: %+v", c.Comparisons.ByModel[0])
 	}
 	if len(c.Comparisons.Groups) != 1 || c.Comparisons.Groups["allow"].Count != 25 {
 		t.Fatalf("groups lost on the wire: %+v", c.Comparisons.Groups)
@@ -454,6 +478,9 @@ func TestParityReport(t *testing.T) {
 	if back.LabeledCount != d.LabeledCount || back.LatencyP50MS != 11 || back.LatencyP95MS != 38 {
 		t.Fatalf("reverse mismatch: %+v", back)
 	}
+	if !back.Synthetic || back.G1 == nil || back.G1.Labels != 100 || !back.G1.Eligible || back.G1.LabelsDue != 0 {
+		t.Fatalf("reverse G1 mismatch: synthetic=%v g1=%+v", back.Synthetic, back.G1)
+	}
 	if back.Comparisons == nil || back.Comparisons.Brier != 0.21 || len(back.Comparisons.ByModel) != 1 {
 		t.Fatalf("reverse comparisons mismatch: %+v", back.Comparisons)
 	}
@@ -504,8 +531,11 @@ func TestParityReport(t *testing.T) {
 	}
 	if back.Comparisons.BaseRate != 0.55 || back.Comparisons.ConstantBrier != 0.25 ||
 		back.Comparisons.BrierSkillScore != 0.16 || back.Comparisons.AUC != 0.62 ||
-		back.Comparisons.CalibrationCount != 42 {
+		back.Comparisons.CalibrationCount != 42 || !back.Comparisons.CalibrationSufficient {
 		t.Fatalf("reverse calibration mismatch: %+v", back.Comparisons)
+	}
+	if back.Comparisons.ByModel[0].CalibrationCount != 42 {
+		t.Fatalf("reverse byModel calibration mismatch: %+v", back.Comparisons.ByModel[0])
 	}
 	if back.Comparisons.ByModel[0].AvgNetReturn.String() != "0.006686" {
 		t.Fatalf("reverse byModel avg mismatch: %+v", back.Comparisons.ByModel[0])

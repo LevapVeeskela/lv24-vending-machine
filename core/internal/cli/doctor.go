@@ -33,7 +33,7 @@ type docCheck struct {
 	Live   bool   `json:"live,omitempty"`
 }
 
-const doctorUsage = "run vend doctor [--live] [--symbol SYMBOL] [--save-raw FILE] [--config FILE] [--data-dir DIR]"
+const doctorUsage = "run vend doctor [--live] [--strict] [--symbol SYMBOL] [--save-raw FILE] [--config FILE] [--data-dir DIR]"
 
 func (r *runner) cmdDoctor(args []string) int {
 	g, rest, gerr := splitGlobals(args)
@@ -43,8 +43,10 @@ func (r *runner) cmdDoctor(args []string) int {
 	jsonOut := g.json
 	fs := r.newFlagSet("doctor")
 	live := fs.Bool("live", false, "run opt-in network probes (decision, candles, telegram)")
+	strict := fs.Bool("strict", false, "require the offline G1 profile invariants")
 	symbol := fs.String("symbol", doctorSymbol, "symbol for the live candles probe")
 	saveRaw := fs.String("save-raw", "", "write the raw decision response to FILE (0600)")
+	saveForce := fs.Bool("force", false, "overwrite an existing --save-raw file")
 	if err := fs.Parse(rest); err != nil {
 		return exitUsage
 	}
@@ -52,9 +54,9 @@ func (r *runner) cmdDoctor(args []string) int {
 		return r.fail(jsonOut, exitUsage, codeUsage,
 			fmt.Sprintf("unexpected argument %q", fs.Arg(0)), doctorUsage, false, nil)
 	}
-	if !*live && (strings.TrimSpace(*saveRaw) != "" || flagWasSet(fs, "symbol")) {
+	if !*live && (strings.TrimSpace(*saveRaw) != "" || flagWasSet(fs, "symbol") || *saveForce) {
 		return r.fail(jsonOut, exitUsage, codeUsage,
-			"--symbol and --save-raw require --live", doctorUsage, false, nil)
+			"--symbol, --save-raw and --force require --live", doctorUsage, false, nil)
 	}
 	cfgPath, dataDir, err := r.resolvePaths(g.config, g.dataDir)
 	if err != nil {
@@ -123,14 +125,35 @@ func (r *runner) cmdDoctor(args []string) int {
 		add("providers", false, err.Error())
 	} else {
 		reg = built
-		var ids []string
+		var ids, decisions []string
 		for _, d := range reg.Descriptors() {
+			if d.Kind == ports.KindDecision {
+				decisions = append(decisions, d.ID)
+			}
 			ids = append(ids, d.ID)
 		}
-		add("providers", true, strings.Join(ids, ", "))
+		// config validate cannot check the provider id: it does not see the
+		// provider registry. doctor is the preflight that does.
+		if _, err := reg.Decision(cfg.Providers.Decision.ID); err != nil {
+			registered := strings.Join(decisions, ", ")
+			if registered == "" {
+				registered = "(none)"
+			}
+			add("providers", false, fmt.Sprintf(
+				"unknown decision provider %q; registered: %s",
+				cfg.Providers.Decision.ID, registered))
+		} else {
+			add("providers", true, strings.Join(ids, ", "))
+		}
 	}
 
-	if cfgErr != nil {
+	// The loopback gate API refuses to start without its bearer token, so a
+	// missing token is a hard doctor failure, not a warning like the
+	// provider secret: doctor is the preflight for vend serve.
+	if r.getenv(localAPITokenEnv) == "" {
+		add("secrets", false, fmt.Sprintf(
+			"%s is not set; vend serve requires it", localAPITokenEnv))
+	} else if cfgErr != nil {
 		add("secrets", false, "config is unavailable")
 	} else {
 		name := config.SecretEnvName(cfg.Providers.Decision.SecretRef)
@@ -147,11 +170,20 @@ func (r *runner) cmdDoctor(args []string) int {
 		pol := domain.GatePolicy{
 			Version: cfg.Gate.Version, MinPass: cfg.Gate.MinPass, MinBlock: cfg.Gate.MinBlock,
 		}
-		add("gate_policy", true, gate.PolicyHash(pol))
+		hash := gate.PolicyHash(pol)
+		if *strict && strings.TrimSpace(hash) == "" {
+			add("gate_policy", false, "gate policy hash is empty")
+		} else {
+			add("gate_policy", true, hash)
+		}
+	}
+
+	if *strict {
+		checks = append(checks, r.strictChecks(cfg, cfgErr)...)
 	}
 
 	if *live {
-		checks = append(checks, r.liveChecks(cfg, cfgErr, cfgValid, reg, *symbol, *saveRaw)...)
+		checks = append(checks, r.liveChecks(cfg, cfgErr, cfgValid, reg, *symbol, *saveRaw, dataDir, *saveForce)...)
 	}
 
 	ok := true
@@ -162,7 +194,14 @@ func (r *runner) cmdDoctor(args []string) int {
 		}
 	}
 	if jsonOut {
-		r.printJSON(map[string]any{"ok": ok, "checks": checks})
+		out := map[string]any{"ok": ok, "checks": checks}
+		if *strict {
+			out["strict"] = true
+			out["profile"] = config.QuickProfileName
+			out["volumeVerified"] = false
+			out["nextSteps"] = []string{"vend signals estimate --days 7"}
+		}
+		r.printJSON(out)
 	} else {
 		for _, c := range checks {
 			if c.Live {
@@ -175,6 +214,10 @@ func (r *runner) cmdDoctor(args []string) int {
 			}
 			fmt.Fprintf(r.stdout, "%s %s: %s\n", status, c.Name, c.Detail)
 		}
+		if *strict && ok {
+			fmt.Fprintln(r.stdout, "profile ready; volume unverified")
+			fmt.Fprintln(r.stdout, "next: vend signals estimate --days 7")
+		}
 	}
 	if !ok {
 		return exitGeneral
@@ -182,12 +225,75 @@ func (r *runner) cmdDoctor(args []string) int {
 	return exitOK
 }
 
+// strictChecks are the offline G1 profile invariants. They prove the install is
+// configured to produce signals; they never prove volume, which only
+// vend signals estimate can measure over the network.
+func (r *runner) strictChecks(cfg config.Config, cfgErr error) []docCheck {
+	var out []docCheck
+	add := func(name string, ok bool, detail string) {
+		out = append(out, docCheck{Name: name, OK: ok, Detail: detail})
+	}
+	if cfgErr != nil {
+		add("trend", false, "signals.trend.enabled cannot be checked: config is unavailable")
+		add("symbols", false, "signals.trend.symbols cannot be checked: config is unavailable")
+		add("timeframe", false, "signals.trend.timeframe cannot be checked: config is unavailable")
+		add("label_interval", false, "outcome.labelIntervalSec cannot be checked: config is unavailable")
+		add("decision_secret", false, "providers.decision.secretRef cannot be resolved: config is unavailable")
+		return out
+	}
+	tr := cfg.Signals.Trend
+	if tr.Enabled {
+		add("trend", true, "signals.trend.enabled=true")
+	} else {
+		add("trend", false, "signals.trend.enabled is false; run vend init --quick or set it to true")
+	}
+	if n := len(tr.Symbols); n >= config.QuickMinSymbols {
+		add("symbols", true, fmt.Sprintf("signals.trend.symbols has %d symbols", n))
+	} else {
+		add("symbols", false, fmt.Sprintf(
+			"signals.trend.symbols has %d symbols; the G1 profile needs at least %d",
+			n, config.QuickMinSymbols))
+	}
+	interval, terr := domain.ParseTimeframe(tr.Timeframe)
+	if terr != nil || strings.TrimSpace(tr.Timeframe) != config.QuickTimeframe {
+		detail := fmt.Sprintf("signals.trend.timeframe is %q; the G1 profile needs %q",
+			tr.Timeframe, config.QuickTimeframe)
+		if terr != nil {
+			detail += ": " + terr.Error()
+		}
+		add("timeframe", false, detail)
+	} else {
+		add("timeframe", true, "signals.trend.timeframe="+config.QuickTimeframe)
+	}
+	switch {
+	case cfg.Outcome.LabelIntervalSec <= 0:
+		add("label_interval", false, "outcome.labelIntervalSec must be > 0")
+	case terr != nil || 2*time.Duration(cfg.Outcome.LabelIntervalSec)*time.Second > interval:
+		add("label_interval", false, fmt.Sprintf(
+			"outcome.labelIntervalSec %ds must be at most half of signals.trend.timeframe %s",
+			cfg.Outcome.LabelIntervalSec, tr.Timeframe))
+	default:
+		add("label_interval", true, fmt.Sprintf(
+			"outcome.labelIntervalSec=%ds (at most half of %s)",
+			cfg.Outcome.LabelIntervalSec, tr.Timeframe))
+	}
+	if ref := strings.TrimSpace(cfg.Providers.Decision.SecretRef); ref == "" {
+		add("decision_secret", false, "providers.decision.secretRef is empty")
+	} else if name := config.SecretEnvName(ref); r.getenv(name) == "" {
+		add("decision_secret", false, fmt.Sprintf(
+			"%s is not set; the decision provider needs it", name))
+	} else {
+		add("decision_secret", true, fmt.Sprintf("%s is set", config.SecretEnvName(ref)))
+	}
+	return out
+}
+
 // liveChecks runs the opt-in network probes: one decision call with the
 // frozen gate questions, two candles for symbol and, when enabled, one
 // Telegram message. Each check reports only "ok" or a domain error code;
 // tokens, URLs and response bodies are never printed.
 func (r *runner) liveChecks(cfg config.Config, cfgErr error, cfgValid bool,
-	reg *registry.Registry, symbol, saveRaw string,
+	reg *registry.Registry, symbol, saveRaw, dataDir string, saveForce bool,
 ) []docCheck {
 	var out []docCheck
 	add := func(name string, ok bool, detail string) {
@@ -259,8 +365,9 @@ func (r *runner) liveChecks(cfg config.Config, cfgErr error, cfgValid bool,
 	if strings.TrimSpace(saveRaw) != "" {
 		if len(raw) == 0 {
 			add("save_raw", false, string(domain.CodeUnavailable))
-		} else if werr := writeFileAtomic(saveRaw, raw, 0o600); werr != nil {
-			add("save_raw", false, string(domain.CodeUnavailable))
+		} else if werr := writeFileNew(saveRaw, raw, 0o600,
+			newFileOptions{DataDir: dataDir, Force: saveForce}); werr != nil {
+			add("save_raw", false, werr.Error())
 		} else {
 			add("save_raw", true, "ok")
 		}

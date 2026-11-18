@@ -5,6 +5,52 @@
 `0.1.0-m1` — релиз-кандидат, **не опубликован**; артефакты собираются
 `go run ./tools/release`, публикации нет.
 
+## [Unreleased]
+
+### Added
+
+- `docs/plans/m1-audit-hardening.md` — план закрытия P0/P1 после аудита M1.
+- `docs/plans/m1-phase-b-activation.md` — план активации G1.
+- `init --quick` — профиль G1: 10 USDT-символов на 15m, trend включён,
+  export-команды без записи секретов.
+- `doctor --strict` — offline-инварианты G1-профиля (trend, 10 символов, 15m,
+  label ≤ timeframe/2, секреты); не обещает проверенный объём сигналов.
+- `vend demo` — детерминированная синтетическая неделя (120 меток, 7 дней,
+  фиксированный seed) с полным отчётом и баннером `SYNTHETIC`; не вызывает
+  провайдеров, не засчитывается в G1, `--share` отказывает.
+- `gate report`/`status`: G1-блок (`labels`, `active days`, `max gap`,
+  `eligible`, `lastLabelAge`, `labelsDue`), порог непрерывности 36 ч;
+  синтетический журнал (`runId=demo`) обнуляет G1 и блокирует `--share`.
+- `gate report --allow-broken-chain` — отчёт по повреждённому журналу только
+  по явному запросу; по умолчанию отчёт проверяет hash-chain.
+
+### Changed
+
+- `gate report` требует ≥30 калибровочных пар для Brier/ECE/AUC/BSS и ≥30
+  наблюдений в каждой группе для bootstrap CI; иначе печатает `n/a` и
+  `insufficient group size`. `--share` печатает `calibration pairs`.
+- `decision-drex`: таймаут 60 с, `Retry-After`/`retry-after-ms` на 429/503/529,
+  circuit breaker, `error.type`.
+- `marketdata-binance`: case-sensitive enum интервалов, явный отказ futures,
+  weight/request budget, cooldown 429/418, пагинация без потери страниц.
+- `notify-telegram`: разбиение 4096, `ok:false` — ошибка, 400 —
+  `invalid_request`, `parse_mode` не задаётся.
+- CLI: `--help`/`help` с exit 0, `CodeConflict` → exit 4, `status --json` без
+  нулевых дат, `journal tail --kind` проверяет kind, `init` печатает next steps.
+- `config validate` парсит `signals.trend.timeframe` и требует
+  `timeframe ≥ 2×outcome.labelIntervalSec`; `doctor` падает при неизвестном
+  `providers.decision.id` и отсутствии `VENDING_SECRET_CONN_LOCAL_APITOKEN`;
+  `serve` прокидывает `signals.trend.venue` и `outcome.labelIntervalSec`.
+- Планировщик trend покрыт тестами `nextTrendDelay` и `Run`; ложный
+  комментарий `trendOffset` исправлен.
+- Документация: runbook с обязательным `state`, Windows-путь через `.exe`,
+  точный статус Linux/macOS, `--share` без ложного «no return amounts»,
+  суженный `SECURITY.md`, `LICENSE-docs` (CC BY 4.0), CI-политика zero-spend.
+- `--share --out` не перезаписывает существующий файл без `--force` и
+  запрещает путь внутри data-dir.
+- Тесты: `task test:core` работает в `-short`; отдельные `test:7d`,
+  `test:e2e`, `test:race`, `check:full`.
+
 ## [0.1.0-m1] — 2026-11-16 (релиз-кандидат, не опубликован)
 
 Первый клин: shadow-гейт, который работает без присмотра, и офлайн-проверка
@@ -451,6 +497,10 @@ CC-BY-4.0.
   журнале, самый долгий вызов `confirm_trade_entry` — 0,75 мс; 150 сигналов
   подряд — 100 вердиктов и 50 отброшенных переполненной очередью, других
   потерь нет.
+- `confirm_trade_entry` гасит и ошибку запуска фонового потока (например,
+  исчерпание потоков ОС): сигнал теряется, но вход всё равно разрешается.
+  Добавлен тест с подменённым `_GateSender.start`; без этой правки исключение
+  выходило из колбэка, потому что создание отправителя стояло вне `try`.
 
 ### Контакт для сообщений об уязвимостях
 

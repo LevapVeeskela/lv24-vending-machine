@@ -34,8 +34,11 @@ api    → app
 cmd    → всё (единственный composition root)
 ```
 
-Проверка: `task lint:imports` (CI обязателен). Новый пакет — только с
-обоснованием, зачем он не помещается в существующий слой.
+Проверка: `task lint:imports` — локально, до коммита. CI в M1 не включён
+осознанно: политика нулевых расходов (zero-spend), проверки выполняются
+локально. Если CI появится, он должен быть только на бесплатных квотах, без
+загрузки артефактов и с подтверждением $0; см. `docs/release-checklist.md`.
+Новый пакет — только с обоснованием, зачем он не помещается в существующий слой.
 
 ## 4. Как добавить провайдера
 
@@ -68,12 +71,13 @@ cmd    → всё (единственный composition root)
 
 ```bash
 task gen            # кодоген из contracts/
-task gen:check      # drift-проверка (CI)
-task check          # gen:check + lint + test + build
-task test           # go test ./... -race + npm test + flutter test
-task dev:desktop    # vite + tauri dev
-task dev:web
-task dev:core       # go run ./core/cmd/vendd
+task gen:check      # drift-проверка (локально)
+task check          # gen:check + lint + test (-short) + build; быстрый
+task check:full     # check + e2e + 7-дневный shadow-прогон
+task test           # все модули; core в -short, e2e и 7d отдельно
+task test:7d        # только 7-дневный прогон (минуты)
+task test:e2e       # HTTP+CLI e2e (VEND_E2E=1)
+task test:race      # core с -race (нужен cgo и C-компилятор)
 ```
 
 ## 8. Definition of Done
@@ -81,6 +85,9 @@ task dev:core       # go run ./core/cmd/vendd
 - [ ] Контракты обновлены, `task gen:check` зелёный.
 - [ ] Тесты: unit + conformance/parity там, где применимо.
 - [ ] `task check` проходит локально.
+- [ ] Проверки выполнены локально; CI не включался (zero-spend). Если CI
+      когда-либо включён — только бесплатный, без загрузки артефактов и с
+      подтверждением $0.
 - [ ] Нет новых секретов, зависимостей с AGPL/GPL, платных сервисов.
 - [ ] Документация затронута (spec/ADR/README), если менялось поведение.
 - [ ] Для риск/OMS/контрактов — ревью владельца.

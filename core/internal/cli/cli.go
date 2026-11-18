@@ -11,9 +11,11 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -128,11 +130,22 @@ func Run(env Env) int {
 		r.usage()
 		return exitUsage
 	}
+	// Help is resolved before dispatch so every command accepts --help/-h and
+	// `vend help <command>` without a command-specific parser rejecting it.
+	if args[0] == "help" {
+		words, _ := scanHelpArgs(args[1:])
+		return r.showHelp(words)
+	}
+	if words, ok := scanHelpArgs(args); ok {
+		return r.showHelp(words)
+	}
 	switch args[0] {
 	case "version":
 		return r.cmdVersion(args[1:])
 	case "init":
 		return r.cmdInit(args[1:])
+	case "demo":
+		return r.cmdDemo(args[1:])
 	case "config":
 		return r.cmdConfig(args[1:])
 	case "doctor":
@@ -152,32 +165,253 @@ func Run(env Env) int {
 	default:
 		r.fail(false, exitUsage, codeUsage,
 			fmt.Sprintf("unknown command %q", args[0]),
-			"run vend with one of: version, init, config, doctor, gate, journal, signals, serve, outcomes, status", false, nil)
+			"run vend with one of: version, init, demo, config, doctor, gate, journal, signals, serve, outcomes, status, help", false, nil)
 		return exitUsage
 	}
 }
 
+// usage prints the top-level help to stderr for a usage error (no command).
 func (r *runner) usage() {
-	fmt.Fprintln(r.stderr, "usage: vend <command> [options]")
-	fmt.Fprintln(r.stderr, "")
-	fmt.Fprintln(r.stderr, "commands:")
-	fmt.Fprintln(r.stderr, "  version [--json]")
-	fmt.Fprintln(r.stderr, "  init [--config FILE] [--data-dir DIR] [--force] [--json]")
-	fmt.Fprintln(r.stderr, "  config path|get KEY|validate [--config FILE] [--data-dir DIR] [--json]")
-	fmt.Fprintln(r.stderr, "  doctor [--live] [--symbol SYMBOL] [--save-raw FILE] [--config FILE] [--data-dir DIR] [--json]")
-	fmt.Fprintln(r.stderr, "  gate test --request FILE [--fixture FILE] [--save-raw FILE] [--config FILE] [--data-dir DIR] [--json]")
-	fmt.Fprintln(r.stderr, "  gate report [--json]")
-	fmt.Fprintln(r.stderr, "  journal verify [--config FILE] [--data-dir DIR] [--json]")
-	fmt.Fprintln(r.stderr, "  journal head [--data-dir DIR] [--json]")
-	fmt.Fprintln(r.stderr, "  journal tail [--kind KIND] [--limit N] [--data-dir DIR] [--json]")
-	fmt.Fprintln(r.stderr, "  serve [--addr 127.0.0.1:8420]")
-	fmt.Fprintln(r.stderr, "  outcomes label [--candles FILE] [--json]")
-	fmt.Fprintln(r.stderr, "  signals estimate [--days N] [--config FILE] [--data-dir DIR] [--json]")
-	fmt.Fprintln(r.stderr, "  status [--json]")
+	fmt.Fprint(r.stderr, generalHelp)
+}
+
+// generalHelp is the top-level reference: every command and flag of the
+// binary, kept in one place with the per-command pages below.
+const generalHelp = `usage: vend <command> [options]
+
+commands:
+  version [--json]
+  init [--quick] [--force] [--config FILE] [--data-dir DIR] [--json]
+  demo [--data-dir DIR] [--json] [--keep] [--share]
+  config path|get KEY|validate [--config FILE] [--data-dir DIR] [--json]
+  doctor [--strict] [--live] [--symbol SYMBOL] [--save-raw FILE] [--force] [--config FILE] [--data-dir DIR] [--json]
+  gate test --request FILE [--fixture FILE] [--save-raw FILE] [--force] [--config FILE] [--data-dir DIR] [--json]
+  gate report [--policy HASH] [--include-backfill] [--share [--out FILE] [--force]] [--json] [--config FILE] [--data-dir DIR]
+  journal verify [--config FILE] [--data-dir DIR] [--json]
+  journal head [--config FILE] [--data-dir DIR] [--json]
+  journal tail [--kind KIND] [--limit N] [--config FILE] [--data-dir DIR] [--json]
+  signals estimate [--days N] [--config FILE] [--data-dir DIR] [--json]
+  outcomes label [--candles FILE] [--config FILE] [--data-dir DIR] [--json]
+  status [--config FILE] [--data-dir DIR] [--json]
+  serve [--addr 127.0.0.1:8420] [--config FILE] [--data-dir DIR] [--json]
+  help [command]
+
+global flags (accepted by every command, in any position):
+  --config FILE   config file path
+  --data-dir DIR  data directory
+  --json          machine-readable output and JSON error envelopes
+
+exit codes: 0 ok, 1 general, 2 usage, 3 not found, 4 conflict,
+5 forbidden, 6 provider, 7 gate rejected, 8 timeout, 9 approval.
+
+run "vend help <command>" or "vend <command> --help" for command details.
+`
+
+// helpPages holds the command pages printed by `vend help <topic>` and
+// `vend <topic> --help`. Every command and flag in generalHelp has a page.
+var helpPages = map[string]string{
+	"version": `usage: vend version [--json]
+
+Print the vend version.
+`,
+	"init": `usage: vend init [--quick] [--force] [--config FILE] [--data-dir DIR] [--json]
+
+Create the config file and an empty journal, then print the resolved paths
+and the next commands to run. --quick writes the G1 profile (ten USDT
+symbols on 15m, trend source enabled) and prints the export commands.
+
+flags:
+  --quick   write the G1 10 symbols x 15m profile instead of the empty default
+  --force   overwrite an existing config file
+`,
+	"demo": `usage: vend demo [--data-dir DIR] [--json] [--keep] [--share]
+
+Seed a deterministic synthetic week (seven UTC days, ten symbols, at least
+100 labeled outcomes) into a throwaway journal and print the full report.
+The journal is marked runId=demo and is never G1 evidence; --share is
+refused. Without --data-dir a temporary directory is used and deleted unless
+--keep is set.
+
+flags:
+  --data-dir DIR  seed a fresh directory instead of a temporary one
+  --json          print the report as JSON
+  --keep          keep a temporary data directory and print its path
+  --share         refused: a synthetic journal is not G1 evidence
+`,
+	"config": `usage: vend config path|get KEY|validate [--config FILE] [--data-dir DIR] [--json]
+
+subcommands:
+  path      print the resolved config file path
+  get KEY   print one dotted config value, e.g. gate.minPass
+  validate  parse and validate the config file
+`,
+	"doctor": `usage: vend doctor [--strict] [--live] [--symbol SYMBOL] [--save-raw FILE] [--force] [--config FILE] [--data-dir DIR] [--json]
+
+Check the config, data directory, journal chain, provider registry, secrets and
+gate policy. With --live, also run the opt-in network probes. With --strict,
+also require the offline G1 profile invariants; it never claims volume is
+verified (run vend signals estimate for that).
+
+flags:
+  --strict         require the offline G1 profile (trend, 10 symbols, 15m, secrets)
+  --live           run the network probes (decision, candles, telegram)
+  --symbol SYMBOL  symbol for the live candles probe (default BTCUSDT)
+  --save-raw FILE  write the raw decision response to FILE (0600); needs --live
+  --force          overwrite an existing --save-raw file
+`,
+	"gate": `usage: vend gate test --request FILE [options]
+       vend gate report [options]
+
+subcommands:
+  test    evaluate one gate request against the provider or an offline fixture
+  report  build the shadow-gate report from the journal
+`,
+	"gate test": `usage: vend gate test --request FILE [--fixture FILE] [--save-raw FILE] [--force]
+                   [--config FILE] [--data-dir DIR] [--json]
+
+Evaluate one gate request and record the verdict in the journal. With
+--fixture the decision comes from a file and the provider is never called;
+without it entry intents call the configured decision provider.
+
+flags:
+  --request FILE   gate request JSON file (required)
+  --fixture FILE   decision response fixture for an offline replay
+  --save-raw FILE  write the raw decision response to FILE (0600)
+  --force          overwrite an existing --save-raw file
+`,
+	"gate report": `usage: vend gate report [--policy HASH] [--include-backfill] [--share [--out FILE] [--force]]
+                       [--json] [--config FILE] [--data-dir DIR]
+
+Build the shadow-gate report. --share prints a sanitized markdown summary and
+cannot be combined with --json; --out requires --share.
+
+flags:
+  --policy HASH        only report decisions made under this 64-hex policy hash
+  --include-backfill   count backfilled outcomes in the comparison
+  --share              print the sanitized markdown summary instead of the report
+  --out FILE           write the --share summary to FILE (0600); refuses an existing file
+  --force              overwrite the --out file if it already exists
+  --allow-broken-chain report even when the journal hash chain is broken
+`,
+	"journal": `usage: vend journal verify|head|tail [--config FILE] [--data-dir DIR] [--json]
+
+subcommands:
+  verify  verify the hash chain
+  head    print the last seq and hash
+  tail    print the last events, oldest first
+`,
+	"journal verify": `usage: vend journal verify [--config FILE] [--data-dir DIR] [--json]
+
+Verify the journal hash chain and print the event count.
+`,
+	"journal head": `usage: vend journal head [--config FILE] [--data-dir DIR] [--json]
+
+Print the last journal seq and hash, or "journal empty".
+`,
+	"journal tail": `usage: vend journal tail [--kind KIND] [--limit N] [--config FILE] [--data-dir DIR] [--json]
+
+Print the last events, oldest first. The human output omits payloads.
+
+flags:
+  --kind KIND  event kind to filter, e.g. gate.request
+  --limit N    number of events to print (1..1000, default 20)
+`,
+	"signals": `usage: vend signals estimate [--days N] [--config FILE] [--data-dir DIR] [--json]
+
+subcommands:
+  estimate  count the trend signals the config would have produced
+`,
+	"signals estimate": `usage: vend signals estimate [--days N] [--config FILE] [--data-dir DIR] [--json]
+
+Count the signals the configured trend source would have produced over the last
+N days. Reads candles only: no journal, no decision provider, no secrets.
+
+flags:
+  --days N  history window in days (1..30, default 7)
+`,
+	"outcomes": `usage: vend outcomes label [--candles FILE] [--config FILE] [--data-dir DIR] [--json]
+
+subcommands:
+  label  label gate requests from a candles file or the marketdata provider
+`,
+	"outcomes label": `usage: vend outcomes label [--candles FILE] [--config FILE] [--data-dir DIR] [--json]
+
+Label outcomes for recorded gate requests. With --candles the prices come from
+a JSON file; without it the configured marketdata provider is used.
+
+flags:
+  --candles FILE  candles JSON file (UTF-8, BOM tolerated)
+`,
+	"status": `usage: vend status [--config FILE] [--data-dir DIR] [--json]
+
+Print the shadow-gate status: the journal counters and the last snapshot written
+by the runner. Before the first serve, policyHash and updatedAt are omitted from
+--json instead of showing zero values.
+`,
+	"serve": `usage: vend serve [--addr 127.0.0.1:8420] [--config FILE] [--data-dir DIR] [--json]
+
+Start the loopback gate API and the background shadow runner. The local API
+token must be set in VENDING_SECRET_CONN_LOCAL_APITOKEN.
+
+flags:
+  --addr ADDR  listen address (loopback, port 1..65535)
+`,
+}
+
+// scanHelpArgs reports whether a help flag is present and returns the command
+// words that precede it. Values of --config/--data-dir are skipped so they are
+// never mistaken for a help topic; "--" ends option parsing.
+func scanHelpArgs(args []string) (words []string, help bool) {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--" {
+			return words, help
+		}
+		if isHelpFlag(a) {
+			help = true
+			continue
+		}
+		if strings.HasPrefix(a, "-") {
+			name, _, hasVal := splitFlagArg(a)
+			if !hasVal && (name == "config" || name == "data-dir") {
+				i++
+			}
+			continue
+		}
+		words = append(words, a)
+	}
+	return words, help
+}
+
+// isHelpFlag reports whether arg is --help, -help, --h or -h.
+func isHelpFlag(arg string) bool {
+	name, _, hasVal := splitFlagArg(arg)
+	return !hasVal && (name == "help" || name == "h")
+}
+
+// showHelp prints the page of the longest known command prefix. It returns 0
+// for any known topic and 2 for an unknown one.
+func (r *runner) showHelp(words []string) int {
+	if len(words) == 0 {
+		fmt.Fprint(r.stdout, generalHelp)
+		return exitOK
+	}
+	for i := len(words); i > 0; i-- {
+		if page, ok := helpPages[strings.Join(words[:i], " ")]; ok {
+			fmt.Fprint(r.stdout, page)
+			return exitOK
+		}
+	}
+	return r.fail(false, exitUsage, codeUsage,
+		fmt.Sprintf("unknown help topic %q", strings.Join(words, " ")),
+		"run vend help for the command list, e.g. vend help gate test", false, nil)
 }
 
 // fail writes the error envelope to stderr and returns exit.
 func (r *runner) fail(jsonMode bool, exit int, code, msg, hint string, retryable bool, details any) int {
+	// Typed errors render as "<code>: <message>"; keep the envelope code from
+	// turning that into "vend: conflict: conflict: ..." on stderr.
+	msg = trimCodePrefix(msg, code)
 	if jsonMode {
 		raw, err := json.Marshal(errBody{
 			Code: code, Message: msg, Hint: hint, DocsURL: docsURL, Retryable: retryable, Details: details,
@@ -190,6 +424,15 @@ func (r *runner) fail(jsonMode bool, exit int, code, msg, hint string, retryable
 	fmt.Fprintf(r.stderr, "vend: %s\n", msg)
 	fmt.Fprintf(r.stderr, "hint: %s\n", hint)
 	return exit
+}
+
+// trimCodePrefix drops a leading "<code>: " that a typed domain error already
+// carries, so the human line is not double-prefixed ("vend: conflict: ...").
+func trimCodePrefix(msg, code string) string {
+	if code != "" && strings.HasPrefix(msg, code+": ") {
+		return msg[len(code)+2:]
+	}
+	return msg
 }
 
 // globals are the flags every command accepts, in any position.
@@ -309,6 +552,119 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	return nil
 }
 
+// Output-path guards returned by writeFileNew; test them with errors.Is.
+var (
+	errOutputExists    = errors.New("output file already exists")
+	errOutputInDataDir = errors.New("refusing to write inside the data directory")
+)
+
+// newFileOptions guards one CLI output file.
+type newFileOptions struct {
+	// DataDir is the resolved data directory. The journal and the config live
+	// there (or next to it), so a path inside it is refused: an output file
+	// must never overwrite vending.db or shadow-status.json.
+	DataDir string
+	// Force is the parsed --force flag: when set, an existing file is
+	// replaced atomically instead of refused.
+	Force bool
+}
+
+// writeFileNew writes data to path, refusing to replace an existing file
+// unless opts.Force is set, and refusing paths inside opts.DataDir.
+//
+// The no-overwrite path reserves the name with O_EXCL before the atomic
+// rename, so two concurrent writers cannot both pass the existence check.
+// The returned error wraps errOutputExists or errOutputInDataDir for errors.Is.
+func writeFileNew(path string, data []byte, perm os.FileMode, opts newFileOptions) error {
+	if strings.TrimSpace(path) == "" {
+		return errors.New("output path is empty")
+	}
+	inside, err := pathInside(opts.DataDir, path)
+	if err != nil {
+		return err
+	}
+	if inside {
+		return fmt.Errorf("%w: %s (the journal and config are protected; choose another output path)",
+			errOutputInDataDir, path)
+	}
+	if opts.Force {
+		return writeFileAtomic(path, data, perm)
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
+	if err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			return fmt.Errorf("%w: %s (pass --force to overwrite)", errOutputExists, path)
+		}
+		return err
+	}
+	if cerr := f.Close(); cerr != nil {
+		_ = os.Remove(path)
+		return cerr
+	}
+	if werr := writeFileAtomic(path, data, perm); werr != nil {
+		_ = os.Remove(path)
+		return werr
+	}
+	return nil
+}
+
+// failOutput maps writeFileNew's guard errors to a usage failure with a hint.
+func (r *runner) failOutput(jsonMode bool, err error) int {
+	switch {
+	case errors.Is(err, errOutputExists):
+		return r.fail(jsonMode, exitUsage, codeUsage, err.Error(),
+			"pass --force to overwrite the file, or choose another path", false, nil)
+	case errors.Is(err, errOutputInDataDir):
+		return r.fail(jsonMode, exitUsage, codeUsage, err.Error(),
+			"choose an output path outside the data directory", false, nil)
+	default:
+		return r.fail(jsonMode, exitGeneral, codeGeneral, err.Error(),
+			"check the output path is writable and retry", false, nil)
+	}
+}
+
+// pathInside reports whether path is dataDir itself or lies below it. Both
+// paths are made absolute and cleaned; on Windows the comparison is
+// case-insensitive, matching the file system.
+func pathInside(dataDir, path string) (bool, error) {
+	if strings.TrimSpace(dataDir) == "" || strings.TrimSpace(path) == "" {
+		return false, nil
+	}
+	dirAbs, err := filepath.Abs(dataDir)
+	if err != nil {
+		return false, err
+	}
+	pathAbs, err := filepath.Abs(path)
+	if err != nil {
+		return false, err
+	}
+	dirAbs, pathAbs = filepath.Clean(dirAbs), filepath.Clean(pathAbs)
+	if runtime.GOOS == "windows" {
+		dirAbs, pathAbs = strings.ToLower(dirAbs), strings.ToLower(pathAbs)
+	}
+	rel, err := filepath.Rel(dirAbs, pathAbs)
+	if err != nil {
+		// Different volumes: the path cannot be inside the data directory.
+		return false, nil
+	}
+	if rel == "." {
+		return true, nil
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel), nil
+}
+
+// utf8BOM is the byte order mark prepended by some Windows editors. Clients
+// accept it in JSON input files but never write it.
+const utf8BOM = "\xef\xbb\xbf"
+
+// trimBOM removes one leading UTF-8 BOM so JSON files saved with it parse.
+func trimBOM(raw []byte) []byte {
+	if len(raw) >= len(utf8BOM) && string(raw[:len(utf8BOM)]) == utf8BOM {
+		return raw[len(utf8BOM):]
+	}
+	return raw
+}
+
 // resolvePaths applies flag > env > OS-default priority.
 func (r *runner) resolvePaths(flagConfig, flagDataDir string) (cfgPath, dataDir string, err error) {
 	if cfgPath, err = r.configPath(flagConfig); err != nil {
@@ -402,10 +758,14 @@ func loadFailureCode(err error) (exit int, code string) {
 	if isNotFound(err) {
 		return exitNotFound, codeNotFound
 	}
-	if domain.CodeOf(err) == domain.CodeInvalidRequest {
+	switch domain.CodeOf(err) {
+	case domain.CodeInvalidRequest:
 		return exitUsage, codeUsage
+	case domain.CodeConflict:
+		return exitConflict, codeConflict
+	default:
+		return exitGeneral, codeGeneral
 	}
-	return exitGeneral, codeGeneral
 }
 
 // printJSON writes v as JSON to stdout.

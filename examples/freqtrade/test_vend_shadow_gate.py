@@ -30,6 +30,7 @@ import unittest
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 EXAMPLE_DIR = Path(__file__).resolve().parent
@@ -458,6 +459,20 @@ class VendShadowGateTest(unittest.TestCase):
         self.assertTrue(strategy.wait_until_idle(5.0))
 
         self.assertEqual(client.calls, 2)
+        self.assertEqual(self.server.requests, [])
+
+    def test_sender_start_failure_does_not_break_entry(self) -> None:
+        self.use_gate()
+        strategy = self.strategy()
+
+        with mock.patch.object(
+            vend_shadow_gate._GateSender,
+            "start",
+            side_effect=RuntimeError("cannot start a thread"),
+        ):
+            self.assertTrue(self.confirm(strategy))
+
+        self.assertFalse(hasattr(strategy, "_vend_sender"))
         self.assertEqual(self.server.requests, [])
 
     def test_closed_port_does_not_block(self) -> None:

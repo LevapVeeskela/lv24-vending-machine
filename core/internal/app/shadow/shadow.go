@@ -192,7 +192,8 @@ type Runner struct {
 	// retry holds the exponential retry state of undelivered notifications,
 	// keyed by notifyKey. It stays bounded by the fixed set of alert series.
 	retry map[string]retryState
-	// trendOffset is the delay applied after a bar close; tests shorten it.
+	// trendOffset is the delay applied after each bar close. It defaults to
+	// trendScanDelay (a const, so tests override this field instead).
 	trendOffset time.Duration
 
 	// Status snapshot fields, assembled under mu.
@@ -260,7 +261,7 @@ func (r *Runner) Step(ctx context.Context) error {
 
 // Run runs a label cycle immediately and then on every LabelInterval until ctx
 // is cancelled. When a trend interval is configured, the trend scan runs on its
-// own timer two seconds after each bar close instead of on the label ticker.
+// own timer trendOffset after each bar close instead of on the label ticker.
 // The mutex prevents overlapping cycles; on cancel it waits for an in-flight
 // cycle to finish before returning.
 func (r *Runner) Run(ctx context.Context) {
@@ -306,9 +307,9 @@ func (r *Runner) Run(ctx context.Context) {
 	}
 }
 
-// NextTrendDelay returns the wait until the next trend scan: two seconds after
-// the next bar close of the configured trend interval. It returns zero when no
-// trend interval is configured.
+// NextTrendDelay returns the wait until the next trend scan: trendOffset after
+// the next bar close of the configured trend interval (trendScanDelay, two
+// seconds, by default). It returns zero when no trend interval is configured.
 func (r *Runner) NextTrendDelay(now time.Time) time.Duration {
 	return nextTrendDelay(now, r.cfg.TrendInterval, r.trendOffset)
 }

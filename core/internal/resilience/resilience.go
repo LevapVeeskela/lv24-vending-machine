@@ -39,7 +39,7 @@ func Do(ctx context.Context, p Policy, fn func(context.Context) error) error {
 	var err error
 	for attempt := 1; attempt <= max; attempt++ {
 		if ctxErr := ctx.Err(); ctxErr != nil && attempt > 1 {
-			return ctxErr
+			return contextError(ctxErr)
 		}
 		err = fn(ctx)
 		if err == nil {
@@ -68,9 +68,22 @@ func Do(ctx context.Context, p Policy, fn func(context.Context) error) error {
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return contextError(ctx.Err())
 		case <-time.After(delay):
 		}
 	}
 	return err
+}
+
+// contextError keeps the error typed when a retry wait is interrupted. Callers
+// classify by domain.CodeOf and must see timeout, not an unclassified context
+// error; errors.Is still reaches context.Canceled or DeadlineExceeded.
+func contextError(err error) error {
+	if err == nil {
+		err = context.Canceled
+	}
+	e := domain.WrapError(domain.CodeTimeout,
+		"resilience: retry interrupted by context", err)
+	e.Retryable = true
+	return e
 }

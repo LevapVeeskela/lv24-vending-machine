@@ -200,8 +200,13 @@ time):
 curl -sS -X POST http://127.0.0.1:8420/v1/gate \
   -H "Authorization: Bearer $VENDING_SECRET_CONN_LOCAL_APITOKEN" \
   -H "Content-Type: application/json" \
-  --data '{"signalId":"smoke-1m-1","instrument":{"venue":"binance","symbol":"BTCUSDT"},"side":"buy","intentKind":"entry","timeframe":"1m","ts":"<now UTC RFC3339>","price":"100000","source":"smoke"}'
+  --data '{"signalId":"smoke-1m-1","instrument":{"venue":"binance","symbol":"BTCUSDT"},"side":"buy","intentKind":"entry","timeframe":"1m","ts":"<now UTC RFC3339>","price":"100000","source":"smoke","state":{"rsi14":62.5}}'
 ```
+
+`state` is required and must be a JSON object of finite numbers; without it the
+API answers `400 invalid gate request: state must be an object`. The shape is
+the same as in [`contracts/examples/gate-request.json`](../contracts/examples/gate-request.json),
+which also uses `atrPct`.
 
 In PowerShell 5.1 use `curl.exe`; the token is
 `$env:VENDING_SECRET_CONN_LOCAL_APITOKEN`. The `gate.verdict` response means
@@ -280,9 +285,15 @@ insufficient data: <n> labeled, need 100
   written.
 - `decision cost` — the sum of `usage.costUsd` of unique decisions;
   `latency p50/p95` — by `usage.latencyMs`.
-- `insufficient data` below 100 labels is **normal**, not an error. Comparisons
+- `insufficient data` below 100 labels is **normal**, not an error. The report
+  first verifies the hash chain: a broken chain exits non-zero with the sequence
+  number, and `--allow-broken-chain` is only for recovery. Comparisons
   (groups, bootstrap CI, Brier/BSS/AUC/ECE, per-model breakdown) appear only
-  from 100 labels; BSS is printed as `bss: n/a` when the base rate is 0 or 1.
+  from 100 labels. Model quality needs at least 30 calibration pairs: below that
+  Brier/ECE/AUC/BSS/reliability are `n/a` and the report prints
+  `calibration pairs: N (need 30)`. The bootstrap interval also needs at least
+  30 outcomes in each group and 5 distinct entry days; BSS is `n/a` when the
+  base rate is 0 or 1.
 - Comparisons mix only the latest `(horizonBars, feeBps)` pair; labels with
   another pair are not mixed in (in `--json` this is `otherLabelParams`).
 
@@ -309,9 +320,10 @@ rejected by the source (`awaiting labeling`, `no outcome by deadline`,
 `source rejected`), verdict counters, metrics or `insufficient data`,
 assumptions (horizon, round-trip fee, entry lag median/p95 in bar fractions and
 in seconds, entry shifted, equal size/no slippage/no funding) and a link to
-GitHub Discussions. It contains no symbols, venues, prices, state, paths,
-identifiers or return amounts. A file written through `--out <file>` gets
-permissions 0600.
+GitHub Discussions. It also includes the aggregate ALLOW-vs-REJECT mean return
+difference with its 95% interval. It contains no symbols, venues, prices,
+position sizes, state, paths, identifiers or individual returns. A file written
+through `--out <file>` gets permissions 0600.
 
 ## Step 5. What to send for review
 

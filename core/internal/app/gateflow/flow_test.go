@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"strings"
 	"sync"
@@ -91,6 +92,112 @@ func itoa(n int) string {
 		n /= 10
 	}
 	return string(b[i:])
+}
+
+// uniqueJournal applies the journal's UNIQUE(signal_id) rule to gate.request
+// events the way the SQLite store does, so the app layer can exercise the
+// cross-process race without importing the adapter.
+type uniqueJournal struct {
+	*memJournal
+	mu   sync.Mutex
+	seen map[string]bool
+}
+
+func newUniqueJournal() *uniqueJournal {
+	return &uniqueJournal{memJournal: &memJournal{}, seen: make(map[string]bool)}
+}
+
+func (j *uniqueJournal) Append(ctx context.Context, ev domain.Event) (domain.Event, error) {
+	if ev.Kind == domain.EventGateRequest {
+		sig, ok := signalOf(ev.Payload)
+		if ok && sig != "" {
+			j.mu.Lock()
+			dup := j.seen[sig]
+			j.seen[sig] = true
+			j.mu.Unlock()
+			if dup {
+				// Same code and wording shape as the SQLite store's conflict.
+				return domain.Event{}, domain.NewError(domain.CodeConflict,
+					fmt.Sprintf("journal store: signalId %q is already recorded", sig))
+			}
+		}
+	}
+	return j.memJournal.Append(ctx, ev)
+}
+
+// racerJournal makes the cross-process race deterministic: a barrier holds
+// both callers after their first gate.request walk (both saw an empty
+// journal), and holdAppend pauses the first gate.request append until it is
+// closed.
+type racerJournal struct {
+	*uniqueJournal
+	barrier    *sync.WaitGroup
+	holdAppend <-chan struct{}
+	waited     atomic.Bool
+	held       atomic.Bool
+}
+
+func (j *racerJournal) Walk(ctx context.Context, from int64, kind string, fn func(domain.Event) error) error {
+	err := j.uniqueJournal.Walk(ctx, from, kind, fn)
+	if err == nil && kind == domain.EventGateRequest && j.barrier != nil && j.waited.CompareAndSwap(false, true) {
+		j.barrier.Done()
+		j.barrier.Wait()
+	}
+	return err
+}
+
+func (j *racerJournal) Append(ctx context.Context, ev domain.Event) (domain.Event, error) {
+	if ev.Kind == domain.EventGateRequest && j.holdAppend != nil && j.held.CompareAndSwap(false, true) {
+		select {
+		case <-j.holdAppend:
+		case <-ctx.Done():
+			return domain.Event{}, ctx.Err()
+		}
+	}
+	return j.uniqueJournal.Append(ctx, ev)
+}
+
+// countingDecision counts provider calls and can hold them, so a test can
+// observe the state of a race while the winner is still paying.
+type countingDecision struct {
+	calls   atomic.Int32
+	release <-chan struct{}
+}
+
+func (c *countingDecision) Descriptor() ports.Descriptor {
+	return ports.Descriptor{ID: "counting-decision", Name: "counting", Kind: ports.KindDecision, Version: "v0"}
+}
+
+func (c *countingDecision) Decide(ctx context.Context, _ domain.DecisionRequest) (domain.DecisionResponse, error) {
+	c.calls.Add(1)
+	if c.release != nil {
+		select {
+		case <-c.release:
+		case <-ctx.Done():
+			return domain.DecisionResponse{}, ctx.Err()
+		}
+	}
+	return allowResp(), nil
+}
+
+// countKind returns the number of stored events of one kind.
+func countKind(jr *memJournal, kind string) int {
+	evs, _ := jr.Query(context.Background(), 0, kind)
+	return len(evs)
+}
+
+func depsFor(prefix string) ports.Deps {
+	var mu sync.Mutex
+	next := 0
+	return ports.Deps{
+		Clock: func() time.Time { return fixedTime },
+		NewID: func() string {
+			mu.Lock()
+			defer mu.Unlock()
+			next++
+			return prefix + itoa(next)
+		},
+	}
 }
 
 // fnDecision is a scripted ports.Decision for offline tests.
@@ -211,8 +318,8 @@ func TestEvaluateWritesThreeLinkedEvents(t *testing.T) {
 	if prov.req.Model != "test-model" || len(prov.req.Questions) != 4 {
 		t.Fatalf("decision request = %+v", prov.req)
 	}
-	if prov.req.Timeout != defaultTimeout {
-		t.Fatalf("decision timeout = %v, want %v", prov.req.Timeout, defaultTimeout)
+	if prov.req.Timeout != providerAttemptTimeout {
+		t.Fatalf("decision timeout = %v, want one attempt %v", prov.req.Timeout, providerAttemptTimeout)
 	}
 	for _, k := range []string{"symbol", "venue", "timeframe", "side", "intent_kind", "close", "timestamp", "rsi"} {
 		if _, ok := prov.req.State[k]; !ok {
@@ -545,6 +652,7 @@ func TestInvalidRequestRejectedBeforeIO(t *testing.T) {
 		"signal":    func(r *domain.GateRequest) { r.SignalID = "" },
 		"venue":     func(r *domain.GateRequest) { r.Instrument.Venue = "" },
 		"symbol":    func(r *domain.GateRequest) { r.Instrument.Symbol = "" },
+		"futures":   func(r *domain.GateRequest) { r.Instrument.Symbol = "BTC/USDT:USDT" },
 		"timeframe": func(r *domain.GateRequest) { r.Timeframe = "" },
 		// An upper-case unit or a monthly bar cannot be labeled later.
 		"timeframeCase":  func(r *domain.GateRequest) { r.Timeframe = "4H" },
@@ -810,13 +918,16 @@ func TestInflightSignalWithDifferentBodyConflicts(t *testing.T) {
 		firstDone <- err
 	}()
 	<-started
+	// The winner has already journaled its gate.request: a conflicting body
+	// must add nothing.
+	before := jr.count()
 	changed := entryReq()
 	changed.Price = domain.MustParseDecimal("1.00")
 	if _, err := f.Evaluate(context.Background(), changed); domain.CodeOf(err) != domain.CodeConflict {
 		t.Fatalf("conflicting in-flight Evaluate() = %v, want conflict", err)
 	}
-	if n := jr.count(); n != 0 {
-		t.Fatalf("events = %d, want none from the conflicting caller", n)
+	if n := jr.count(); n != before {
+		t.Fatalf("events = %d, want unchanged %d", n, before)
 	}
 	close(release)
 	if err := <-firstDone; err != nil {
@@ -903,5 +1014,318 @@ func TestNewRejectsBadConfig(t *testing.T) {
 	f, _ := New(&memJournal{}, nil, ports.Deps{Clock: func() time.Time { return fixedTime }}, testConfig())
 	if _, err := f.Evaluate(context.Background(), entryReq()); err == nil {
 		t.Fatalf("Evaluate without NewID = nil, want error")
+	}
+}
+
+// TestAttemptDeadlineVersusCallBudget pins the two-level timeout: one attempt
+// gets the vendor budget (60 s) and a completed timeout is final, while a
+// fast retryable failure still uses the retry loop.
+func TestAttemptDeadlineVersusCallBudget(t *testing.T) {
+	t.Run("default attempt", func(t *testing.T) {
+		prov := &fnDecision{fn: func(context.Context, domain.DecisionRequest) (domain.DecisionResponse, error) {
+			return allowResp(), nil
+		}}
+		f, _ := New(&memJournal{}, prov, testDeps("dec-1"), testConfig())
+		if _, err := f.Evaluate(context.Background(), entryReq()); err != nil {
+			t.Fatalf("Evaluate() = %v", err)
+		}
+		if prov.req.Timeout != providerAttemptTimeout {
+			t.Fatalf("DecisionRequest.Timeout = %v, want %v", prov.req.Timeout, providerAttemptTimeout)
+		}
+		if got, want := f.callBudget(), 3*providerAttemptTimeout+retryAfterBudget; got != want {
+			t.Fatalf("callBudget = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("configured attempt", func(t *testing.T) {
+		prov := &fnDecision{fn: func(context.Context, domain.DecisionRequest) (domain.DecisionResponse, error) {
+			return allowResp(), nil
+		}}
+		cfg := testConfig()
+		cfg.Timeout = 40 * time.Millisecond
+		f, _ := New(&memJournal{}, prov, testDeps("dec-1"), cfg)
+		if _, err := f.Evaluate(context.Background(), entryReq()); err != nil {
+			t.Fatalf("Evaluate() = %v", err)
+		}
+		if prov.req.Timeout != 40*time.Millisecond {
+			t.Fatalf("DecisionRequest.Timeout = %v, want the configured 40ms", prov.req.Timeout)
+		}
+	})
+
+	t.Run("timeout is final", func(t *testing.T) {
+		prov := &fnDecision{fn: func(context.Context, domain.DecisionRequest) (domain.DecisionResponse, error) {
+			return domain.DecisionResponse{}, domain.NewError(domain.CodeTimeout, "deadline exceeded")
+		}}
+		f, _ := New(&memJournal{}, prov, testDeps("dec-1"), testConfig())
+		res, err := f.Evaluate(context.Background(), entryReq())
+		if err != nil {
+			t.Fatalf("Evaluate() = %v", err)
+		}
+		if prov.calls != 1 {
+			t.Fatalf("provider calls = %d, want 1: a completed attempt timeout is not retried", prov.calls)
+		}
+		if domain.CodeOf(res.ProviderErr) != domain.CodeTimeout {
+			t.Fatalf("provider err = %v, want the typed timeout preserved", res.ProviderErr)
+		}
+		if res.Verdict.Verdict != domain.VerdictAbstain {
+			t.Fatalf("verdict = %v, want ABSTAIN", res.Verdict.Verdict)
+		}
+	})
+
+	t.Run("rate limit retried", func(t *testing.T) {
+		var calls atomic.Int32
+		prov := &fnDecision{fn: func(context.Context, domain.DecisionRequest) (domain.DecisionResponse, error) {
+			if calls.Add(1) == 1 {
+				return domain.DecisionResponse{}, domain.NewError(domain.CodeRateLimit, "429")
+			}
+			return allowResp(), nil
+		}}
+		f, _ := New(&memJournal{}, prov, testDeps("dec-1"), testConfig())
+		res, err := f.Evaluate(context.Background(), entryReq())
+		if err != nil {
+			t.Fatalf("Evaluate() = %v", err)
+		}
+		if calls.Load() != 2 {
+			t.Fatalf("provider calls = %d, want 2 (one retry)", calls.Load())
+		}
+		if res.Verdict.Verdict != domain.VerdictAllow {
+			t.Fatalf("verdict = %v, want ALLOW after the retry", res.Verdict.Verdict)
+		}
+	})
+}
+
+// TestSignalRacePaysOnceAndConflictsWhileWinnerRuns drives two independent
+// Flow instances through one journal with the store's UNIQUE(signal_id) rule:
+// both see no request, both append, one loses and gets a retryable conflict
+// while the winner is still calling the provider.
+func TestSignalRacePaysOnceAndConflictsWhileWinnerRuns(t *testing.T) {
+	jr := newUniqueJournal()
+	var barrier sync.WaitGroup
+	barrier.Add(2)
+	release := make(chan struct{})
+	prov := &countingDecision{release: release}
+
+	a := &racerJournal{uniqueJournal: jr, barrier: &barrier}
+	b := &racerJournal{uniqueJournal: jr, barrier: &barrier}
+	fa, err := New(a, prov, depsFor("dec-a-"), testConfig())
+	if err != nil {
+		t.Fatalf("New(a) = %v", err)
+	}
+	fb, err := New(b, prov, depsFor("dec-b-"), testConfig())
+	if err != nil {
+		t.Fatalf("New(b) = %v", err)
+	}
+
+	type out struct {
+		res Result
+		err error
+	}
+	done := make(chan out, 2)
+	go func() {
+		res, err := fa.Evaluate(context.Background(), entryReq())
+		done <- out{res, err}
+	}()
+	go func() {
+		res, err := fb.Evaluate(context.Background(), entryReq())
+		done <- out{res, err}
+	}()
+
+	// The winner is inside the provider, so only the loser can return.
+	loser := <-done
+	if domain.CodeOf(loser.err) != domain.CodeConflict {
+		t.Fatalf("loser err = %v, want conflict", loser.err)
+	}
+	if !strings.Contains(loser.err.Error(), "being evaluated by another process") {
+		t.Fatalf("loser err = %q, want the retry hint", loser.err)
+	}
+	if got := prov.calls.Load(); got != 1 {
+		t.Fatalf("provider calls before the winner finished = %d, want 1", got)
+	}
+	close(release)
+
+	winner := <-done
+	if winner.err != nil {
+		t.Fatalf("winner Evaluate() = %v", winner.err)
+	}
+	if winner.res.Verdict.Verdict != domain.VerdictAllow || winner.res.Reused {
+		t.Fatalf("winner result = %+v, want a fresh ALLOW", winner.res)
+	}
+	if got := prov.calls.Load(); got != 1 {
+		t.Fatalf("provider calls = %d, want 1", got)
+	}
+	if got := countKind(jr.memJournal, domain.EventGateRequest); got != 1 {
+		t.Fatalf("gate.request events = %d, want 1", got)
+	}
+	if got := countKind(jr.memJournal, domain.EventGateVerdict); got != 1 {
+		t.Fatalf("gate.verdict events = %d, want 1", got)
+	}
+}
+
+// TestSignalRaceLoserReplaysRecordedVerdict holds the loser's append until the
+// winner has journaled its verdict: the loser must replay it, not call the
+// provider and not write a second request.
+func TestSignalRaceLoserReplaysRecordedVerdict(t *testing.T) {
+	jr := newUniqueJournal()
+	var barrier sync.WaitGroup
+	barrier.Add(2)
+	hold := make(chan struct{})
+	prov := &countingDecision{}
+
+	winnerJ := &racerJournal{uniqueJournal: jr, barrier: &barrier}
+	loserJ := &racerJournal{uniqueJournal: jr, barrier: &barrier, holdAppend: hold}
+	fw, err := New(winnerJ, prov, depsFor("dec-win-"), testConfig())
+	if err != nil {
+		t.Fatalf("New(winner) = %v", err)
+	}
+	fl, err := New(loserJ, prov, depsFor("dec-lose-"), testConfig())
+	if err != nil {
+		t.Fatalf("New(loser) = %v", err)
+	}
+
+	loserDone := make(chan Result, 1)
+	loserErr := make(chan error, 1)
+	go func() {
+		res, err := fl.Evaluate(context.Background(), entryReq())
+		loserDone <- res
+		loserErr <- err
+	}()
+	winner, err := fw.Evaluate(context.Background(), entryReq())
+	if err != nil {
+		t.Fatalf("winner Evaluate() = %v", err)
+	}
+	close(hold)
+	replay, lerr := <-loserDone, <-loserErr
+	if lerr != nil {
+		t.Fatalf("loser Evaluate() = %v", lerr)
+	}
+	if !replay.Reused || replay.Verdict.DecisionID != winner.Verdict.DecisionID {
+		t.Fatalf("loser result = %+v, want a replay of %q", replay, winner.Verdict.DecisionID)
+	}
+	if replay.Response != nil || replay.Journaled == nil {
+		t.Fatalf("loser result = %+v, want a journaled response and no provider answer", replay)
+	}
+	if got := prov.calls.Load(); got != 1 {
+		t.Fatalf("provider calls = %d, want 1", got)
+	}
+	if got := countKind(jr.memJournal, domain.EventGateRequest); got != 1 {
+		t.Fatalf("gate.request events = %d, want 1", got)
+	}
+	if got := countKind(jr.memJournal, domain.EventGateVerdict); got != 1 {
+		t.Fatalf("gate.verdict events = %d, want 1", got)
+	}
+}
+
+// TestSignalRaceDifferentBodyConflicts: a racing caller that sends another body
+// under the same signal id is rejected and writes nothing.
+func TestSignalRaceDifferentBodyConflicts(t *testing.T) {
+	jr := newUniqueJournal()
+	var barrier sync.WaitGroup
+	barrier.Add(2)
+	hold := make(chan struct{})
+	prov := &countingDecision{}
+
+	winnerJ := &racerJournal{uniqueJournal: jr, barrier: &barrier}
+	loserJ := &racerJournal{uniqueJournal: jr, barrier: &barrier, holdAppend: hold}
+	fw, _ := New(winnerJ, prov, depsFor("dec-win-"), testConfig())
+	fl, _ := New(loserJ, prov, depsFor("dec-lose-"), testConfig())
+
+	changed := entryReq()
+	changed.Price = domain.MustParseDecimal("67433.00")
+	loserErr := make(chan error, 1)
+	go func() {
+		_, err := fl.Evaluate(context.Background(), changed)
+		loserErr <- err
+	}()
+	if _, err := fw.Evaluate(context.Background(), entryReq()); err != nil {
+		t.Fatalf("winner Evaluate() = %v", err)
+	}
+	close(hold)
+	err := <-loserErr
+	if domain.CodeOf(err) != domain.CodeConflict {
+		t.Fatalf("loser err = %v, want conflict", err)
+	}
+	if !strings.Contains(err.Error(), "different request body") {
+		t.Fatalf("loser err = %q, want the body conflict", err)
+	}
+	if got := prov.calls.Load(); got != 1 {
+		t.Fatalf("provider calls = %d, want 1", got)
+	}
+	if n := jr.count(); n != 3 {
+		t.Fatalf("events = %d, want only the winner's three", n)
+	}
+}
+
+// TestCrashBetweenRequestAndVerdictCompletesWithoutSecondRequest covers the
+// crash window: the request is already journaled, so Evaluate only appends the
+// missing response and verdict.
+func TestCrashBetweenRequestAndVerdictCompletesWithoutSecondRequest(t *testing.T) {
+	jr := newUniqueJournal()
+	raw, _ := json.Marshal(entryReq())
+	if _, err := jr.Append(context.Background(), domain.Event{
+		Kind:          domain.EventGateRequest,
+		TS:            fixedTime,
+		SchemaVersion: domain.EventSchemaVersion,
+		Payload:       raw,
+		CodeVersion:   "v-test",
+		DecisionID:    "dec-crash",
+	}); err != nil {
+		t.Fatalf("seed request = %v", err)
+	}
+	prov := &countingDecision{}
+	f, _ := New(jr, prov, depsFor("dec-unused-"), testConfig())
+	res, err := f.Evaluate(context.Background(), entryReq())
+	if err != nil {
+		t.Fatalf("Evaluate() = %v", err)
+	}
+	if res.Reused || res.Verdict.DecisionID != "dec-crash" || res.Verdict.Verdict != domain.VerdictAllow {
+		t.Fatalf("result = %+v, want a fresh ALLOW on dec-crash", res)
+	}
+	if got := prov.calls.Load(); got != 1 {
+		t.Fatalf("provider calls = %d, want 1", got)
+	}
+	if got := countKind(jr.memJournal, domain.EventGateRequest); got != 1 {
+		t.Fatalf("gate.request events = %d, want 1", got)
+	}
+	if got := countKind(jr.memJournal, domain.EventGateVerdict); got != 1 {
+		t.Fatalf("gate.verdict events = %d, want 1", got)
+	}
+}
+
+// TestSequentialReplayExposesJournaledResponse: a second process on the same
+// journal reuses the verdict and can compare its input with the recorded
+// decision response.
+func TestSequentialReplayExposesJournaledResponse(t *testing.T) {
+	jr := newUniqueJournal()
+	prov := &countingDecision{}
+	first, err := New(jr, prov, depsFor("dec-1-"), testConfig())
+	if err != nil {
+		t.Fatalf("New(first) = %v", err)
+	}
+	fresh, err := first.Evaluate(context.Background(), entryReq())
+	if err != nil {
+		t.Fatalf("first Evaluate() = %v", err)
+	}
+	second, err := New(jr, prov, depsFor("dec-2-"), testConfig())
+	if err != nil {
+		t.Fatalf("New(second) = %v", err)
+	}
+	replay, err := second.Evaluate(context.Background(), entryReq())
+	if err != nil {
+		t.Fatalf("second Evaluate() = %v", err)
+	}
+	if !replay.Reused || replay.Verdict.DecisionID != fresh.Verdict.DecisionID {
+		t.Fatalf("replay = %+v, want %q", replay, fresh.Verdict.DecisionID)
+	}
+	if replay.Response != nil || replay.Journaled == nil {
+		t.Fatalf("replay = %+v, want no provider answer but a journaled response", replay)
+	}
+	if replay.Journaled.Model != fresh.Response.Model {
+		t.Fatalf("journaled model = %q, want %q", replay.Journaled.Model, fresh.Response.Model)
+	}
+	if got := prov.calls.Load(); got != 1 {
+		t.Fatalf("provider calls = %d, want 1", got)
+	}
+	if n := jr.count(); n != 3 {
+		t.Fatalf("events = %d, want unchanged 3", n)
 	}
 }

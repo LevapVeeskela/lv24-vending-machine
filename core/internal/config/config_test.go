@@ -15,6 +15,53 @@ func TestDefaultValid(t *testing.T) {
 	}
 }
 
+func TestQuickProfile(t *testing.T) {
+	c := QuickProfile()
+	if err := c.Validate(); err != nil {
+		t.Fatalf("QuickProfile().Validate() = %v", err)
+	}
+	tr := c.Signals.Trend
+	if !tr.Enabled {
+		t.Fatal("signals.trend.enabled = false, want true")
+	}
+	want := []string{
+		"BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
+		"DOGEUSDT", "ADAUSDT", "LINKUSDT", "AVAXUSDT", "LTCUSDT",
+	}
+	if len(tr.Symbols) != len(want) {
+		t.Fatalf("signals.trend.symbols = %v, want %d symbols", tr.Symbols, len(want))
+	}
+	for i := range want {
+		if tr.Symbols[i] != want[i] {
+			t.Fatalf("signals.trend.symbols = %v, want %v", tr.Symbols, want)
+		}
+	}
+	if tr.Timeframe != QuickTimeframe {
+		t.Fatalf("signals.trend.timeframe = %q, want %q", tr.Timeframe, QuickTimeframe)
+	}
+	if len(tr.Sides) != 2 || tr.Sides[0] != "buy" || tr.Sides[1] != "sell" {
+		t.Fatalf("signals.trend.sides = %v, want [buy sell]", tr.Sides)
+	}
+	def := Default()
+	if tr.Fast != def.Signals.Trend.Fast || tr.Slow != def.Signals.Trend.Slow {
+		t.Fatalf("fast/slow = %d/%d, want defaults %d/%d",
+			tr.Fast, tr.Slow, def.Signals.Trend.Fast, def.Signals.Trend.Slow)
+	}
+	if c.Outcome.LabelIntervalSec != 300 {
+		t.Fatalf("outcome.labelIntervalSec = %d, want 300", c.Outcome.LabelIntervalSec)
+	}
+	if c.Outcome.FeeBps != def.Outcome.FeeBps {
+		t.Fatalf("outcome.feeBps = %d, want default %d", c.Outcome.FeeBps, def.Outcome.FeeBps)
+	}
+
+	// Each call returns its own slice: a caller must not mutate the profile.
+	first := QuickProfile()
+	first.Signals.Trend.Symbols[0] = "MUTATED"
+	if got := QuickProfile().Signals.Trend.Symbols[0]; got != "BTCUSDT" {
+		t.Fatalf("QuickProfile symbols are shared: got %q", got)
+	}
+}
+
 func TestValidateBad(t *testing.T) {
 	cases := []struct {
 		name string
@@ -440,6 +487,100 @@ func TestLoadInvalidJSONMessage(t *testing.T) {
 	}
 	if !contains(err.Error(), "invalid JSON in") {
 		t.Fatalf("error %q misses the invalid-JSON wording", err)
+	}
+}
+
+func TestTrendTimeframeValidation(t *testing.T) {
+	base := func() Config {
+		c := Default()
+		c.Signals.Trend.Enabled = true
+		c.Signals.Trend.Symbols = []string{"BTCUSDT"}
+		return c
+	}
+
+	if err := base().Validate(); err != nil {
+		t.Fatalf("default trend config: Validate() = %v", err)
+	}
+	// 1x was accepted before: config validate said ok, serve then failed on
+	// the same timeframe, which made the hint circular.
+	bad := base()
+	bad.Signals.Trend.Timeframe = "1x"
+	err := bad.Validate()
+	if err == nil {
+		t.Fatal("Validate() accepted timeframe 1x")
+	}
+	for _, want := range []string{"signals.trend.timeframe", "1x", "m, h, d or w"} {
+		if !contains(err.Error(), want) {
+			t.Fatalf("error %q misses %q", err, want)
+		}
+	}
+
+	// A candle must hold two label windows; 10m is shorter than 2x600s.
+	short := base()
+	short.Signals.Trend.Timeframe = "10m"
+	short.Outcome.LabelIntervalSec = 600
+	if err := short.Validate(); err == nil {
+		t.Fatal("Validate() accepted a timeframe shorter than twice labelIntervalSec")
+	} else if !contains(err.Error(), "twice outcome.labelIntervalSec") {
+		t.Fatalf("error %q misses the label-window guard", err)
+	}
+
+	// Exactly 2x is allowed.
+	edge := base()
+	edge.Signals.Trend.Timeframe = "1h"
+	edge.Outcome.LabelIntervalSec = 1800
+	if err := edge.Validate(); err != nil {
+		t.Fatalf("Validate() at exactly 2x label interval = %v", err)
+	}
+
+	// A disabled trend section is not used by serve, so its stale timeframe
+	// must not block unrelated commands.
+	disabled := Default()
+	disabled.Signals.Trend.Timeframe = "1x"
+	if err := disabled.Validate(); err != nil {
+		t.Fatalf("disabled trend timeframe: Validate() = %v", err)
+	}
+}
+
+// TestConfigDoesNotCheckProviderID documents the split: config validate has no
+// provider registry, so an unknown providers.decision.id is doctor's finding.
+func TestConfigDoesNotCheckProviderID(t *testing.T) {
+	c := Default()
+	c.Providers.Decision.ID = "decision-unknown"
+	if err := c.Validate(); err != nil {
+		t.Fatalf("Validate() = %v, want nil (doctor checks the registry)", err)
+	}
+}
+
+func TestLoadBOM(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	raw, err := json.Marshal(Default())
+	if err != nil {
+		t.Fatalf("Marshal() = %v", err)
+	}
+	if err := os.WriteFile(path, append([]byte("\xef\xbb\xbf"), raw...), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load(BOM) = %v", err)
+	}
+	if err := got.Validate(); err != nil {
+		t.Fatalf("Validate() = %v", err)
+	}
+}
+
+func TestLoadBOMInvalidJSONMentionsBOM(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte("\xef\xbb\xbf{"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load() accepted broken JSON")
+	}
+	if !contains(err.Error(), "file has BOM") {
+		t.Fatalf("error %q misses the BOM hint", err)
 	}
 }
 

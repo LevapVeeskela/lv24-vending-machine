@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"os"
@@ -258,6 +260,94 @@ func TestDoctorWithoutLiveMakesNoProviderCall(t *testing.T) {
 	}
 }
 
+func TestDoctorUnknownDecisionProvider(t *testing.T) {
+	env, stdout, stderr, cfgPath, dataDir := initTestEnv(t)
+	env.NewRegistry = liveRegistry(t, okDecision(), okCandles(), nil)
+
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	cfg.Providers.Decision.ID = "decision-unknown"
+	if err := config.Save(cfgPath, cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	// The provider id is registry knowledge: config validate still accepts it.
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("config.Validate() = %v, want nil", err)
+	}
+
+	if code := runArgs(env, "doctor", "--config", cfgPath, "--data-dir", dataDir); code != exitGeneral {
+		t.Fatalf("doctor unknown provider = %d, want %d, stdout=%s stderr=%s",
+			code, exitGeneral, stdout.String(), stderr.String())
+	}
+	got := stdout.String()
+	for _, want := range []string{
+		`unknown decision provider "decision-unknown"`,
+		"registered: decision-drex",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("stdout misses %q: %q", want, got)
+		}
+	}
+}
+
+func TestDoctorMissingLocalAPIToken(t *testing.T) {
+	env, stdout, _, cfgPath, dataDir := initTestEnv(t)
+	env.Getenv = func(string) string { return "" }
+	env.NewRegistry = liveRegistry(t, okDecision(), okCandles(), nil)
+
+	if code := runArgs(env, "doctor", "--config", cfgPath, "--data-dir", dataDir); code != exitGeneral {
+		t.Fatalf("doctor without local API token = %d, want %d, stdout=%s",
+			code, exitGeneral, stdout.String())
+	}
+	got := stdout.String()
+	if !strings.Contains(got, localAPITokenEnv) {
+		t.Fatalf("stdout misses %s: %q", localAPITokenEnv, got)
+	}
+	if !strings.Contains(got, "not set") {
+		t.Fatalf("stdout misses the not-set wording: %q", got)
+	}
+}
+
+// TestDoctorLiveMissingTokenStillRunsProbes checks that the token failure does
+// not stop the opt-in probes: the remaining checks still run and report their
+// own status.
+func TestDoctorLiveMissingTokenStillRunsProbes(t *testing.T) {
+	env, stdout, stderr, cfgPath, dataDir := initTestEnv(t)
+	env.Getenv = func(string) string { return "" }
+	dec, cd := okDecision(), okCandles()
+	env.NewRegistry = liveRegistry(t, dec, cd, nil)
+
+	if code := runArgs(env, "doctor", "--live", "--config", cfgPath, "--data-dir", dataDir); code != exitGeneral {
+		t.Fatalf("doctor --live without token = %d, want %d, stdout=%s stderr=%s",
+			code, exitGeneral, stdout.String(), stderr.String())
+	}
+	got := stdout.String()
+	if !strings.Contains(got, localAPITokenEnv) {
+		t.Fatalf("stdout misses %s: %q", localAPITokenEnv, got)
+	}
+	for _, want := range []string{"decision: ok", "candles: ok"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("stdout misses %q: %q", want, got)
+		}
+	}
+	if dec.calls != 1 || cd.calls != 1 {
+		t.Fatalf("probes = decision %d, candles %d, want 1 each", dec.calls, cd.calls)
+	}
+}
+
+func TestDefaultDecisionProviderRegistered(t *testing.T) {
+	env, stdout, stderr, cfgPath, dataDir := initTestEnv(t)
+	env.NewRegistry = liveRegistry(t, okDecision(), okCandles(), nil)
+	if code := runArgs(env, "doctor", "--config", cfgPath, "--data-dir", dataDir); code != 0 {
+		t.Fatalf("doctor = %d, stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "ok providers:") {
+		t.Fatalf("stdout misses the providers check: %q", stdout.String())
+	}
+}
+
 func TestDoctorLiveRequiresLiveFlag(t *testing.T) {
 	env, stdout, stderr, cfgPath, dataDir := initTestEnv(t)
 
@@ -274,5 +364,181 @@ func TestDoctorLiveRequiresLiveFlag(t *testing.T) {
 		if !strings.Contains(stderr.String(), "require --live") {
 			t.Fatalf("%v stderr misses hint: %q", args, stderr.String())
 		}
+	}
+}
+
+// strictSetup writes the quick profile and returns an env with both required
+// secrets set plus a registry that passes the provider check.
+func strictSetup(t *testing.T) (Env, *bytes.Buffer, *bytes.Buffer, string, string) {
+	t.Helper()
+	env, stdout, stderr := testEnv(t)
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	dataDir := filepath.Join(dir, "data")
+	env.Getenv = func(name string) string {
+		switch name {
+		case localAPITokenEnv, config.SecretEnvName(config.Default().Providers.Decision.SecretRef):
+			return "dummy-token-value"
+		default:
+			return ""
+		}
+	}
+	env.NewRegistry = liveRegistry(t, okDecision(), okCandles(), nil)
+	if code := runArgs(env, "init", "--quick", "--config", cfgPath, "--data-dir", dataDir); code != exitOK {
+		t.Fatalf("init --quick = %d, stderr=%s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	return env, stdout, stderr, cfgPath, dataDir
+}
+
+func mutateConfig(t *testing.T, cfgPath string, mut func(*config.Config)) {
+	t.Helper()
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	mut(&cfg)
+	if err := config.Save(cfgPath, cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+}
+
+func TestDoctorStrictReady(t *testing.T) {
+	env, stdout, stderr, cfgPath, dataDir := strictSetup(t)
+
+	if code := runArgs(env, "doctor", "--strict", "--config", cfgPath, "--data-dir", dataDir); code != exitOK {
+		t.Fatalf("doctor --strict = %d, stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	got := stdout.String()
+	for _, want := range []string{
+		"ok trend: signals.trend.enabled=true",
+		"ok symbols: signals.trend.symbols has 10 symbols",
+		"ok timeframe: signals.trend.timeframe=15m",
+		"ok label_interval: outcome.labelIntervalSec=300s",
+		"ok decision_secret: VENDING_SECRET_CONN_DREX_APIKEY is set",
+		"profile ready; volume unverified",
+		"next: vend signals estimate --days 7",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("stdout misses %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "G1 ready") {
+		t.Fatalf("doctor --strict promised G1: %q", got)
+	}
+}
+
+func TestDoctorStrictJSON(t *testing.T) {
+	env, stdout, stderr, cfgPath, dataDir := strictSetup(t)
+
+	if code := runArgs(env, "doctor", "--strict", "--json",
+		"--config", cfgPath, "--data-dir", dataDir); code != exitOK {
+		t.Fatalf("doctor --strict --json = %d, stderr=%s", code, stderr.String())
+	}
+	var res struct {
+		OK             bool     `json:"ok"`
+		Strict         bool     `json:"strict"`
+		Profile        string   `json:"profile"`
+		VolumeVerified bool     `json:"volumeVerified"`
+		NextSteps      []string `json:"nextSteps"`
+		Checks         []struct {
+			Name   string `json:"name"`
+			OK     bool   `json:"ok"`
+			Detail string `json:"detail"`
+		} `json:"checks"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &res); err != nil {
+		t.Fatalf("decode doctor JSON %q: %v", stdout.String(), err)
+	}
+	if !res.OK || !res.Strict {
+		t.Fatalf("doctor JSON ok/strict = %v/%v: %+v", res.OK, res.Strict, res.Checks)
+	}
+	if res.Profile != config.QuickProfileName {
+		t.Fatalf("profile = %q, want %q", res.Profile, config.QuickProfileName)
+	}
+	if res.VolumeVerified {
+		t.Fatal("volumeVerified = true; offline doctor cannot verify volume")
+	}
+	if len(res.NextSteps) != 1 || res.NextSteps[0] != "vend signals estimate --days 7" {
+		t.Fatalf("nextSteps = %v, want [vend signals estimate --days 7]", res.NextSteps)
+	}
+	found := false
+	for _, c := range res.Checks {
+		if c.Name == "decision_secret" && c.OK {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("checks miss an ok decision_secret: %+v", res.Checks)
+	}
+}
+
+func TestDoctorStrictFailures(t *testing.T) {
+	cases := []struct {
+		name   string
+		setenv func(*Env)
+		mut    func(*config.Config)
+		want   string
+	}{
+		{
+			name:   "missing local api token",
+			setenv: func(e *Env) { e.Getenv = func(string) string { return "" } },
+			want:   localAPITokenEnv,
+		},
+		{
+			name: "missing decision secret",
+			setenv: func(e *Env) {
+				e.Getenv = func(name string) string {
+					if name == localAPITokenEnv {
+						return "dummy-token-value"
+					}
+					return ""
+				}
+			},
+			want: "VENDING_SECRET_CONN_DREX_APIKEY",
+		},
+		{
+			name: "five symbols",
+			mut: func(c *config.Config) {
+				c.Signals.Trend.Symbols = c.Signals.Trend.Symbols[:5]
+			},
+			want: "signals.trend.symbols",
+		},
+		{
+			name: "trend disabled",
+			mut:  func(c *config.Config) { c.Signals.Trend.Enabled = false },
+			want: "signals.trend.enabled",
+		},
+		{
+			name: "short timeframe",
+			mut:  func(c *config.Config) { c.Signals.Trend.Timeframe = "1m" },
+			want: "signals.trend.timeframe",
+		},
+		{
+			name: "label interval too long",
+			mut:  func(c *config.Config) { c.Outcome.LabelIntervalSec = 600 },
+			want: "outcome.labelIntervalSec",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env, stdout, _, cfgPath, dataDir := strictSetup(t)
+			if tc.setenv != nil {
+				tc.setenv(&env)
+			}
+			if tc.mut != nil {
+				mutateConfig(t, cfgPath, tc.mut)
+			}
+			if code := runArgs(env, "doctor", "--strict", "--config", cfgPath, "--data-dir", dataDir); code == exitOK {
+				t.Fatalf("doctor --strict = 0, want a failure; stdout=%s", stdout.String())
+			}
+			if got := stdout.String(); !strings.Contains(got, tc.want) {
+				t.Fatalf("stdout misses %q:\n%s", tc.want, got)
+			}
+			if strings.Contains(stdout.String(), "profile ready") {
+				t.Fatalf("failed doctor printed the ready line: %q", stdout.String())
+			}
+		})
 	}
 }

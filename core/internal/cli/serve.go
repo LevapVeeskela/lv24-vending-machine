@@ -139,7 +139,7 @@ func (r *runner) cmdServe(args []string) int {
 		return r.fail(jsonOut, exitGeneral, codeGeneral, err.Error(),
 			"check the vend wiring and retry", false, nil)
 	}
-	signals, err := shadowSignals(cfg.Signals.Trend, candle, deps)
+	signals, err := shadowSignals(cfg.Signals.Trend, cfg.Outcome.LabelIntervalSec, candle, deps)
 	if err != nil {
 		return r.fail(jsonOut, exitUsage, codeUsage, err.Error(),
 			"fix signals.trend settings via vend config validate", false, nil)
@@ -207,19 +207,23 @@ func (r *runner) cmdServe(args []string) int {
 }
 
 // shadowSignals builds the optional signal source for the shadow runner. It
+// forwards the venue and the outcome label granularity so the trend generator
+// stamps the configured exchange and enforces the label-window guard. It
 // returns a nil interface when the trend source is disabled: assigning a
 // typed nil *trend.Generator would make the interface non-nil and panic on
 // the first Step.
-func shadowSignals(tr config.TrendConfig, candle ports.CandleProvider, deps ports.Deps) (shadow.SignalSource, error) {
+func shadowSignals(tr config.TrendConfig, labelIntervalSec int, candle ports.CandleProvider, deps ports.Deps) (shadow.SignalSource, error) {
 	if !tr.Enabled {
 		return nil, nil
 	}
 	gen, err := trend.New(trend.Config{
-		Symbols:   tr.Symbols,
-		Timeframe: tr.Timeframe,
-		Fast:      tr.Fast,
-		Slow:      tr.Slow,
-		Sides:     tr.Sides,
+		Symbols:          tr.Symbols,
+		Timeframe:        tr.Timeframe,
+		Fast:             tr.Fast,
+		Slow:             tr.Slow,
+		Sides:            tr.Sides,
+		Venue:            tr.Venue,
+		LabelIntervalSec: labelIntervalSec,
 	}, candle, deps)
 	if err != nil {
 		return nil, err

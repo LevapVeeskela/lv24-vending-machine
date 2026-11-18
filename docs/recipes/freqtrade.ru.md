@@ -328,13 +328,13 @@ class VendShadowGate(IStrategy):
             # be read. The gate accepts finite numbers only.
             "state": self._market_state(pair),
         }
-        sender = self._sender()
-        if sender is not None:
-            try:
+        try:
+            sender = self._sender()
+            if sender is not None:
                 # Bounded queue, no network and no waiting in the callback.
                 sender.submit(payload)
-            except Exception:  # noqa: BLE001 - the gate must never block a trade
-                pass
+        except Exception:  # noqa: BLE001 - the gate must never block a trade
+            pass
         # Shadow mode: entries are always allowed; the verdict is journaled.
         return True
 ```

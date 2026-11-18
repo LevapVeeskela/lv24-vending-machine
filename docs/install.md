@@ -1,5 +1,7 @@
 # Install `vend`
 
+[Русская версия](install.ru.md)
+
 Two paths to a working `vend`:
 
 1. **Prebuilt binary** from the GitHub release page (fastest, once the release
@@ -27,7 +29,8 @@ Two paths to a working `vend`:
 Open the releases list:
 
 - <https://github.com/LevapVeeskela/lv24-vending-machine/releases> — the
-  releases list; the `0.1.0-m1` pre-release is published here.
+  releases list; the `0.1.0-m1` pre-release appears here after the owner
+  publishes it.
 - <https://github.com/LevapVeeskela/lv24-vending-machine/releases/latest> —
   appears only after a stable release and does not point at a pre-release.
 
@@ -112,19 +115,25 @@ Rename-Item .\vend_windows_amd64.exe vend.exe
 # vend <version>
 ```
 
-Then create the config and journal:
+Then create the config and journal. The G1 profile enables the trend source,
+so a fresh install is not silent:
 
 ```bash
-./vend init
-./vend doctor
+./vend init --quick
+./vend doctor --strict
 ```
 
-`init` prints the config and data paths; `doctor` checks them offline. Run
-`init` before `doctor`: without a config `doctor` fails the config, database,
-journal, providers and policy checks and exits 1. Continue with
+Plain `./vend init` writes the same file with the trend source disabled and no
+symbols; use it only when your own bot sends the signals. Windows PowerShell:
+`.\vend.exe init --quick` and `.\vend.exe doctor --strict`.
+
+`init` prints the config and data paths plus the export commands; `doctor
+--strict` checks the offline G1 invariants (trend, ten symbols, 15m, secrets)
+but never claims the signal volume is verified — run `vend signals estimate
+--days 7` for that. Continue with
 [quickstart](quickstart.md) (or the 15 minute live check in
-[runbook-live-smoke.md](runbook-live-smoke.md)). The offline Path B in
-quickstart starts with the same `init`; skip that line when you have just run
+[runbook-live-smoke.md](runbook-live-smoke.md)). The full walkthrough in
+quickstart starts with its own `init`; skip that line when you have just run
 `init` here — a second run exits 4 with `config already exists`. For the
 multi-day G1 run (≥ 7 days, ≥ 100 labels) see [run-7-days.md](run-7-days.md).
 
@@ -192,7 +201,7 @@ go build -o vend ./core/cmd/vend
 # vend <version>
 ```
 
-On Windows build `-o vend.exe` and run `.\vend.exe`.
+On Windows build with `-o vend.exe` and run `.\vend.exe`.
 
 Notes:
 
@@ -200,17 +209,19 @@ Notes:
   and tools modules.
 - The build downloads Go modules only; it does not publish anything and does not
   need the release tool.
-- The version string of a source build is `dev` unless it was stamped with
+- A source build prints the `version` value from `core/cmd/vend/main.go`, which
+  is `0.1.0-m1` in this tree. `tools/release` stamps the same value with
   `-ldflags "-X main.version=<version>"`.
 
 ## Verify the install
 
 ```bash
 ./vend version          # prints the version
-./vend init             # writes config + journal on first use
-./vend doctor           # offline: config, data dir, database, journal, providers, secret presence, policy hash
+./vend init --quick     # writes the G1 profile config + journal on first use
+./vend doctor --strict  # offline: config, data dir, database, journal, providers, secrets, policy hash, G1 profile
 ```
 
-`doctor` exits 0 when every offline check passes and 1 when one fails. Network
-probes are opt-in with `vend doctor --live`; see the
+`doctor --strict` exits 0 when every offline check passes and 1 when one fails.
+It does not verify the signal volume; `vend signals estimate --days 7` does.
+Network probes are opt-in with `vend doctor --live`; see the
 [runbook](runbook-live-smoke.md) for what each live code means.

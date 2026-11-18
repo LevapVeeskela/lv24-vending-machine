@@ -1002,6 +1002,10 @@ type ModelBreakdown struct {
 	// Brier corresponds to the JSON schema field "brier".
 	Brier float64 `json:"brier"`
 
+	// Labeled outcomes of this model with a recorded pass probability. Brier and ece
+	// need at least 30 pairs to be meaningful.
+	CalibrationCount *int `json:"calibrationCount,omitempty,omitzero"`
+
 	// CostUSD corresponds to the JSON schema field "costUsd".
 	CostUSD Decimal `json:"costUsd"`
 
@@ -1052,6 +1056,9 @@ func (j *ModelBreakdown) UnmarshalJSON(value []byte) error {
 	}
 	if 0 > plain.Brier {
 		return fmt.Errorf("field %s: must be >= %v", "brier", 0)
+	}
+	if plain.CalibrationCount != nil && 0 > *plain.CalibrationCount {
+		return fmt.Errorf("field %s: must be >= %v", "calibrationCount", 0)
 	}
 	if 0 > plain.Count {
 		return fmt.Errorf("field %s: must be >= %v", "count", 0)
@@ -1547,6 +1554,9 @@ type Report struct {
 	// DecisionCostUSD corresponds to the JSON schema field "decisionCostUsd".
 	DecisionCostUSD Decimal `json:"decisionCostUsd"`
 
+	// G1 corresponds to the JSON schema field "g1".
+	G1 *ReportG1 `json:"g1,omitempty,omitzero"`
+
 	// See common $defs/Timestamp. Inlined so the generated Go field is time.Time.
 	GeneratedAt time.Time `json:"generatedAt"`
 
@@ -1579,6 +1589,10 @@ type Report struct {
 
 	// Sufficient corresponds to the JSON schema field "sufficient".
 	Sufficient bool `json:"sufficient"`
+
+	// True when the journal contains events written by vend demo; such a report is
+	// never G1 evidence.
+	Synthetic *bool `json:"synthetic,omitempty,omitzero"`
 
 	// VerdictCounts corresponds to the JSON schema field "verdictCounts".
 	VerdictCounts ReportVerdictCounts `json:"verdictCounts"`
@@ -1698,6 +1712,11 @@ type ReportComparisons struct {
 	// CalibrationCount corresponds to the JSON schema field "calibrationCount".
 	CalibrationCount *int `json:"calibrationCount,omitempty,omitzero"`
 
+	// Whether calibrationCount reached the minimum that makes brier, ece, auc,
+	// brierSkillScore and reliability trustworthy. When false those fields are not
+	// meaningful and the CLI prints n/a.
+	CalibrationSufficient *bool `json:"calibrationSufficient,omitempty,omitzero"`
+
 	// ConstantBrier corresponds to the JSON schema field "constantBrier".
 	ConstantBrier *float64 `json:"constantBrier,omitempty,omitzero"`
 
@@ -1785,6 +1804,103 @@ func (j *ReportComparisons) UnmarshalJSON(value []byte) error {
 		return fmt.Errorf("field %s: must be >= %v", "ece", 0)
 	}
 	*j = ReportComparisons(plain)
+	return nil
+}
+
+type ReportG1 struct {
+	// ActiveDays corresponds to the JSON schema field "activeDays".
+	ActiveDays int `json:"activeDays"`
+
+	// Eligible corresponds to the JSON schema field "eligible".
+	Eligible bool `json:"eligible"`
+
+	// (horizonBars+1) x timeframe in hours; zero when the window is unknown.
+	ExpectedLabelIntervalHours float64 `json:"expectedLabelIntervalHours"`
+
+	// Labels corresponds to the JSON schema field "labels".
+	Labels int `json:"labels"`
+
+	// Entry signals whose labeling window expired without an outcome; negative when
+	// the window is unknown.
+	LabelsDue int `json:"labelsDue"`
+
+	// Age of the latest labeled outcome in hours; negative when the journal has no
+	// labeled outcome.
+	LastLabelAgeHours float64 `json:"lastLabelAgeHours"`
+
+	// MaxGapHours corresponds to the JSON schema field "maxGapHours".
+	MaxGapHours float64 `json:"maxGapHours"`
+
+	// Synthetic corresponds to the JSON schema field "synthetic".
+	Synthetic bool `json:"synthetic"`
+
+	// TargetDays corresponds to the JSON schema field "targetDays".
+	TargetDays int `json:"targetDays"`
+
+	// TargetLabels corresponds to the JSON schema field "targetLabels".
+	TargetLabels int `json:"targetLabels"`
+}
+
+// UnmarshalJSON implements json.Unmarshaler.
+func (j *ReportG1) UnmarshalJSON(value []byte) error {
+	var raw map[string]interface{}
+	if err := json.Unmarshal(value, &raw); err != nil {
+		return err
+	}
+	if _, ok := raw["activeDays"]; raw != nil && !ok {
+		return fmt.Errorf("field activeDays in ReportG1: required")
+	}
+	if _, ok := raw["eligible"]; raw != nil && !ok {
+		return fmt.Errorf("field eligible in ReportG1: required")
+	}
+	if _, ok := raw["expectedLabelIntervalHours"]; raw != nil && !ok {
+		return fmt.Errorf("field expectedLabelIntervalHours in ReportG1: required")
+	}
+	if _, ok := raw["labels"]; raw != nil && !ok {
+		return fmt.Errorf("field labels in ReportG1: required")
+	}
+	if _, ok := raw["labelsDue"]; raw != nil && !ok {
+		return fmt.Errorf("field labelsDue in ReportG1: required")
+	}
+	if _, ok := raw["lastLabelAgeHours"]; raw != nil && !ok {
+		return fmt.Errorf("field lastLabelAgeHours in ReportG1: required")
+	}
+	if _, ok := raw["maxGapHours"]; raw != nil && !ok {
+		return fmt.Errorf("field maxGapHours in ReportG1: required")
+	}
+	if _, ok := raw["synthetic"]; raw != nil && !ok {
+		return fmt.Errorf("field synthetic in ReportG1: required")
+	}
+	if _, ok := raw["targetDays"]; raw != nil && !ok {
+		return fmt.Errorf("field targetDays in ReportG1: required")
+	}
+	if _, ok := raw["targetLabels"]; raw != nil && !ok {
+		return fmt.Errorf("field targetLabels in ReportG1: required")
+	}
+	type Plain ReportG1
+	var plain Plain
+	if err := json.Unmarshal(value, &plain); err != nil {
+		return err
+	}
+	if 0 > plain.ActiveDays {
+		return fmt.Errorf("field %s: must be >= %v", "activeDays", 0)
+	}
+	if 0 > plain.ExpectedLabelIntervalHours {
+		return fmt.Errorf("field %s: must be >= %v", "expectedLabelIntervalHours", 0)
+	}
+	if 0 > plain.Labels {
+		return fmt.Errorf("field %s: must be >= %v", "labels", 0)
+	}
+	if 0 > plain.MaxGapHours {
+		return fmt.Errorf("field %s: must be >= %v", "maxGapHours", 0)
+	}
+	if 1 > plain.TargetDays {
+		return fmt.Errorf("field %s: must be >= %v", "targetDays", 1)
+	}
+	if 1 > plain.TargetLabels {
+		return fmt.Errorf("field %s: must be >= %v", "targetLabels", 1)
+	}
+	*j = ReportG1(plain)
 	return nil
 }
 

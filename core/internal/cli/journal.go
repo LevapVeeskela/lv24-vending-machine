@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/LevapVeeskela/lv24-vending-machine/core/domain"
@@ -153,6 +154,30 @@ const (
 	journalTailLimitMax = 1000
 )
 
+// journalTailKinds lists the accepted --kind values, sorted. It mirrors the
+// domain event constants: a new journal event kind must be added here, or
+// `journal tail --kind` rejects it with the list of the known kinds.
+var journalTailKinds = []string{
+	domain.EventArenaDecision,
+	domain.EventDecisionModelChanged,
+	domain.EventDecisionResponse,
+	domain.EventGateRequest,
+	domain.EventGateVerdict,
+	domain.EventNotifySent,
+	domain.EventOutcomeLabeled,
+	domain.EventOutcomeUnlabelable,
+}
+
+// isJournalTailKind reports whether kind is a known journal event kind.
+func isJournalTailKind(kind string) bool {
+	for _, k := range journalTailKinds {
+		if k == kind {
+			return true
+		}
+	}
+	return false
+}
+
 // journalTailEntry is one row of `vend journal tail --json`.
 type journalTailEntry struct {
 	Seq        int64           `json:"seq"`
@@ -187,6 +212,12 @@ func (r *runner) cmdJournalTail(args []string) int {
 			fmt.Sprintf("invalid --limit %d: must be between %d and %d",
 				*limit, journalTailLimitMin, journalTailLimitMax),
 			"pass --limit between 1 and 1000", false, nil)
+	}
+	if *kind != "" && !isJournalTailKind(*kind) {
+		return r.fail(jsonOut, exitUsage, codeUsage,
+			fmt.Sprintf("invalid --kind %q", *kind),
+			"allowed kinds: "+strings.Join(journalTailKinds, ", "), false,
+			map[string]any{"allowed": journalTailKinds})
 	}
 	dataDir, err := r.dataDir(g.dataDir)
 	if err != nil {

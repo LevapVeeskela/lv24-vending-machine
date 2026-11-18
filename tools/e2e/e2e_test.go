@@ -54,7 +54,8 @@ type gateResponse struct {
 
 // errorResponse is the machine-readable API error envelope.
 type errorResponse struct {
-	Code string `json:"code"`
+	Code    string `json:"code"`
+	Message string `json:"message"`
 }
 
 // stats mirrors GET /ctl/stats of smokestub.
@@ -235,10 +236,11 @@ func TestShadowGateE2E(t *testing.T) {
 		t.Fatalf("first response = %+v, want mode=shadow signalId=e2e-allow-1", allow)
 	}
 
-	// 2. A futures-style symbol is accepted. Klines are not requested before
-	// the labeling window closes, and the counter is keyed by BTCUSDT.
-	h.step("2: futures symbol")
-	sigB := newSignal(t, "e2e-allow-2", "BTC/USDT:USDT", "123457.001")
+	// 2. A dash-separated spot symbol is accepted and canonicalized. Klines
+	// are not requested before the labeling window closes, and the counter is
+	// keyed by BTCUSDT.
+	h.step("2: spot symbol format")
+	sigB := newSignal(t, "e2e-allow-2", "BTC-USDT", "123457.001")
 	status, raw = post(localToken, sigB)
 	requireStatus(t, status, http.StatusOK, raw)
 	var allowB gateResponse
@@ -248,6 +250,20 @@ func TestShadowGateE2E(t *testing.T) {
 	}
 	if got := getStats(t, client, stubBase); len(got.Klines) != 0 {
 		t.Fatalf("klines counters before the labeling window = %v, want none", got.Klines)
+	}
+
+	// 2b. A futures-style suffix is rejected before the provider is called:
+	// the spot candle source could never label it.
+	h.step("2b: futures symbol rejected")
+	futures := newSignal(t, "e2e-futures", "BTC/USDT:USDT", "123457.002")
+	status, raw = post(localToken, futures)
+	if status != http.StatusBadRequest {
+		t.Fatalf("futures symbol status = %d, want 400: %s", status, raw)
+	}
+	var futuresErr errorResponse
+	decode(t, raw, &futuresErr)
+	if futuresErr.Code != "bad_request" || !strings.Contains(futuresErr.Message, "futures") {
+		t.Fatalf("futures error = %+v, want bad_request with a futures hint", futuresErr)
 	}
 
 	// 3. The identical body replays the recorded decision without a new call.

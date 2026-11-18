@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -21,9 +22,16 @@ func testEnv(t *testing.T) (Env, *bytes.Buffer, *bytes.Buffer) {
 	t.Helper()
 	var stdout, stderr bytes.Buffer
 	return Env{
-		Stdout:  &stdout,
-		Stderr:  &stderr,
-		Getenv:  func(string) string { return "" },
+		Stdout: &stdout,
+		Stderr: &stderr,
+		Getenv: func(name string) string {
+			// doctor requires the loopback API token because serve cannot
+			// start without it; a missing-token test overrides Getenv.
+			if name == localAPITokenEnv {
+				return "test-token"
+			}
+			return ""
+		},
 		Version: "0.1.0-m0-test",
 		NewRegistry: func(cfg config.Config, logger *slog.Logger) (*registry.Registry, error) {
 			return registry.New(), nil
@@ -116,6 +124,7 @@ func TestCLIEndToEnd(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
+	env.NewRegistry = liveRegistry(t, okDecision(), okCandles(), nil)
 	if code := runArgs(env, "doctor", "--config", cfgPath, "--data-dir", dataDir); code != 0 {
 		t.Fatalf("doctor = %d, stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
@@ -236,6 +245,94 @@ func writeSignalRequest(t *testing.T, dir, src, signalID string) string {
 	return path
 }
 
+// writeRequestPrice copies a gate request fixture with a new price, keeping
+// the signalId so the journal sees a conflicting body.
+func writeRequestPrice(t *testing.T, dir, src, price string) string {
+	t.Helper()
+	raw, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatalf("read request fixture: %v", err)
+	}
+	var v map[string]any
+	if err := json.Unmarshal(raw, &v); err != nil {
+		t.Fatalf("decode request fixture: %v", err)
+	}
+	v["price"] = price
+	out, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("encode request: %v", err)
+	}
+	path := filepath.Join(dir, "changed-request.json")
+	if err := os.WriteFile(path, append(out, '\n'), 0o644); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+	return path
+}
+
+func TestWriteFileNew(t *testing.T) {
+	dir := t.TempDir()
+	dataDir := filepath.Join(dir, "data")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatalf("create data dir: %v", err)
+	}
+	out := filepath.Join(dir, "out.json")
+
+	if err := writeFileNew(out, []byte("one"), 0o600, newFileOptions{DataDir: dataDir}); err != nil {
+		t.Fatalf("write new file: %v", err)
+	}
+	if raw, err := os.ReadFile(out); err != nil || string(raw) != "one" {
+		t.Fatalf("new file = %q, err=%v", raw, err)
+	}
+
+	err := writeFileNew(out, []byte("two"), 0o600, newFileOptions{DataDir: dataDir})
+	if !errors.Is(err, errOutputExists) {
+		t.Fatalf("existing file error = %v, want errOutputExists", err)
+	}
+	if !strings.Contains(err.Error(), "--force") {
+		t.Fatalf("existing file error misses the --force hint: %v", err)
+	}
+	if raw, _ := os.ReadFile(out); string(raw) != "one" {
+		t.Fatalf("refused write changed the file: %q", raw)
+	}
+
+	if err := writeFileNew(out, []byte("two"), 0o600, newFileOptions{DataDir: dataDir, Force: true}); err != nil {
+		t.Fatalf("forced write: %v", err)
+	}
+	if raw, _ := os.ReadFile(out); string(raw) != "two" {
+		t.Fatalf("forced write = %q, want two", raw)
+	}
+
+	inside := filepath.Join(dataDir, "vending.db")
+	err = writeFileNew(inside, []byte("x"), 0o600, newFileOptions{DataDir: dataDir, Force: true})
+	if !errors.Is(err, errOutputInDataDir) {
+		t.Fatalf("data-dir path error = %v, want errOutputInDataDir", err)
+	}
+	if _, statErr := os.Stat(inside); !os.IsNotExist(statErr) {
+		t.Fatalf("data-dir path was written: %v", statErr)
+	}
+
+	// A sibling directory whose name starts with the data dir name is not
+	// inside it; the check must compare path elements, not string prefixes.
+	siblingDir := filepath.Join(dir, "data-out")
+	if err := os.MkdirAll(siblingDir, 0o755); err != nil {
+		t.Fatalf("create sibling dir: %v", err)
+	}
+	if err := writeFileNew(filepath.Join(siblingDir, "out.json"), []byte("ok"), 0o600,
+		newFileOptions{DataDir: dataDir}); err != nil {
+		t.Fatalf("sibling path was refused: %v", err)
+	}
+
+	// Escaping the data dir with ".." resolves outside and is allowed.
+	if err := writeFileNew(filepath.Join(dataDir, "..", "escaped.json"), []byte("ok"), 0o600,
+		newFileOptions{DataDir: dataDir}); err != nil {
+		t.Fatalf("escaped path was refused: %v", err)
+	}
+
+	if err := writeFileNew("", []byte("x"), 0o600, newFileOptions{}); err == nil {
+		t.Fatal("empty output path was accepted")
+	}
+}
+
 func TestVersionJSON(t *testing.T) {
 	env, stdout, stderr := testEnv(t)
 	if code := runArgs(env, "version", "--json"); code != 0 {
@@ -290,6 +387,7 @@ func TestConfigValidateMissingFileHint(t *testing.T) {
 
 func TestDoctorJSON(t *testing.T) {
 	env, stdout, stderr, cfgPath, dataDir := initTestEnv(t)
+	env.NewRegistry = liveRegistry(t, okDecision(), okCandles(), nil)
 
 	if code := runArgs(env, "doctor", "--json", "--config", cfgPath, "--data-dir", dataDir); code != 0 {
 		t.Fatalf("doctor --json = %d, stderr=%s", code, stderr.String())
@@ -493,5 +591,216 @@ func TestInvalidFixtureNoJournal(t *testing.T) {
 	}
 	if got := strings.TrimSpace(stdout.String()); got != "journal ok: 0 events" {
 		t.Fatalf("journal stdout = %q, want empty chain", got)
+	}
+}
+
+func TestHelp(t *testing.T) {
+	cases := []struct {
+		name  string
+		args  []string
+		wants []string
+	}{
+		{
+			name:  "long flag",
+			args:  []string{"--help"},
+			wants: []string{"usage: vend <command>", "gate test", "--data-dir", "exit codes"},
+		},
+		{
+			name:  "short flag",
+			args:  []string{"-h"},
+			wants: []string{"usage: vend <command>", "journal tail"},
+		},
+		{
+			name:  "help command",
+			args:  []string{"help"},
+			wants: []string{"usage: vend <command>", "outcomes label", "signals estimate"},
+		},
+		{
+			name:  "help topic",
+			args:  []string{"help", "gate"},
+			wants: []string{"gate test", "gate report"},
+		},
+		{
+			name:  "command flag",
+			args:  []string{"gate", "--help"},
+			wants: []string{"subcommands:", "offline fixture"},
+		},
+		{
+			name:  "subcommand flag",
+			args:  []string{"gate", "test", "--help"},
+			wants: []string{"--request FILE", "--fixture FILE", "--save-raw FILE"},
+		},
+		{
+			name:  "short subcommand flag with global",
+			args:  []string{"journal", "tail", "--json", "-h"},
+			wants: []string{"--kind KIND", "--limit N"},
+		},
+		{
+			name:  "config subcommand falls back to the parent page",
+			args:  []string{"config", "validate", "--help"},
+			wants: []string{"config path|get KEY|validate", "validate  parse and validate"},
+		},
+		{
+			name:  "status page",
+			args:  []string{"status", "--help"},
+			wants: []string{"policyHash", "updatedAt", "--data-dir"},
+		},
+		{
+			name:  "init topic",
+			args:  []string{"help", "init"},
+			wants: []string{"--force", "next commands"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env, stdout, stderr := testEnv(t)
+			if code := runArgs(env, tc.args...); code != exitOK {
+				t.Fatalf("%v = %d, want 0, stderr=%s", tc.args, code, stderr.String())
+			}
+			if stderr.Len() != 0 {
+				t.Fatalf("%v wrote to stderr: %s", tc.args, stderr.String())
+			}
+			got := stdout.String()
+			for _, want := range tc.wants {
+				if !strings.Contains(got, want) {
+					t.Fatalf("%v output misses %q:\n%s", tc.args, want, got)
+				}
+			}
+			if strings.Contains(got, "unknown") {
+				t.Fatalf("%v output reports an unknown command:\n%s", tc.args, got)
+			}
+		})
+	}
+}
+
+func TestHelpListsEveryCommandAndFlag(t *testing.T) {
+	env, stdout, _ := testEnv(t)
+	if code := runArgs(env, "--help"); code != exitOK {
+		t.Fatalf("--help = %d", code)
+	}
+	got := stdout.String()
+	for _, want := range []string{
+		"version", "init", "config path|get KEY|validate", "doctor",
+		"gate test", "gate report", "journal verify", "journal head", "journal tail",
+		"signals estimate", "outcomes label", "status", "serve", "help",
+		"--force", "--live", "--symbol", "--save-raw", "--request", "--fixture",
+		"--policy", "--include-backfill", "--share", "--out", "--kind", "--limit",
+		"--days", "--candles", "--addr", "--config", "--data-dir", "--json",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("root help misses %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestHelpUnknownTopic(t *testing.T) {
+	env, stdout, stderr := testEnv(t)
+	if code := runArgs(env, "help", "nope"); code != exitUsage {
+		t.Fatalf("help nope = %d, want %d", code, exitUsage)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("help nope stdout = %q, want empty", stdout.String())
+	}
+	got := stderr.String()
+	for _, want := range []string{"unknown help topic", "run vend help"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("help nope stderr misses %q: %q", want, got)
+		}
+	}
+}
+
+func TestInitNextSteps(t *testing.T) {
+	env, stdout, stderr := testEnv(t)
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	dataDir := filepath.Join(dir, "data")
+	if code := runArgs(env, "init", "--config", cfgPath, "--data-dir", dataDir); code != exitOK {
+		t.Fatalf("init = %d, stderr=%s", code, stderr.String())
+	}
+	got := stdout.String()
+	for _, want := range []string{
+		"config: " + cfgPath,
+		"data dir: " + dataDir,
+		"database: " + config.DBPath(dataDir),
+		"next steps:",
+		"vend config validate --config " + cfgPath,
+		"vend doctor --config " + cfgPath + " --data-dir " + dataDir,
+		"vend gate test",
+		"vend serve --config " + cfgPath + " --data-dir " + dataDir,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("init output misses %q:\n%s", want, got)
+		}
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	other := filepath.Join(dir, "other.json")
+	if code := runArgs(env, "init", "--json", "--config", other,
+		"--data-dir", filepath.Join(dir, "other-data")); code != exitOK {
+		t.Fatalf("init --json = %d, stderr=%s", code, stderr.String())
+	}
+	var res struct {
+		NextSteps []string `json:"nextSteps"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &res); err != nil {
+		t.Fatalf("decode init JSON %q: %v", stdout.String(), err)
+	}
+	if len(res.NextSteps) != 4 || !strings.Contains(res.NextSteps[3], "serve") {
+		t.Fatalf("init JSON nextSteps = %v, want four steps ending with serve", res.NextSteps)
+	}
+}
+
+func TestGateConflictExitCode(t *testing.T) {
+	env, stdout, stderr, cfgPath, dataDir := initTestEnv(t)
+	req := testdataRel("gate-request.json")
+	fixture := testdataRel("decision-response.json")
+	first := []string{"gate", "test",
+		"--config", cfgPath, "--data-dir", dataDir,
+		"--request", req, "--fixture", fixture}
+	if code := runArgs(env, first...); code != exitOK {
+		t.Fatalf("gate test = %d, stderr=%s", code, stderr.String())
+	}
+
+	// Same signalId with a changed body is a state conflict, not a general error.
+	changed := writeRequestPrice(t, t.TempDir(), req, "67432.51")
+	jsonArgs := []string{"gate", "test", "--json",
+		"--config", cfgPath, "--data-dir", dataDir,
+		"--request", changed, "--fixture", fixture}
+	if code := runArgs(env, jsonArgs...); code != exitConflict {
+		t.Fatalf("gate test conflict = %d, want %d, stderr=%s",
+			code, exitConflict, stderr.String())
+	}
+	var envelope struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(stderr.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode conflict envelope %q: %v", stderr.String(), err)
+	}
+	if envelope.Code != codeConflict {
+		t.Fatalf("conflict code = %q, want %q", envelope.Code, codeConflict)
+	}
+	if strings.HasPrefix(envelope.Message, "conflict: ") || strings.Contains(envelope.Message, "conflict: conflict") {
+		t.Fatalf("conflict message is double-prefixed: %q", envelope.Message)
+	}
+	if !strings.Contains(envelope.Message, "signalId already used") {
+		t.Fatalf("conflict message = %q, want the flow reason", envelope.Message)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := runArgs(env, "gate", "test",
+		"--config", cfgPath, "--data-dir", dataDir,
+		"--request", changed, "--fixture", fixture); code != exitConflict {
+		t.Fatalf("gate test conflict human = %d, want %d, stderr=%s",
+			code, exitConflict, stderr.String())
+	}
+	human := stderr.String()
+	if strings.Contains(human, "vend: conflict:") {
+		t.Fatalf("human conflict error is double-prefixed: %q", human)
+	}
+	if !strings.Contains(human, "signalId already used") {
+		t.Fatalf("human conflict error misses the reason: %q", human)
 	}
 }

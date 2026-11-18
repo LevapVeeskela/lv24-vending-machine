@@ -5,6 +5,7 @@
 package config
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/LevapVeeskela/lv24-vending-machine/core/domain"
 )
@@ -169,6 +171,37 @@ func Default() Config {
 	}
 }
 
+// Quick-start profile constants. The profile keeps the default gate,
+// providers, fast/slow and fee values; only the signal source changes.
+const (
+	// QuickProfileName names the config written by init --quick.
+	QuickProfileName = "g1-10x15m"
+	// QuickTimeframe is the profile candle timeframe.
+	QuickTimeframe = "15m"
+	// QuickMinSymbols is the minimum symbol count doctor --strict accepts.
+	QuickMinSymbols = 10
+)
+
+// quickSymbols is the liquid Binance spot USDT basket of the quick profile.
+var quickSymbols = []string{
+	"BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
+	"DOGEUSDT", "ADAUSDT", "LINKUSDT", "AVAXUSDT", "LTCUSDT",
+}
+
+// QuickProfile returns the G1 quick-start config: the trend source enabled on
+// ten USDT symbols at 15m with both sides, and the default gate, providers and
+// fee settings. A 15m candle holds two 300s label windows, as Validate
+// requires; init --quick writes this profile so a new install is not silent.
+func QuickProfile() Config {
+	c := Default()
+	c.Signals.Trend.Enabled = true
+	c.Signals.Trend.Symbols = append([]string(nil), quickSymbols...)
+	c.Signals.Trend.Timeframe = QuickTimeframe
+	c.Signals.Trend.Sides = []string{"buy", "sell"}
+	c.Outcome.LabelIntervalSec = 300
+	return c
+}
+
 // Validate checks the configuration and returns a *domain.Error with
 // CodeInvalidRequest on the first violation.
 func (c Config) Validate() error {
@@ -265,6 +298,19 @@ func (c Config) Validate() error {
 		if strings.TrimSpace(tr.Timeframe) == "" {
 			return invalid("signals.trend.timeframe must not be empty")
 		}
+		interval, err := domain.ParseTimeframe(tr.Timeframe)
+		if err != nil {
+			return invalid(fmt.Sprintf("signals.trend.timeframe %q is invalid: %v", tr.Timeframe, err))
+		}
+		// The trend generator labels a signal against the outcome labeler,
+		// so one candle must be able to hold two label windows. The same
+		// guard exists in trend.New; validating it here makes config
+		// validate reject the file before serve starts.
+		if min := 2 * time.Duration(c.Outcome.LabelIntervalSec) * time.Second; interval < min {
+			return invalid(fmt.Sprintf(
+				"signals.trend.timeframe %q is shorter than twice outcome.labelIntervalSec (%s)",
+				tr.Timeframe, min))
+		}
 		if tr.Fast <= 0 {
 			return invalid("signals.trend.fast must be > 0")
 		}
@@ -343,16 +389,28 @@ func isLoopbackHTTPURL(s string) bool {
 	return true
 }
 
-// Load reads the JSON config at path. A missing file is an error.
+// utf8BOM is the byte-order mark some Windows editors put in front of JSON.
+// encoding/json does not skip it, so Load strips it before decoding.
+const utf8BOM = "\xef\xbb\xbf"
+
+// Load reads the JSON config at path. A missing file is an error. A UTF-8
+// byte-order mark is ignored so a file saved by a Windows editor still loads.
 func Load(path string) (Config, error) {
 	var c Config
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return Config{}, fmt.Errorf("config: read %s: %w", path, err)
 	}
+	hadBOM := bytes.HasPrefix(raw, []byte(utf8BOM))
+	if hadBOM {
+		raw = raw[len(utf8BOM):]
+	}
 	if err := json.Unmarshal(raw, &c); err != nil {
-		return Config{}, domain.WrapError(domain.CodeInvalidRequest,
-			fmt.Sprintf("config: invalid JSON in %s", path), err)
+		msg := fmt.Sprintf("config: invalid JSON in %s", path)
+		if hadBOM {
+			msg += " (file has BOM)"
+		}
+		return Config{}, domain.WrapError(domain.CodeInvalidRequest, msg, err)
 	}
 	return c, nil
 }

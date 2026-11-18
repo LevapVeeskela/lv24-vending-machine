@@ -56,6 +56,11 @@
       "type": "integer",
       "minimum": 0
     },
+    "synthetic": {
+      "description": "True when the journal contains events written by vend demo; such a report is never G1 evidence.",
+      "type": "boolean"
+    },
+    "g1": { "$ref": "#/$defs/ReportG1" },
     "assumptions": { "$ref": "#/$defs/ReportAssumptions" },
     "arena": { "$ref": "#/$defs/ArenaReport" }
   },
@@ -87,7 +92,11 @@
         "constantBrier": { "type": "number", "minimum": 0, "maximum": 1 },
         "brierSkillScore": { "type": "number" },
         "auc": { "type": "number", "minimum": 0, "maximum": 1 },
-        "calibrationCount": { "type": "integer", "minimum": 0 }
+        "calibrationCount": { "type": "integer", "minimum": 0 },
+        "calibrationSufficient": {
+          "description": "Whether calibrationCount reached the minimum that makes brier, ece, auc, brierSkillScore and reliability trustworthy. When false those fields are not meaningful and the CLI prints n/a.",
+          "type": "boolean"
+        }
       }
     },
     "ReliabilityBucket": {
@@ -110,6 +119,11 @@
         "count": { "type": "integer", "minimum": 0 },
         "brier": { "type": "number", "minimum": 0, "maximum": 1 },
         "ece": { "type": "number", "minimum": 0, "maximum": 1 },
+        "calibrationCount": {
+          "description": "Labeled outcomes of this model with a recorded pass probability. Brier and ece need at least 30 pairs to be meaningful.",
+          "type": "integer",
+          "minimum": 0
+        },
         "netReturnSum": { "$ref": "../common/v1.json#/$defs/Decimal" },
         "costUsd": { "$ref": "../common/v1.json#/$defs/Decimal" },
         "avgNetReturn": { "$ref": "../common/v1.json#/$defs/Decimal" }
@@ -136,6 +150,33 @@
         "containsZero": { "type": "boolean" },
         "bootstrapReps": { "type": "integer", "minimum": 0 },
         "days": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "ReportG1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["labels", "targetLabels", "activeDays", "targetDays", "maxGapHours", "eligible", "synthetic", "lastLabelAgeHours", "expectedLabelIntervalHours", "labelsDue"],
+      "properties": {
+        "labels": { "type": "integer", "minimum": 0 },
+        "targetLabels": { "type": "integer", "minimum": 1 },
+        "activeDays": { "type": "integer", "minimum": 0 },
+        "targetDays": { "type": "integer", "minimum": 1 },
+        "maxGapHours": { "type": "number", "minimum": 0 },
+        "eligible": { "type": "boolean" },
+        "synthetic": { "type": "boolean" },
+        "lastLabelAgeHours": {
+          "description": "Age of the latest labeled outcome in hours; negative when the journal has no labeled outcome.",
+          "type": "number"
+        },
+        "expectedLabelIntervalHours": {
+          "description": "(horizonBars+1) x timeframe in hours; zero when the window is unknown.",
+          "type": "number",
+          "minimum": 0
+        },
+        "labelsDue": {
+          "description": "Entry signals whose labeling window expired without an outcome; negative when the window is unknown.",
+          "type": "integer"
+        }
       }
     },
     "ReportAssumptions": {
