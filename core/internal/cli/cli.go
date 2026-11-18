@@ -144,6 +144,8 @@ func Run(env Env) int {
 		return r.cmdVersion(args[1:])
 	case "init":
 		return r.cmdInit(args[1:])
+	case "demo":
+		return r.cmdDemo(args[1:])
 	case "config":
 		return r.cmdConfig(args[1:])
 	case "doctor":
@@ -163,7 +165,7 @@ func Run(env Env) int {
 	default:
 		r.fail(false, exitUsage, codeUsage,
 			fmt.Sprintf("unknown command %q", args[0]),
-			"run vend with one of: version, init, config, doctor, gate, journal, signals, serve, outcomes, status, help", false, nil)
+			"run vend with one of: version, init, demo, config, doctor, gate, journal, signals, serve, outcomes, status, help", false, nil)
 		return exitUsage
 	}
 }
