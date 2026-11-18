@@ -268,6 +268,19 @@ func TestParityReport(t *testing.T) {
 		BackfillExcluded:     2,
 		Days:                 7,
 		ActiveDays:           5,
+		Synthetic:            true,
+		G1: &domain.ReportG1{
+			Labels:                     100,
+			TargetLabels:               100,
+			ActiveDays:                 7,
+			TargetDays:                 7,
+			MaxGapHours:                2.5,
+			Eligible:                   true,
+			Synthetic:                  true,
+			LastLabelAgeHours:          1.5,
+			ExpectedLabelIntervalHours: 3,
+			LabelsDue:                  0,
+		},
 		Assumptions: &domain.ReportAssumptions{
 			HorizonBars:      12,
 			FeeBpsRoundTrip:  20,
@@ -348,6 +361,9 @@ func TestParityReport(t *testing.T) {
 	}
 	if c.Days == nil || *c.Days != 7 || c.ActiveDays == nil || *c.ActiveDays != 5 {
 		t.Fatalf("window lost on the wire: %+v", c)
+	}
+	if c.Synthetic == nil || !*c.Synthetic || c.G1 == nil || c.G1.Labels != 100 || !c.G1.Eligible || c.G1.MaxGapHours != 2.5 {
+		t.Fatalf("G1 block lost on the wire: synthetic=%v g1=%+v", c.Synthetic, c.G1)
 	}
 	if string(c.DecisionCostUSD) != "0.0003024" {
 		t.Fatalf("money lost on the wire: %+v", c)
@@ -461,6 +477,9 @@ func TestParityReport(t *testing.T) {
 	}
 	if back.LabeledCount != d.LabeledCount || back.LatencyP50MS != 11 || back.LatencyP95MS != 38 {
 		t.Fatalf("reverse mismatch: %+v", back)
+	}
+	if !back.Synthetic || back.G1 == nil || back.G1.Labels != 100 || !back.G1.Eligible || back.G1.LabelsDue != 0 {
+		t.Fatalf("reverse G1 mismatch: synthetic=%v g1=%+v", back.Synthetic, back.G1)
 	}
 	if back.Comparisons == nil || back.Comparisons.Brier != 0.21 || len(back.Comparisons.ByModel) != 1 {
 		t.Fatalf("reverse comparisons mismatch: %+v", back.Comparisons)
