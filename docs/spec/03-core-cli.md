@@ -7,7 +7,10 @@ trend-сигналы, Telegram, арена моделей, `--share`, policy-ф�
 релизный инструмент). RC добавляет `doctor --live`, канонические символы,
 `entryLagMs`/`entryShifted`, `outcome.unlabelable`, группировку отчёта по
 (horizon, fee), обновлённый `--share`, оценку объёма `signals estimate`, поля
-окна `days`/`activeDays` в JSON-отчёте и операционную документацию. Зависит от:
+окна `days`/`activeDays` в JSON-отчёте и операционную документацию. Phase B
+добавляет `init --quick`, `doctor --strict`, `vend demo` и блок G1
+(`labels`, `active days`, `max gap`, `labelsDue`) в `status`/`report`.
+Зависит от:
 `01-architecture.md`, `02-monorepo.md`.
 
 > Реализовано в M0/M1 — см. §2.0. Подразделы §2.1–§2.10 описывают целевую
@@ -55,9 +58,10 @@ Application Support` на macOS): `vending.db` и `shadow-status.json` в M1; `r
 ```bash
 vend help [COMMAND]
 vend version [--json]
-vend init [--config FILE] [--data-dir DIR] [--force] [--json]
+vend init [--quick] [--config FILE] [--data-dir DIR] [--force] [--json]
 vend config path|get KEY|validate [--config FILE] [--data-dir DIR] [--json]
-vend doctor [--live] [--symbol SYMBOL] [--save-raw FILE] [--config FILE] [--data-dir DIR] [--json]
+vend doctor [--strict] [--live] [--symbol SYMBOL] [--save-raw FILE] [--config FILE] [--data-dir DIR] [--json]
+vend demo [--data-dir DIR] [--json] [--keep]
 vend gate test --request FILE [--fixture FILE] [--save-raw FILE] [--force] [--config FILE] [--data-dir DIR] [--json]
 vend gate report [--policy HASH] [--include-backfill] [--share [--out FILE [--force]]] [--allow-broken-chain] [--json] [--config FILE] [--data-dir DIR]
 vend serve [--addr 127.0.0.1:8420] [--config FILE] [--data-dir DIR]
@@ -79,6 +83,20 @@ vend journal verify [--json] [--data-dir DIR]
 `vend gate test` и `vend serve` — с подставленными `--config`/`--data-dir`.
 `--json` добавляет к прежним полям аддитивное `nextSteps` (массив строк с теми же
 командами); существующие поля не менялись.
+
+`vend init --quick` пишет профиль `g1-10x15m`: `signals.trend.enabled=true`,
+десять USDT-символов (BTCUSDT, ETHUSDT, SOLUSDT, BNBUSDT, XRPUSDT, DOGEUSDT,
+ADAUSDT, LINKUSDT, AVAXUSDT, LTCUSDT), `signals.trend.timeframe=15m`,
+`signals.trend.sides=["buy","sell"]`, `outcome.labelIntervalSec=300`; гейт,
+провайдеры, fast/slow и комиссии остаются из defaults. Профиль проходит
+`config.Validate` (15m ≥ 2×300 с). Команда печатает шаблоны `export` для bash и
+`$env:` для PowerShell с именами `VENDING_SECRET_CONN_LOCAL_APITOKEN` и
+`VENDING_SECRET_<REF>` от `providers.decision.secretRef`; вместо значений стоит
+`<token>`, секреты на диск не пишутся. Затем печатается `next steps:`:
+`vend config validate`, `vend doctor --strict`, `vend serve`. `--json` добавляет
+аддитивные `profile` и `nextSteps`; полей под значения ключей в выводе нет.
+Существующий конфиг не перезаписывается (код 4) без `--force`; `--force`
+работает как у обычного `init`.
 
 Глобальные флаги `--config FILE`, `--data-dir DIR`, `--json` принимаются в любом
 месте аргументов (`--flag value` или `--flag=value`, одинарный или двойной дефис);
@@ -205,6 +223,20 @@ cost=<decimal> USD`; ABSTAIN с кодом `invalid_output` — FAIL пробы)
 атомарно (0600). `--json` отдаёт `{"ok":bool,"checks":[{name,ok,detail,live?}]}`;
 любая FAIL-проба даёт код возврата 1.
 
+`doctor --strict` добавляет к тем же офлайн-проверкам инварианты профиля G1 и
+возвращает 1 при первом нарушении, называя поле: `trend`
+(`signals.trend.enabled=true`), `symbols` (не меньше 10), `timeframe` (ровно
+`15m` и разбирается `domain.ParseTimeframe`), `label_interval`
+(`outcome.labelIntervalSec > 0` и не больше половины таймфрейма),
+`decision_secret` (`providers.decision.secretRef` непустой и его
+`VENDING_SECRET_*` задан). Токен `VENDING_SECRET_CONN_LOCAL_APITOKEN`
+проверяется всегда, как и в обычном `doctor`. При успехе печатается
+`profile ready; volume unverified` и `next: vend signals estimate --days 7`;
+строка «G1 ready» не печатается никогда — объём сигналов проверяется только
+сетью. `--json` добавляет `{"strict":true,"profile":...,
+"volumeVerified":false,"nextSteps":[...]}`. Без `--strict` поведение прежнее:
+отсутствие секрета decision-провайдера остаётся предупреждением.
+
 `outcomes label`: для каждого entry-запроса (`intentKind: entry`) без метки —
 свечи запрашиваются от начала бара, в котором лежит якорь, если оно позже `ts`
 сигнала; первый бар с OpenTime ≥ ts сигнала, закрывшийся после вердикта гейта
@@ -262,7 +294,41 @@ usage.latencyMs), блок арены при наличии `arena.decision`. С
 поле `entryLagMs` записано. Перед отчётом проверяется hash-chain журнала: разрыв
 даёт exit ≠ 0 с номером seq и причиной; `--allow-broken-chain` продолжает отчёт
 по прежнему поведению. Меньше 100 размеченных — `insufficient data`, сравнений
-НЕТ. При ≥ 100: суммы и средние net по группам all/ALLOW/REJECT/ABSTAIN,
+НЕТ.
+
+После `window:` печатается блок прогресса G1, построенный по журналу:
+
+```text
+g1: labels N/100, active days D/7, max gap Hh, eligible=yes|no
+last label age: <h>h|never
+expected label interval: <h>h|n/a
+labels due: <n>|unknown
+```
+
+`labels` — policy-scoped размеченные исходы; backfill не входит никогда, в том
+числе с `--include-backfill` (поэтому с этим флагом `labels` может быть меньше
+`labeled:`); `active days` — число разных UTC-дат с `gate.verdict`
+(ABSTAIN считается ответом), а не с `gate.request`; `max gap` — самая длинная
+пауза между соседними вердиктами (порог непрерывности 36 ч, константа);
+`eligible` — true только при `labels ≥ 100`, `activeDays ≥ 7`,
+`maxGapHours ≤ 36` и несинтетическом журнале; `last label age` — возраст
+последнего `outcome.labeled` (`never`, если меток нет); `expected label
+interval` — `(horizonBars + 1) × timeframe`; `labelsDue` — entry-сигналы, у
+которых окно разметки истекло, а ни `outcome.labeled`, ни
+`outcome.unlabelable` нет (`unknown`, если окно нельзя вывести). Те же числа в
+`--json` — объект `g1` (`labels`, `targetLabels`, `activeDays`, `targetDays`,
+`maxGapHours`, `eligible`, `synthetic`, `lastLabelAgeHours`,
+`expectedLabelIntervalHours`, `labelsDue`) и верхнеуровневый `synthetic`.
+Синтетика: любое событие с `runId=demo` даёт `synthetic: true`, G1-счётчики
+обнуляются, human/`status` печатают `SYNTHETIC — not G1 evidence` и
+`g1: 0/100, 0/7`; `--share` на таком журнале — exit 2 с сообщением
+`synthetic journal is not G1 evidence`; `--json` отдаёт `synthetic: true`, но
+G1 не засчитывает. `--share` печатает те же числа строками `g1 labels`,
+`g1 active days`, `g1 max gap hours`, `g1 eligible`, `g1 labels due`,
+`g1 last label age hours`, `g1 expected label interval hours` (и
+`g1 synthetic: true (not G1 evidence)` для синтетики).
+
+При ≥ 100: суммы и средние net по группам all/ALLOW/REJECT/ABSTAIN,
 bootstrap-разница ALLOW−REJECT (95 % CI, 2000 прогонов, seed 42; интервал
 считается только при ≥ 30 наблюдений в каждой группе и ≥ 5 различных UTC-днях
 входа, иначе печатается точечная средняя и `insufficient group size` или
@@ -276,7 +342,8 @@ ECE, 10-бакетная кривая надёжности, разбивка п�
 `--policy <64-hex>` — метки и сравнения только для выбранной политики (счётчики
 вердиктов остаются по всему журналу, число решений других политик печатается
 отдельно); `--include-backfill` — включить поздние метки в сравнение (по
-умолчанию они только считаются). `--share` печатает обезличенную
+умолчанию они только считаются), но не в G1: счётчик меток G1 игнорирует
+backfill при любом флаге. `--share` печатает обезличенную
 markdown-сводку: версию, префикс policy (8 hex), число решений, `days` и
 `active days` по времени приёма `gate.request` (UTC; `days` — включительный
 интервал от первой до последней даты, `active days` — число разных дат), число
@@ -304,6 +371,10 @@ Discussions. В сводке нет символов, площадок, цен, 
 ещё нет) `policyHash`, `lastLabelAt`, `lastCycleError`, `updatedAt` и `lastSeq`
 опускаются как пустые, а не отдаются в виде `"0001-01-01T00:00:00Z"` или пустой
 строки; `events` и `labeled` по-прежнему считаются по журналу.
+Human-вывод печатает после `labeled:` тот же блок G1, что и `gate report`
+(`g1:`, `last label age`, `expected label interval`, `labels due`);
+`--json` добавляет объект `g1` с теми же полями и `synthetic`, построенный по
+журналу, а не по снимку раннера.
 
 Хэши журнала: все `hash`, `prevHash`, `policyHash`, `candlesHash` — 64 строчных hex БЕЗ
 префикса `sha256:`. Правило цепочки:
@@ -358,6 +429,21 @@ Discussions. В сводке нет символов, площадок, цен, 
 total:{signals, perDay}, verdict}`; отдельная схема для него в `contracts/` не
 заводится — служебные ответы CLI (version, doctor, status) схем не имеют.
 
+`vend demo [--data-dir DIR] [--json] [--keep]` — офлайн-демонстрация без
+провайдеров, сети и ключей. Команда создаёт временный каталог (если
+`--data-dir` не задан), пишет журнал с `runId=demo` за 7 UTC-дней, не меньше
+120 решений и не меньше 100 `outcome.labeled` с фиксированным seed и печатает
+полный human-отчёт того же builder'а, что и обычный журнал: вероятности и
+исходы детерминированы, Brier/ECE/AUC и counterfactual считаются реальным
+кодом. Баннер `SYNTHETIC — not real market data` стоит в начале и в каждом
+крупном разделе (минимум: заголовок, метрики, допущения). `--json` отдаёт
+`synthetic: true` и те же числа. `--share` не поддерживается: exit 2 с
+сообщением `synthetic journal is not G1 evidence`. Без `--keep` каталог
+удаляется; с `--keep` печатаются путь и подсказка `vend status --data-dir
+<path>`. Demo не вызывает провайдеров, не пишет за пределы своего каталога и
+не засчитывается в G1: `status --data-dir <demo>` показывает `SYNTHETIC` и
+`g1: 0/100, 0/7`. Отдельной JSON-схемы у команды нет.
+
 ### 2.0.2 Уведомления и арена
 
 `notify.telegram` (при `enabled`) шлёт через Bot API: смену фактической модели
@@ -410,8 +496,9 @@ windows/amd64, linux/amd64+arm64, darwin/amd64+arm64 в `dist/` и пишет
 
 ### 2.1 Онбординг
 
-Реализованы `vend init` (неинтерактивный, с defaults из §2.0; печатает next
-steps), `vend version` и `vend doctor` (§2.0); интерактивный init, шаблоны,
+Реализованы `vend init` (неинтерактивный, с defaults из §2.0; `--quick` —
+профиль G1; печатает next steps), `vend version` и `vend doctor` (§2.0;
+`--strict` — инварианты профиля G1); интерактивный init, шаблоны,
 `update` и `completion` — цель.
 
 ```bash

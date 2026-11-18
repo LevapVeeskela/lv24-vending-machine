@@ -1,4 +1,4 @@
-# LV24 Vending
+﻿# LV24 Vending
 
 [Русский](README.ru.md)
 
@@ -25,37 +25,74 @@ would have helped or hurt. It never places an order.
 
 ## Quick start
 
-Offline, no key, no network:
+### See it in 60 seconds — synthetic
 
 ```bash
 go build -o vend ./core/cmd/vend
+./vend demo
+```
+
+On Windows build `vend.exe` and call `.\vend.exe demo`.
+
+`vend demo` writes a synthetic week (7 UTC days, at least 120 decisions and 100
+labeled outcomes, fixed seed) into a temporary journal and prints the full
+report; every major section is marked `SYNTHETIC — not real market data`. It needs no
+key and no network, and it is never counted toward G1: the journal
+carries `runId=demo`, so `status` and `report` print `SYNTHETIC — not G1
+evidence` with `g1: 0/100, 0/7`, and `gate report --share` refuses it. `--keep`
+keeps the temporary directory and prints its path.
+
+### Your own gate in 5 minutes
+
+```bash
+./vend init --quick
+# init prints the exact export lines; set both variables in this shell:
+export VENDING_SECRET_CONN_LOCAL_APITOKEN='<token>'
+export VENDING_SECRET_CONN_DREX_APIKEY='<token>'
+./vend doctor --strict
+./vend serve
+```
+
+The quick profile `g1-10x15m` enables `signals.trend` on ten USDT symbols at
+`15m` with both sides — the plain `init` leaves the trend source off with no
+symbols, and a week then produces zero signals. `doctor --strict` checks the
+profile offline and ends with `profile ready; volume unverified`: it does not
+claim G1, because only `vend signals estimate --days 7` measures signal volume
+over the network. Before the week, run that estimate.
+
+Windows PowerShell:
+
+```powershell
+go build -o vend.exe ./core/cmd/vend
+.\vend.exe init --quick
+$env:VENDING_SECRET_CONN_LOCAL_APITOKEN = "<token>"
+$env:VENDING_SECRET_CONN_DREX_APIKEY = "<token>"
+.\vend.exe doctor --strict
+.\vend.exe serve
+```
+
+### Offline replay — no key
+
+```bash
 ./vend init
 ./vend gate test --request contracts/examples/gate-request.json \
   --fixture core/cmd/vend/testdata/decision-response.json
 ./vend gate report
 ```
 
-On Windows build `vend.exe` and call `.\vend.exe`:
+`gate test` replays a recorded decision response through the same flow as a live
+call and writes the same journal events; it validates the wiring and is not G1
+evidence. The full paths:
 
-```powershell
-go build -o vend.exe ./core/cmd/vend
-.\vend.exe init
-.\vend.exe gate test --request contracts/examples/gate-request.json --fixture core/cmd/vend/testdata/decision-response.json
-.\vend.exe gate report
-```
-
-`init` creates the config and the SQLite journal; `gate test` replays a
-recorded decision response through the same flow as a live call; `gate report`
-prints the counters. The full paths:
-
-- [Quickstart](docs/quickstart.md) — 15 minutes with a real decision key, or
-  the offline path above.
+- [Quickstart](docs/quickstart.md) — `vend demo` in 60 seconds, your own gate in
+  5 minutes with `init --quick`, or the detailed walkthrough with a real
+  decision key.
 - [Install](docs/install.md) — prebuilt binary or source build, checksums and
   the unsigned-binary warnings.
 - [Live smoke runbook](docs/runbook-live-smoke.md) — 15-minute live check with
   `doctor --live`, one manual 1m signal and one label.
-- [Seven days of operation](docs/run-7-days.md) — the multi-day shadow run and
-  the G1 criterion.
+- [Seven days of operation](docs/run-7-days.md) — the multi-day shadow run, the
+  G1 progress block and what counts as a failure.
 - [Troubleshooting](docs/troubleshooting.md) — the first-run messages, their
   causes and what to do.
 
@@ -69,6 +106,10 @@ instead of inventing a result:
 ```text
 verdicts: ALLOW=<n> REJECT=<n> ABSTAIN=<n> SKIP=<n>
 window: days=<n> active=<n>
+g1: labels <n>/100, active days <n>/7, max gap <h>h, eligible=<yes|no>
+last label age: <h>h|never
+expected label interval: <h>h|n/a
+labels due: <n>|unknown
 labeled: <n>
 awaiting labeling: <n>
 insufficient data: <n> labeled, need 100
@@ -93,6 +134,12 @@ nothing about the next trade.
 - **Shadow only.** The gate evaluates and journals; there is no order execution
   path. `live` is rejected by config validation; `paper` and `sandbox` are
   accepted by the config but have no OMS behind them yet.
+- **Demo is synthetic.** `vend demo` is a walkthrough, not evidence. Its journal
+  carries `runId=demo`; `status`/`report` print `SYNTHETIC — not G1 evidence`
+  with `g1: 0/100, 0/7`, and `gate report --share` refuses it.
+- **G1 progress is explicit.** `status` and `report` print `g1: labels N/100,
+  active days D/7, max gap Hh, eligible=yes/no` plus the age of the last label
+  and `labels due`. Seven dates with a gap above 36 hours are not continuous.
 - **Not done yet:** release publication, TradingView webhook adapter,
   desktop/web/mobile clients, paper/live execution, two-way Telegram bot.
 - **Verified environment.** The offline end-to-end rehearsal against the local
