@@ -25,37 +25,74 @@ LV24 Vending — локальный shadow-гейт для торговых си
 
 ## Быстрый старт
 
-Офлайн, без ключа и сети:
+### Посмотреть за 60 секунд — синтетика
 
 ```bash
 go build -o vend ./core/cmd/vend
+./vend demo
+```
+
+В Windows соберите `vend.exe` и вызывайте `.\vend.exe demo`.
+
+`vend demo` пишет синтетическую неделю (7 UTC-дней, не меньше 120 решений и 100
+размеченных исходов, фиксированный seed) во временный журнал и печатает полный
+отчёт; каждый крупный раздел помечен `SYNTHETIC — not real market data`. Ключ и сеть
+не нужны, и в G1 это не идёт: журнал несёт `runId=demo`, поэтому
+`status` и `report` печатают `SYNTHETIC — not G1 evidence` и `g1: 0/100, 0/7`, а
+`gate report --share` отказывает. `--keep` сохраняет временный каталог и
+печатает его путь.
+
+### Свой гейт за 5 минут
+
+```bash
+./vend init --quick
+# init печатает точные строки export; задайте обе переменные в этой оболочке:
+export VENDING_SECRET_CONN_LOCAL_APITOKEN='<token>'
+export VENDING_SECRET_CONN_DREX_APIKEY='<token>'
+./vend doctor --strict
+./vend serve
+```
+
+Профиль `g1-10x15m` включает `signals.trend` на десяти USDT-символах с `15m` и
+двумя сторонами — обычный `init` оставляет trend выключенным и без символов, и
+за неделю тогда не появится ни одного сигнала. `doctor --strict` проверяет
+профиль офлайн и заканчивает строкой `profile ready; volume unverified`: это не
+вердикт G1, объём сигналов измеряет только `vend signals estimate --days 7` по
+сети. Перед неделей выполните эту оценку.
+
+Windows PowerShell:
+
+```powershell
+go build -o vend.exe ./core/cmd/vend
+.\vend.exe init --quick
+$env:VENDING_SECRET_CONN_LOCAL_APITOKEN = "<token>"
+$env:VENDING_SECRET_CONN_DREX_APIKEY = "<token>"
+.\vend.exe doctor --strict
+.\vend.exe serve
+```
+
+### Офлайн-replay — без ключа
+
+```bash
 ./vend init
 ./vend gate test --request contracts/examples/gate-request.json \
   --fixture core/cmd/vend/testdata/decision-response.json
 ./vend gate report
 ```
 
-В Windows соберите `vend.exe` и вызывайте `.\vend.exe`:
+`gate test` проигрывает записанный ответ decision-провайдера через тот же поток,
+что и живой вызов, и пишет те же события журнала; он проверяет связку и не
+является доказательством G1. Полные пути:
 
-```powershell
-go build -o vend.exe ./core/cmd/vend
-.\vend.exe init
-.\vend.exe gate test --request contracts/examples/gate-request.json --fixture core/cmd/vend/testdata/decision-response.json
-.\vend.exe gate report
-```
-
-`init` создаёт конфиг и журнал SQLite; `gate test` проигрывает записанный ответ
-decision-провайдера через тот же поток, что и живой вызов; `gate report` печатает
-счётчики. Полные пути:
-
-- [Quickstart](docs/quickstart.ru.md) — 15 минут с настоящим ключом
-  decision-провайдера или офлайн-путь выше.
+- [Quickstart](docs/quickstart.ru.md) — `vend demo` за 60 секунд, свой гейт за
+  5 минут с `init --quick` или подробный разбор с настоящим ключом
+  decision-провайдера.
 - [Установка](docs/install.ru.md) — готовый бинарник или сборка из исходников,
   контрольные суммы и предупреждения о неподписанных бинарниках.
 - [Живая проверка](docs/runbook-live-smoke.ru.md) — 15-минутная проверка с
   `doctor --live`, одним ручным 1m-сигналом и одной меткой.
-- [Семь дней работы](docs/run-7-days.ru.md) — длительный shadow-прогон и критерий
-  G1.
+- [Семь дней работы](docs/run-7-days.ru.md) — длительный shadow-прогон, блок
+  прогресса G1 и что считать провалом.
 - [Типовые ошибки](docs/troubleshooting.ru.md) — сообщения первого запуска,
   причины и что делать.
 
@@ -69,6 +106,10 @@ decision-провайдера через тот же поток, что и жи�
 ```text
 verdicts: ALLOW=<n> REJECT=<n> ABSTAIN=<n> SKIP=<n>
 window: days=<n> active=<n>
+g1: labels <n>/100, active days <n>/7, max gap <h>h, eligible=<yes|no>
+last label age: <h>h|never
+expected label interval: <h>h|n/a
+labels due: <n>|unknown
 labeled: <n>
 awaiting labeling: <n>
 insufficient data: <n> labeled, need 100
@@ -93,6 +134,13 @@ insufficient data: <n> labeled, need 100
 - **Только shadow.** Гейт оценивает и пишет журнал; пути исполнения ордеров нет.
   Режим `live` отклоняется валидацией конфига; `paper` и `sandbox` конфиг
   принимает, но OMS за ними пока нет.
+- **Demo — синтетика.** `vend demo` — демонстрация, а не доказательство. Журнал
+  несёт `runId=demo`; `status`/`report` печатают `SYNTHETIC — not G1 evidence` и
+  `g1: 0/100, 0/7`, а `gate report --share` отказывает.
+- **Прогресс G1 виден явно.** `status` и `report` печатают `g1: labels N/100,
+  active days D/7, max gap Hh, eligible=yes/no`, возраст последней метки и
+  `labels due`. Семь дат с разрывом больше 36 часов непрерывной неделей не
+  считаются.
 - **Чего ещё нет:** публикации релиза, адаптера TradingView webhook,
   desktop/web/mobile-клиентов, paper/live-исполнения, двустороннего
   Telegram-бота.
