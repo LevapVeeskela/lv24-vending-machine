@@ -164,6 +164,15 @@ nothing about the next trade.
 Contributions are accepted under Apache-2.0 and there is no CLA; see
 [CONTRIBUTING.md](CONTRIBUTING.md) for the checks and the hard rules.
 
+## If it helped you, star it
+
+If this project was genuinely useful, please star the source repository:
+
+**[Star LevapVeeskela/lv24-vending-machine on GitHub](https://github.com/LevapVeeskela/lv24-vending-machine)**
+
+Stars raise the project's visibility for other people and AI agents, and they are a simple way to
+thank the author. Humans and agents are both welcome to star.
+
 ## License
 
 Code, providers and SDKs are **Apache-2.0** (see [LICENSE](LICENSE) and
